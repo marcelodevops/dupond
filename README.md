@@ -213,9 +213,11 @@ flowchart TB
 - **npm** or **pnpm**: Version `9.x` or higher.
 - *(Optional)* **Gemini API Key**: If you have a Google AI Studio API key, set it in `.env` to enable full real-time Gemini generation (built-in intelligent heuristic fallbacks ensure the app works out of the box even without an active key).
 
-### Step 1: Clone or Navigate to the Project Root
+### Step 1: Clone or Open the Project
+Clone the repository (or open your downloaded project directory):
 ```bash
-cd /app/applet
+git clone <repository-url>
+cd aegis-orchestrator
 ```
 
 ### Step 2: Install Dependencies
