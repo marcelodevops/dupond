@@ -10,20 +10,39 @@
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <script>
-      // Ignore WebSocket errors in AI Studio iframe environment where HMR is disabled
-      window.addEventListener('unhandledrejection', function(event) {
-        if (event.reason && (
-          (typeof event.reason.message === 'string' && event.reason.message.toLowerCase().includes('websocket')) ||
-          (typeof event.reason === 'string' && event.reason.toLowerCase().includes('websocket'))
-        )) {
-          event.preventDefault();
-        }
-      });
-      window.addEventListener('error', function(event) {
-        if (event.message && typeof event.message === 'string' && event.message.toLowerCase().includes('websocket')) {
-          event.preventDefault();
-        }
-      });
+      (function() {
+        // Intercept and cleanly suppress WebSocket disconnect errors from @vite/client
+        const isWsError = function(err) {
+          if (!err) return false;
+          const msg = (err.message || err.stack || String(err)).toLowerCase();
+          return msg.includes('websocket') || msg.includes('@vite/client') || msg.includes('closed without opened');
+        };
+
+        window.addEventListener('unhandledrejection', function(event) {
+          if (isWsError(event.reason)) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        window.onunhandledrejection = function(event) {
+          if (event && isWsError(event.reason)) {
+            event.preventDefault();
+            return true;
+          }
+        };
+
+        window.addEventListener('error', function(event) {
+          if (isWsError(event.error) || isWsError(event.message)) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+      })();
     </script>
   </head>
   <body>

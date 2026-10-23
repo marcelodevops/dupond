@@ -260,73 +260,76 @@ export default function App() {
     }
   };
 
-  // Find next actionable task for autonomous engine
-  const runNextAutonomousStep = async () => {
-    // Priority order: Tasks in 'in_progress' first, then 'review', then 'todo'
-    const inProgressTask = tasks.find((t) => t.status === 'in_progress');
-    const reviewTask = tasks.find((t) => t.status === 'review');
-    const todoTask = tasks.find((t) => {
-      if (t.status !== 'todo') return false;
-      // verify dependencies
-      const depsSatisfied = (t.dependencies || []).every((depId) => {
-        const dep = tasks.find((d) => d.id === depId);
-        return dep?.status === 'done';
-      });
-      return depsSatisfied;
-    });
-
-    const target = inProgressTask || reviewTask || todoTask;
-    if (!target) {
-      showToast('Sprint Milestone Reached', 'All eligible sprint tasks are up to date.', 'info');
-      setIsRunningAuto(false);
-      return;
+  // Single-step execution on the server engine (Next Cycle)
+  const handleRunServerCycle = async () => {
+    setIsProcessingStep(true);
+    try {
+      const res = await fetch('/api/orchestrate/engine/step', { method: 'POST' });
+      const data = await res.json();
+      if (data.state) {
+        setTasks(data.state.tasks);
+        setAgents(data.state.agents);
+        setCommunications(data.state.communications);
+        setCycleCount(data.state.cycleCount);
+      }
+      if (data.result?.action) {
+        showToast('Cycle Executed', `Coordinator step: ${data.result.action.replace(/_/g, ' ')}`, 'success');
+      } else {
+        showToast('Sprint Status', 'No eligible tasks currently ready for transition.', 'info');
+      }
+    } catch (err: any) {
+      console.warn('Engine step error:', err);
+      showToast('Cycle Warning', err.message || 'Failed to execute engine cycle', 'alert');
+    } finally {
+      setIsProcessingStep(false);
     }
-
-    const assignedAgent = agents.find((a) => a.id === target.assignedAgentId) || agents[1];
-    await executeAgentStep(target, assignedAgent);
   };
 
-  // Auto-Pilot loop timer
-  const autoPilotTimerRef = useRef<NodeJS.Timeout | null>(null);
-  useEffect(() => {
-    if (isRunningAuto) {
-      autoPilotTimerRef.current = setInterval(() => {
-        if (!isProcessingStep) {
-          runNextAutonomousStep();
+  // Handlers with Centralized Quality Gate Enforcement & Server Sync
+  const handleUpdateTaskStatus = async (taskId: string, newStatus: TaskStatus) => {
+    try {
+      const res = await fetch(`/api/orchestrate/tasks/${taskId}/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        const failureDetails = data.verification?.checks
+          ?.filter((c: any) => !c.passed)
+          ?.map((c: any) => c.rule)
+          ?.join(', ') || data.error || 'Quality gates failed';
+
+        showToast('Quality Gate Blocked', `Cannot move to ${newStatus.toUpperCase()}: ${failureDetails}`, 'alert');
+        // Refresh server state to ensure UI stays accurate
+        const stateRes = await fetch('/api/orchestrate/state');
+        if (stateRes.ok) {
+          const fresh = await stateRes.json();
+          setTasks(fresh.tasks);
         }
-      }, 4500);
-    } else {
-      if (autoPilotTimerRef.current) {
-        clearInterval(autoPilotTimerRef.current);
-        autoPilotTimerRef.current = null;
+        return;
       }
-    }
 
-    return () => {
-      if (autoPilotTimerRef.current) {
-        clearInterval(autoPilotTimerRef.current);
-      }
-    };
-  }, [isRunningAuto, isProcessingStep, tasks]);
-
-  // Handlers
-  const handleUpdateTaskStatus = (taskId: string, newStatus: TaskStatus) => {
-    setTasks((prev) =>
-      prev.map((t) => (t.id === taskId ? { ...t, status: newStatus, lastUpdated: 'Just now' } : t))
-    );
-    const task = tasks.find((t) => t.id === taskId);
-    if (task) {
-      showToast('Task Status Updated', `${task.key} moved to ${newStatus.toUpperCase()}`, 'info');
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+      showToast('Task Status Updated', `${data.task.key} moved to ${newStatus.toUpperCase()}`, 'success');
+    } catch (err: any) {
+      showToast('Status Update Error', err.message || 'Failed to update status', 'alert');
     }
   };
 
   const handleUpdateTask = (updatedTask: Task) => {
-    setTasks((prev) => prev.map((t) => (t.id === updatedTask.id ? updatedTask : t)));
+    const updated = tasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
+    setTasks(updated);
     setSelectedTaskForModal(updatedTask);
+    syncToServer({ tasks: updated });
   };
 
   const handleAddTask = (newTask: Task) => {
-    setTasks((prev) => [newTask, ...prev]);
+    const updated = [newTask, ...tasks];
+    setTasks(updated);
+    syncToServer({ tasks: updated });
     showToast('Task Created', `${newTask.key}: ${newTask.title} added to sprint board.`, 'success');
   };
 
@@ -335,44 +338,43 @@ export default function App() {
     setTasks(newTasks);
     setProjectTitle(planSummary.slice(0, 50));
     setCycleCount(1);
+    syncToServer({ epics: newEpics, tasks: newTasks });
     showToast('Plan Adopted', `Generated ${newTasks.length} tasks across ${newEpics.length} epics.`, 'success');
   };
 
   const handleRebalanceComplete = (
     newAssignments: { taskId: string; agentId: string; roleAssumed: string }[]
   ) => {
-    setTasks((prev) =>
-      prev.map((task) => {
-        const assignment = newAssignments.find((a) => a.taskId === task.id);
-        if (assignment) {
-          return { ...task, assignedAgentId: assignment.agentId };
-        }
-        return task;
-      })
-    );
+    const updated = tasks.map((task) => {
+      const assignment = newAssignments.find((a) => a.taskId === task.id);
+      if (assignment) {
+        return { ...task, assignedAgentId: assignment.agentId };
+      }
+      return task;
+    });
+    setTasks(updated);
+    syncToServer({ tasks: updated });
     showToast('AI Allocation Complete', 'Specialist assignments rebalanced for optimal velocity.', 'success');
   };
 
   const handleUpdateAgentRole = (agentId: string, newRole: string, reason: string) => {
-    setAgents((prev) =>
-      prev.map((a) => {
-        if (a.id === agentId) {
-          const newHist = [
-            ...(a.dynamicRoleHistory || []),
-            {
-              role: newRole,
-              taskKey: 'DYNAMIC-ASSUME',
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            },
-          ];
-          return { ...a, role: newRole, dynamicRoleHistory: newHist };
-        }
-        return a;
-      })
-    );
+    const updatedAgents = agents.map((a) => {
+      if (a.id === agentId) {
+        const newHist = [
+          ...(a.dynamicRoleHistory || []),
+          {
+            role: newRole,
+            taskKey: 'DYNAMIC-ASSUME',
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ];
+        return { ...a, role: newRole, dynamicRoleHistory: newHist };
+      }
+      return a;
+    });
 
-    // Broadcast inter-agent message
     const agent = agents.find((a) => a.id === agentId);
+    let updatedComms = communications;
     if (agent) {
       const msg: CommunicationMessage = {
         id: `comm-${Date.now()}`,
@@ -384,9 +386,13 @@ export default function App() {
         content: `Assumed dynamic role "${newRole}": ${reason}`,
         messageType: 'status_update',
       };
-      setCommunications((prev) => [msg, ...prev]);
-      showToast('Dynamic Role Assumed', `${agent.name} is now ${newRole}`, 'success');
+      updatedComms = [msg, ...communications];
+      setCommunications(updatedComms);
     }
+
+    setAgents(updatedAgents);
+    syncToServer({ agents: updatedAgents, communications: updatedComms });
+    showToast('Dynamic Role Assumed', `${agent?.name || 'Agent'} is now ${newRole}`, 'success');
   };
 
   const handleDispatchSlack = async (message: string, channel: string): Promise<boolean> => {
@@ -449,7 +455,7 @@ export default function App() {
             console.warn('Failed to toggle server daemon:', err);
           }
         }}
-        onRunSingleStep={runNextAutonomousStep}
+        onRunSingleStep={handleRunServerCycle}
         isProcessingStep={isProcessingStep}
         onOpenIngestModal={() => setIsIngestModalOpen(true)}
         onOpenReportModal={() => setActiveTab('reports')}
@@ -504,6 +510,7 @@ export default function App() {
             config={orchestratorConfig}
             onUpdateConfig={(updated) => {
               setOrchestratorConfig(updated);
+              syncToServer({ orchestratorConfig: updated });
               showToast('Directives Saved', 'Orchestrator configuration updated.', 'success');
             }}
             customProviders={integrationConfig.customProviders}
@@ -517,6 +524,7 @@ export default function App() {
             integrationConfig={integrationConfig}
             onUpdateIntegrationConfig={(updated) => {
               setIntegrationConfig(updated);
+              syncToServer({ integrationConfig: updated });
               showToast('Integrations Saved', 'Webhook and provider settings stored.', 'success');
             }}
             communications={communications}

@@ -316,14 +316,23 @@ Navigate to the **"Diagrams & Progress"** tab:
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/health` | Health probe returning service status and Gemini API key availability |
+| `GET` | `/api/health` | Health probe returning service status, Gemini API key, and coordinator daemon state |
+| `GET` | `/api/orchestrate/state` | Returns the server-authoritative sprint state (`data/aegis_state.json`) |
+| `POST` | `/api/orchestrate/state` | Updates authoritative state with central Quality Gate validation |
+| `POST` | `/api/orchestrate/tasks/:id/transition` | Centralized transition endpoint enforcing dependencies, AST syntax, tests, and disk code artifacts |
+| `POST` | `/api/orchestrate/verify-task` | Multi-rule quality gate evaluator (Dependencies, Subtasks, Disk Artifact, Compiler AST, Unit Assertions) |
+| `POST` | `/api/orchestrate/engine/start` | Starts server-side background coordinator daemon (survives browser close) |
+| `POST` | `/api/orchestrate/engine/stop` | Pauses server-side background coordinator daemon |
+| `POST` | `/api/orchestrate/engine/step` | Executes a single deterministic cycle on the server engine |
+| `POST` | `/api/orchestrate/chat` | Action-capable Orchestrator terminal that mutates tasks, priorities, and daemon state |
 | `POST` | `/api/orchestrate/parse-plan` | Decomposes project text into Epics, Tasks, Subtasks, and Roles |
 | `POST` | `/api/orchestrate/allocate-resources` | Calculates capacity utilization and provides optimized task assignments |
-| `POST` | `/api/orchestrate/agent-step` | Simulates an execution cycle, producing deliverables and status changes |
+| `POST` | `/api/orchestrate/agent-step` | Worker execution step generating real code and test artifacts |
 | `POST` | `/api/orchestrate/generate-report` | Synthesizes an executive status report with KPIs and formatted digests |
-| `POST` | `/api/integrations/jira/sync` | Simulates or dispatches Jira issue creation and status transitions |
-| `POST` | `/api/integrations/slack/dispatch` | Posts formatted alerts to real or simulated Slack webhook channels |
+| `POST` | `/api/integrations/jira/sync` | Real Atlassian Jira Cloud issue creation and verification (`/rest/api/3`) |
+| `POST` | `/api/integrations/slack/dispatch` | Posts formatted Slack Block Kit alerts to real webhook channels |
 | `POST` | `/api/custom-providers/ping` | Tests external user-defined REST / LLM endpoints with latency measurement |
+| `POST` | `/api/custom-providers/execute` | Executes prompts directly against external self-hosted models (Ollama, vLLM) |
 
 ---
 

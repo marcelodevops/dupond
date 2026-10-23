@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import http from 'http';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,6 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+const httpServer = http.createServer(app);
 const PORT = 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -54,8 +56,39 @@ app.get('/api/orchestrate/state', (_req: Request, res: Response) => {
 });
 
 app.post('/api/orchestrate/state', (req: Request, res: Response) => {
-  const updated = coordinator.updateState(req.body);
-  res.json(updated);
+  const result = coordinator.updateState(req.body);
+  res.json(result);
+});
+
+// Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
+app.post('/api/orchestrate/tasks/:id/transition', (req: Request, res: Response) => {
+  try {
+    const { status } = req.body;
+    if (!status) return res.status(400).json({ error: 'status is required' });
+
+    const result = coordinator.transitionTaskStatus(req.params.id, status);
+    if (!result.success) {
+      return res.status(422).json(result);
+    }
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Status transition failed' });
+  }
+});
+
+// Endpoint: Single Step Execution Trigger for "Next Cycle"
+app.post('/api/orchestrate/engine/step', async (_req: Request, res: Response) => {
+  try {
+    const result = await coordinator.runDaemonTick();
+    res.json({
+      success: true,
+      result,
+      cycleCount: coordinator.getState().cycleCount,
+      state: coordinator.getState(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Step execution failed' });
+  }
 });
 
 // Endpoint: Server-side Background Coordinator Daemon controls
@@ -1108,7 +1141,9 @@ if (!isProduction) {
   const vite = await createViteServer({
     server: {
       middlewareMode: true,
-      hmr: false,
+      hmr: {
+        server: httpServer,
+      },
     },
     appType: 'spa',
   });
@@ -1121,6 +1156,6 @@ if (!isProduction) {
   });
 }
 
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(`Aegis Orchestrator server running on http://0.0.0.0:${PORT}`);
 });
