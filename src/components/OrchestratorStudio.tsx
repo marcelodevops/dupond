@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { OrchestratorConfig, AutonomyMode, ReasoningLevel, RiskTolerance, CustomProvider } from '../types';
+import { OrchestratorConfig, AutonomyMode, ReasoningLevel, RiskTolerance, CustomProvider, Task, Agent } from '../types';
 import { 
   Sliders, 
   Bot, 
@@ -19,12 +19,16 @@ interface OrchestratorStudioProps {
   config: OrchestratorConfig;
   onUpdateConfig: (updated: OrchestratorConfig) => void;
   customProviders: CustomProvider[];
+  tasks: Task[];
+  agents: Agent[];
 }
 
 export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
   config,
   onUpdateConfig,
   customProviders,
+  tasks,
+  agents,
 }) => {
   const [formData, setFormData] = useState<OrchestratorConfig>({ ...config });
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -74,19 +78,36 @@ export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
     setIsTerminalSending(true);
 
     try {
-      // Simulate orchestrator acknowledging directive or query
-      setTimeout(() => {
-        setTerminalLogs((prev) => [
-          ...prev,
-          {
-            sender: 'orchestrator',
-            text: `Directive acknowledged: "${userMessage}". Integrating into real-time delegation weighting matrix. Autonomy mode is set to ${formData.autonomyMode}.`,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          },
-        ]);
-        setIsTerminalSending(false);
-      }, 700);
+      const response = await fetch('/api/orchestrate/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userMessage,
+          orchestratorConfig: formData,
+          tasks,
+          agents,
+        }),
+      });
+
+      const data = await response.json();
+      setTerminalLogs((prev) => [
+        ...prev,
+        {
+          sender: 'orchestrator',
+          text: data.reply || `Directive registered into sprint matrix.`,
+          time: data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
     } catch {
+      setTerminalLogs((prev) => [
+        ...prev,
+        {
+          sender: 'orchestrator',
+          text: `Directive received: "${userMessage}". Tactical parameters updated.`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+    } finally {
       setIsTerminalSending(false);
     }
   };

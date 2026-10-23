@@ -37,13 +37,74 @@ export default function App() {
   const [isProcessingStep, setIsProcessingStep] = useState<boolean>(false);
   const [activeProcessingTaskId, setActiveProcessingTaskId] = useState<string | undefined>(undefined);
 
-  // Core Data State
-  const [tasks, setTasks] = useState<Task[]>(DEFAULT_TASKS);
-  const [agents, setAgents] = useState<Agent[]>(DEFAULT_AGENTS);
-  const [epics, setEpics] = useState<Epic[]>(DEFAULT_EPICS);
-  const [orchestratorConfig, setOrchestratorConfig] = useState<OrchestratorConfig>(DEFAULT_ORCHESTRATOR_CONFIG);
-  const [integrationConfig, setIntegrationConfig] = useState<IntegrationConfig>(DEFAULT_INTEGRATION_CONFIG);
-  const [communications, setCommunications] = useState<CommunicationMessage[]>(DEFAULT_COMMUNICATIONS);
+  // Load state from localStorage or default
+  const [tasks, setTasks] = useState<Task[]>(() => {
+    try {
+      const saved = localStorage.getItem('aegis_tasks');
+      return saved ? JSON.parse(saved) : DEFAULT_TASKS;
+    } catch {
+      return DEFAULT_TASKS;
+    }
+  });
+
+  const [agents, setAgents] = useState<Agent[]>(() => {
+    try {
+      const saved = localStorage.getItem('aegis_agents');
+      return saved ? JSON.parse(saved) : DEFAULT_AGENTS;
+    } catch {
+      return DEFAULT_AGENTS;
+    }
+  });
+
+  const [epics, setEpics] = useState<Epic[]>(() => {
+    try {
+      const saved = localStorage.getItem('aegis_epics');
+      return saved ? JSON.parse(saved) : DEFAULT_EPICS;
+    } catch {
+      return DEFAULT_EPICS;
+    }
+  });
+
+  const [orchestratorConfig, setOrchestratorConfig] = useState<OrchestratorConfig>(() => {
+    try {
+      const saved = localStorage.getItem('aegis_orchestrator_config');
+      return saved ? JSON.parse(saved) : DEFAULT_ORCHESTRATOR_CONFIG;
+    } catch {
+      return DEFAULT_ORCHESTRATOR_CONFIG;
+    }
+  });
+
+  const [integrationConfig, setIntegrationConfig] = useState<IntegrationConfig>(() => {
+    try {
+      const saved = localStorage.getItem('aegis_integration_config');
+      return saved ? JSON.parse(saved) : DEFAULT_INTEGRATION_CONFIG;
+    } catch {
+      return DEFAULT_INTEGRATION_CONFIG;
+    }
+  });
+
+  const [communications, setCommunications] = useState<CommunicationMessage[]>(() => {
+    try {
+      const saved = localStorage.getItem('aegis_communications');
+      return saved ? JSON.parse(saved) : DEFAULT_COMMUNICATIONS;
+    } catch {
+      return DEFAULT_COMMUNICATIONS;
+    }
+  });
+
+  // Sync state to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('aegis_tasks', JSON.stringify(tasks));
+      localStorage.setItem('aegis_agents', JSON.stringify(agents));
+      localStorage.setItem('aegis_epics', JSON.stringify(epics));
+      localStorage.setItem('aegis_orchestrator_config', JSON.stringify(orchestratorConfig));
+      localStorage.setItem('aegis_integration_config', JSON.stringify(integrationConfig));
+      localStorage.setItem('aegis_communications', JSON.stringify(communications));
+    } catch (e) {
+      console.warn('localStorage sync error:', e);
+    }
+  }, [tasks, agents, epics, orchestratorConfig, integrationConfig, communications]);
 
   // Modals state
   const [selectedTaskForModal, setSelectedTaskForModal] = useState<Task | null>(null);
@@ -409,6 +470,8 @@ export default function App() {
               showToast('Directives Saved', 'Orchestrator configuration updated.', 'success');
             }}
             customProviders={integrationConfig.customProviders}
+            tasks={tasks}
+            agents={agents}
           />
         )}
 

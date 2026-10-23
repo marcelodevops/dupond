@@ -35,6 +35,34 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
   const [selectedAgentForRoleShift, setSelectedAgentForRoleShift] = useState<Agent | null>(null);
   const [customRoleInput, setCustomRoleInput] = useState('');
   const [roleReasonInput, setRoleReasonInput] = useState('');
+  const [isSuggestingRole, setIsSuggestingRole] = useState(false);
+
+  // Trigger AI to suggest optimal dynamic role
+  const handleSuggestRoleWithAi = async () => {
+    if (!selectedAgentForRoleShift) return;
+    setIsSuggestingRole(true);
+    try {
+      const response = await fetch('/api/orchestrate/suggest-role', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agent: selectedAgentForRoleShift,
+          tasks,
+        }),
+      });
+      const data = await response.json();
+      if (data.suggestedRole) {
+        setCustomRoleInput(data.suggestedRole);
+      }
+      if (data.reason) {
+        setRoleReasonInput(data.reason);
+      }
+    } catch (e) {
+      console.warn('Suggest role failed:', e);
+    } finally {
+      setIsSuggestingRole(false);
+    }
+  };
 
   // Calculate workload per agent
   const getAgentMetrics = (agent: Agent) => {
@@ -346,9 +374,29 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
 
             <div className="space-y-3">
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  Target Dynamic Role:
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold text-slate-300">
+                    Target Dynamic Role:
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleSuggestRoleWithAi}
+                    disabled={isSuggestingRole}
+                    className="flex items-center space-x-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold transition-colors disabled:opacity-50"
+                  >
+                    {isSuggestingRole ? (
+                      <>
+                        <RotateCw className="w-3 h-3 animate-spin" />
+                        <span>AI Analyzing Role...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3 h-3 text-indigo-300" />
+                        <span>Recommend Role with AI</span>
+                      </>
+                    )}
+                  </button>
+                </div>
                 <input
                   type="text"
                   value={customRoleInput}

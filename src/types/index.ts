@@ -120,6 +120,7 @@ export interface IntegrationConfig {
     enabled: boolean;
     hostUrl: string;
     projectKey: string;
+    userEmail?: string;
     apiToken: string;
     webhookUrl: string;
     syncEnabled: boolean;

@@ -51,8 +51,8 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
   const [newProviderUrl, setNewProviderUrl] = useState('');
   const [newProviderType, setNewProviderType] = useState<'llm' | 'webhook' | 'agent_rpc' | 'ci_cd'>('llm');
 
-  // Test Jira sync
-  const handleTestJiraSync = async () => {
+  // Test Jira sync or verification
+  const handleTestJiraSync = async (action: 'verify' | 'sync_task' = 'sync_task') => {
     setIsTestingJira(true);
     setJiraTestResult(null);
     try {
@@ -67,8 +67,11 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'sync_task',
+          action,
           task: sampleTask,
+          hostUrl: config.jira.hostUrl,
+          userEmail: config.jira.userEmail,
+          apiToken: config.jira.apiToken,
           projectKey: config.jira.projectKey,
         }),
       });
@@ -279,6 +282,19 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                 />
               </div>
 
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  Atlassian User Email
+                </label>
+                <input
+                  type="email"
+                  value={config.jira.userEmail || ''}
+                  onChange={(e) => setConfig({ ...config, jira: { ...config.jira, userEmail: e.target.value } })}
+                  placeholder="developer@yourcompany.com"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                />
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-semibold text-slate-300 block mb-1">
@@ -299,6 +315,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                     type="password"
                     value={config.jira.apiToken}
                     onChange={(e) => setConfig({ ...config, jira: { ...config.jira, apiToken: e.target.value } })}
+                    placeholder="Enter Atlassian API Token"
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
                   />
                 </div>
@@ -317,7 +334,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
               </div>
             </div>
 
-            <div className="pt-2 flex justify-between items-center">
+            <div className="pt-2 flex flex-wrap gap-2 justify-between items-center">
               <button
                 onClick={handleSaveConfig}
                 className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg"
@@ -325,14 +342,26 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                 Save Jira Settings
               </button>
 
-              <button
-                onClick={handleTestJiraSync}
-                disabled={isTestingJira}
-                className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg shadow disabled:opacity-50"
-              >
-                {isTestingJira ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Link className="w-3.5 h-3.5" />}
-                <span>Test Jira Sync Probe</span>
-              </button>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => handleTestJiraSync('verify')}
+                  disabled={isTestingJira}
+                  className="flex items-center space-x-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-sky-300 text-xs font-semibold rounded-lg border border-sky-800/50 disabled:opacity-50"
+                  title="Verify Atlassian account authentication"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Verify Auth</span>
+                </button>
+
+                <button
+                  onClick={() => handleTestJiraSync('sync_task')}
+                  disabled={isTestingJira}
+                  className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg shadow disabled:opacity-50"
+                >
+                  {isTestingJira ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Link className="w-3.5 h-3.5" />}
+                  <span>Sync Task to Jira</span>
+                </button>
+              </div>
             </div>
           </div>
 
