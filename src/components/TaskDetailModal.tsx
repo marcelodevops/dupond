@@ -80,6 +80,44 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
     setNewSubtaskTitle('');
   };
 
+  const [verificationResult, setVerificationResult] = useState<{
+    passed: boolean;
+    checks: { rule: string; passed: boolean; detail: string }[];
+    logs: string;
+    timestamp?: string;
+  } | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
+
+  const handleStatusChange = async (newStatus: TaskStatus) => {
+    if (newStatus === 'done') {
+      await handleVerifyAndMarkDone();
+    } else {
+      setVerificationResult(null);
+      onUpdateTask({ ...task, status: newStatus });
+    }
+  };
+
+  const handleVerifyAndMarkDone = async () => {
+    setIsVerifying(true);
+    setVerificationResult(null);
+    try {
+      const res = await fetch('/api/orchestrate/verify-task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task }),
+      });
+      const data = await res.json();
+      setVerificationResult(data);
+      if (data.passed) {
+        onUpdateTask({ ...task, status: 'done', lastAgentComment: 'Passed all verification quality gates.' });
+      }
+    } catch (err) {
+      console.warn('Verification error:', err);
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
   // Run agent execution step on this task
   const handleRunAgent = async () => {
     if (!assignee) return;
@@ -134,14 +172,14 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
               </label>
               <select
                 value={task.status}
-                onChange={(e) => onUpdateTask({ ...task, status: e.target.value as TaskStatus })}
+                onChange={(e) => handleStatusChange(e.target.value as TaskStatus)}
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold"
               >
                 <option value="backlog">Backlog</option>
                 <option value="todo">To Do</option>
                 <option value="in_progress">In Progress</option>
                 <option value="review">Review & QA</option>
-                <option value="done">Done</option>
+                <option value="done">Done (Requires Quality Gate)</option>
               </select>
             </div>
 
@@ -180,6 +218,33 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
               </select>
             </div>
           </div>
+
+          {/* Quality Gates Verification Report Card */}
+          {verificationResult && (
+            <div className={`p-4 rounded-xl border ${verificationResult.passed ? 'bg-emerald-950/40 border-emerald-800/60' : 'bg-rose-950/40 border-rose-800/60'} space-y-2.5 animate-fadeIn`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 ${verificationResult.passed ? 'text-emerald-300' : 'text-rose-300'}`}>
+                  {verificationResult.passed ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertCircle className="w-4 h-4 text-rose-400" />}
+                  <span>{verificationResult.passed ? 'Quality Gate PASSED: Verified for "Done"' : 'Quality Gate FAILED: "Done" Blocked'}</span>
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">{verificationResult.timestamp}</span>
+              </div>
+
+              <div className="space-y-1.5">
+                {verificationResult.checks.map((check, i) => (
+                  <div key={i} className="flex items-start space-x-2 text-xs">
+                    <span className={`font-bold mt-0.5 ${check.passed ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {check.passed ? '✓' : '✕'}
+                    </span>
+                    <div>
+                      <span className="font-semibold text-slate-200">{check.rule}: </span>
+                      <span className={check.passed ? 'text-slate-300' : 'text-rose-200'}>{check.detail}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Dependency Check Banner */}
           {dependencyDetails.length > 0 && (

@@ -29,6 +29,8 @@ if (geminiApiKey) {
   });
 }
 
+import { coordinator } from './src/server/coordinator.js';
+
 async function callGeminiWithTimeout<T>(promise: Promise<T>, timeoutMs = 7000): Promise<T> {
   return Promise.race([
     promise,
@@ -41,8 +43,52 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'healthy',
     hasGeminiKey: Boolean(geminiApiKey),
+    daemonRunning: coordinator.isDaemonRunning(),
     timestamp: new Date().toISOString(),
   });
+});
+
+// Endpoint: Server-authoritative state management
+app.get('/api/orchestrate/state', (_req: Request, res: Response) => {
+  res.json(coordinator.getState());
+});
+
+app.post('/api/orchestrate/state', (req: Request, res: Response) => {
+  const updated = coordinator.updateState(req.body);
+  res.json(updated);
+});
+
+// Endpoint: Server-side Background Coordinator Daemon controls
+app.post('/api/orchestrate/engine/start', (req: Request, res: Response) => {
+  const { intervalMs = 7000 } = req.body || {};
+  coordinator.startDaemon(intervalMs);
+  res.json({ success: true, running: true, message: 'Server background coordinator daemon started.' });
+});
+
+app.post('/api/orchestrate/engine/stop', (_req: Request, res: Response) => {
+  coordinator.stopDaemon();
+  res.json({ success: true, running: false, message: 'Server background coordinator daemon paused.' });
+});
+
+app.get('/api/orchestrate/engine/status', (_req: Request, res: Response) => {
+  res.json({
+    running: coordinator.isDaemonRunning(),
+    cycleCount: coordinator.getState().cycleCount,
+    lastUpdated: coordinator.getState().lastUpdated,
+  });
+});
+
+// Endpoint: Strict Quality Gate Verification for "Done"
+app.post('/api/orchestrate/verify-task', (req: Request, res: Response) => {
+  try {
+    const { task } = req.body;
+    if (!task) return res.status(400).json({ error: 'task is required' });
+
+    const verification = coordinator.verifyTaskQualityGates(task);
+    res.json(verification);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Verification failed' });
+  }
 });
 
 // Endpoint: Parse and decompose a curated plan into epics and tasks
@@ -582,6 +628,47 @@ app.post('/api/orchestrate/chat', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'message is required' });
     }
 
+    // Pattern detection for actionable directives
+    let appliedAction = '';
+    const lowerMsg = message.toLowerCase();
+
+    // Priority change: e.g. "set AEG-102 priority to critical" or "make AEG-103 high priority"
+    const prioMatch = lowerMsg.match(/(?:set|make|update)\s+(?:task\s+)?(aeg-\d+)\s+(?:priority\s+to\s+|to\s+)?(critical|high|medium|low)/i);
+    if (prioMatch) {
+      appliedAction = coordinator.applyChatAction({
+        type: 'UPDATE_PRIORITY',
+        taskKey: prioMatch[1].toUpperCase(),
+        priority: prioMatch[2].toLowerCase(),
+      });
+    }
+
+    // Reassign: e.g. "assign AEG-102 to Kaelen" or "reassign AEG-101 to Nexus"
+    const assignMatch = lowerMsg.match(/(?:reassign|assign)\s+(?:task\s+)?(aeg-\d+)\s+to\s+([a-zA-Z0-9_-]+)/i);
+    if (assignMatch) {
+      appliedAction = coordinator.applyChatAction({
+        type: 'REASSIGN_TASK',
+        taskKey: assignMatch[1].toUpperCase(),
+        agentId: assignMatch[2],
+      });
+    }
+
+    // Create task: e.g. "create task: Build OAuth rate limiting" or "add task: ..."
+    const createMatch = message.match(/(?:create|add)\s+task:?\s+([^,\n\.]+)/i);
+    if (createMatch) {
+      appliedAction = coordinator.applyChatAction({
+        type: 'CREATE_TASK',
+        title: createMatch[1].trim(),
+        priority: lowerMsg.includes('critical') ? 'critical' : lowerMsg.includes('high') ? 'high' : 'medium',
+      });
+    }
+
+    // Start / Stop background daemon
+    if (lowerMsg.includes('start background') || lowerMsg.includes('start coordinator') || lowerMsg.includes('start daemon') || lowerMsg.includes('start auto')) {
+      appliedAction = coordinator.applyChatAction({ type: 'START_DAEMON' });
+    } else if (lowerMsg.includes('stop background') || lowerMsg.includes('stop coordinator') || lowerMsg.includes('stop daemon') || lowerMsg.includes('pause auto')) {
+      appliedAction = coordinator.applyChatAction({ type: 'STOP_DAEMON' });
+    }
+
     if (ai) {
       try {
         const sprintStats = {
@@ -606,6 +693,7 @@ Current Live Sprint State:
 - Tasks: ${sprintStats.total} total (${sprintStats.done} done, ${sprintStats.inProgress} in progress, ${sprintStats.review} in QA, ${sprintStats.todo} to do, ${sprintStats.blocked} currently blocked).
 - Tasks Snapshot: ${tasks.slice(0, 8).map((t: any) => `[${t.key}] ${t.title} (${t.status}, ${t.priority})`).join('; ')}.
 - Team Agents: ${agents.map((a: any) => `${a.name} (${a.role}) - ${a.status}`).join(', ')}.
+${appliedAction ? `NOTE: An action was successfully executed on the project state: "${appliedAction}". Acknowledge and integrate this.` : ''}
 
 Respond directly, strategically, and concisely to the operator's directive or inquiry. If they want to reprioritize, explain the dependency implications. If they ask about sprint progress or blockers, provide real data and tactical recommendations.`;
 
@@ -621,8 +709,13 @@ Respond directly, strategically, and concisely to the operator's directive or in
           6000
         );
 
+        const aiReply = response.text || 'Directive registered and integrated into sprint sequencing.';
+        const finalReply = appliedAction ? `✓ [Executed: ${appliedAction}]\n\n${aiReply}` : aiReply;
+
         return res.json({
-          reply: response.text || 'Directive registered and integrated into sprint sequencing.',
+          reply: finalReply,
+          appliedAction: appliedAction || null,
+          state: coordinator.getState(),
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         });
       } catch (err: any) {
@@ -630,8 +723,14 @@ Respond directly, strategically, and concisely to the operator's directive or in
       }
     }
 
+    const fallbackReply = appliedAction
+      ? `✓ [Executed: ${appliedAction}]\nDirective registered. Tracking ${coordinator.getState().tasks.length} items with active agents.`
+      : `Directive acknowledged: "${message}". Tracking ${tasks.length} items with active agents. All dependency gates verified.`;
+
     return res.json({
-      reply: `Directive acknowledged: "${message}". Tracking ${tasks.length} items with active agents. All dependency gates verified.`,
+      reply: fallbackReply,
+      appliedAction: appliedAction || null,
+      state: coordinator.getState(),
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     });
   } catch (error: any) {

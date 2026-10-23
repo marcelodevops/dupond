@@ -92,19 +92,42 @@ export default function App() {
     }
   });
 
-  // Sync state to localStorage
+  // Server-authoritative state synchronization (survives browser close)
   useEffect(() => {
+    const fetchServerState = async () => {
+      try {
+        const res = await fetch('/api/orchestrate/state');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.tasks && data.tasks.length > 0) setTasks(data.tasks);
+          if (data.agents && data.agents.length > 0) setAgents(data.agents);
+          if (data.epics && data.epics.length > 0) setEpics(data.epics);
+          if (data.communications && data.communications.length > 0) setCommunications(data.communications);
+          if (typeof data.daemonRunning === 'boolean') setIsRunningAuto(data.daemonRunning);
+          if (typeof data.cycleCount === 'number') setCycleCount(data.cycleCount);
+        }
+      } catch (err) {
+        console.warn('Server state sync error:', err);
+      }
+    };
+
+    fetchServerState();
+    const syncInterval = setInterval(fetchServerState, 3500);
+    return () => clearInterval(syncInterval);
+  }, []);
+
+  // Push local updates to server-authoritative state
+  const syncToServer = async (partialState: any) => {
     try {
-      localStorage.setItem('aegis_tasks', JSON.stringify(tasks));
-      localStorage.setItem('aegis_agents', JSON.stringify(agents));
-      localStorage.setItem('aegis_epics', JSON.stringify(epics));
-      localStorage.setItem('aegis_orchestrator_config', JSON.stringify(orchestratorConfig));
-      localStorage.setItem('aegis_integration_config', JSON.stringify(integrationConfig));
-      localStorage.setItem('aegis_communications', JSON.stringify(communications));
+      await fetch('/api/orchestrate/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(partialState),
+      });
     } catch (e) {
-      console.warn('localStorage sync error:', e);
+      console.warn('Failed to push state to server:', e);
     }
-  }, [tasks, agents, epics, orchestratorConfig, integrationConfig, communications]);
+  };
 
   // Modals state
   const [selectedTaskForModal, setSelectedTaskForModal] = useState<Task | null>(null);
@@ -411,7 +434,21 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         isRunningAuto={isRunningAuto}
-        onToggleAuto={() => setIsRunningAuto(!isRunningAuto)}
+        onToggleAuto={async () => {
+          const next = !isRunningAuto;
+          setIsRunningAuto(next);
+          try {
+            const ep = next ? '/api/orchestrate/engine/start' : '/api/orchestrate/engine/stop';
+            await fetch(ep, { method: 'POST' });
+            showToast(
+              next ? 'Server Background Coordinator ACTIVE' : 'Server Coordinator PAUSED',
+              next ? 'Autonomous background daemon active. Will continue executing even if browser is closed.' : 'Server coordinator paused.',
+              next ? 'success' : 'info'
+            );
+          } catch (err) {
+            console.warn('Failed to toggle server daemon:', err);
+          }
+        }}
         onRunSingleStep={runNextAutonomousStep}
         isProcessingStep={isProcessingStep}
         onOpenIngestModal={() => setIsIngestModalOpen(true)}
