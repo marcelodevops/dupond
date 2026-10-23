@@ -329,6 +329,39 @@ async function executeSuite() {
     assert.ok(res.body.error.includes('failed quality gate acceptance'));
   });
 
+  await runTest('Patch export preserves an existing patch', async () => {
+    const dir = path.join(testBaseDir, 'existing-patch');
+    fs.mkdirSync(dir);
+    const dest = path.join(dir, 'AEG-104_delivery.patch');
+    fs.writeFileSync(dest, 'user patch');
+    const res = await handleRepositoryDispatch({ action: 'deliver', task: aeg104Task,
+      repoConfig: { localPath: testBaseDir, targetDirectory: 'existing-patch', localWriteMode: 'patch_export' } });
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(fs.readFileSync(dest, 'utf8'), 'user patch');
+  });
+
+  await runTest('Direct delivery rejects dangling destination symlinks', async () => {
+    const dir = path.join(testBaseDir, 'dangling-file');
+    fs.mkdirSync(dir);
+    const outside = path.join(testBaseDir, 'must-not-be-created');
+    fs.symlinkSync(outside, path.join(dir, 'AEG-104_Service.js'));
+    const res = await handleRepositoryDispatch({ action: 'deliver', task: aeg104Task,
+      repoConfig: { localPath: dir, targetDirectory: '.', localWriteMode: 'direct_write' } });
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(fs.existsSync(outside), false);
+  });
+
+  await runTest('Explicit overwrite cannot follow a dangling symlink', async () => {
+    const dir = path.join(testBaseDir, 'overwrite-link');
+    fs.mkdirSync(dir);
+    const outside = path.join(testBaseDir, 'overwrite-must-not-create');
+    fs.symlinkSync(outside, path.join(dir, 'AEG-104_Service.js'));
+    const res = await handleRepositoryDispatch({ action: 'deliver', task: aeg104Task, allowOverwrite: true,
+      repoConfig: { localPath: dir, targetDirectory: '.', localWriteMode: 'direct_write' } });
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(fs.existsSync(outside), false);
+  });
+
   // Clean up fixture
   try {
     fs.rmSync(testBaseDir, { recursive: true, force: true });

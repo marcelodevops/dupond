@@ -49,6 +49,28 @@ export function isPathContained(baseDir: string, targetPath: string): boolean {
   return true;
 }
 
+// Exclusive creation protects both existing files and dangling symlinks.
+function writeDeliveryFile(filename: string, content: string, overwrite: boolean): boolean {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filename, overwrite
+      ? fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW
+      : fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL);
+    fs.writeFileSync(fd, content, 'utf-8');
+    return true;
+  } catch (error: any) {
+    if (error.code === 'EEXIST' || error.code === 'ELOOP') return false;
+    throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function existingFileResult(filename: string): DeliveryResult {
+  return { status: 409, body: { success: false, blocked: true,
+    error: `Delivery blocked: Destination file ${filename} already exists or is a symlink.` } };
+}
+
 /**
  * Authoritative Repository & Code Delivery Dispatch Handler
  */
@@ -204,7 +226,7 @@ export async function handleRepositoryDispatch(params: {
         }
 
         const patchContent = `--- a/${targetDirectory}/${taskKey}_Service.js\n+++ b/${targetDirectory}/${taskKey}_Service.js\n@@ -0,0 +1,${codeToDeliver.split('\n').length} @@\n` + codeToDeliver.split('\n').map((l) => `+${l}`).join('\n') + '\n';
-        fs.writeFileSync(patchPath, patchContent, 'utf-8');
+        if (!writeDeliveryFile(patchPath, patchContent, false)) return existingFileResult(patchPath);
 
         return {
           status: 200,
@@ -248,7 +270,9 @@ export async function handleRepositoryDispatch(params: {
         };
       }
 
-      fs.writeFileSync(destinationPath, codeToDeliver, 'utf-8');
+      if (!writeDeliveryFile(destinationPath, codeToDeliver, allowOverwrite === true)) {
+        return existingFileResult(destinationPath);
+      }
       const bytesWritten = fs.statSync(destinationPath).size;
 
       return {
