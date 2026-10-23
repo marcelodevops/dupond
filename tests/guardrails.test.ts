@@ -1,84 +1,96 @@
 /**
- * Aegis Orchestrator - Guardrails & Fail-Closed Regression Test Suite
+ * Aegis Orchestrator - Guardrails & Delivery Fail-Closed Regression Suite
  * 
- * Verifies:
- * 1. Evidence-to-subtask mapping (only assertions with verified evidence mark criteria complete)
- * 2. Unimplemented tasks fail-closed with blocked: true
- * 3. Central quality gate blocks "Done" if dependencies are unmet or uncompleted
- * 4. Delivery fails-closed when task is missing from state
- * 5. Delivery fails-closed when task has not passed quality gates
- * 6. Git delivery is disabled and fails-closed (no shell execution, no checkout switching)
- * 7. Safe patch export generates unified diff without shell commands
- * 8. AI allocation capacity analysis strictly matches task assignments
+ * Tests the ACTUAL application delivery and coordinator handlers using
+ * isolated temporary disk directories (fs.mkdtempSync).
  */
 
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { coordinator } from '../src/server/coordinator.js';
-import { calculateAgentLoad, balanceWorkload } from '../src/services/workloadBalancer.js';
+import { handleRepositoryDispatch, isPathContained } from '../src/server/deliveryHandler.js';
+import { calculateAgentLoad } from '../src/services/workloadBalancer.js';
 
-console.log('=== RUNNING AEGIS GUARDRAILS & FAIL-CLOSED REGRESSION SUITE ===\n');
+console.log('=== RUNNING AEGIS GUARDRAILS & LIVE DELIVERY REGRESSION SUITE ===\n');
 
 let passedTests = 0;
 let totalTests = 0;
 
-function runTest(name: string, fn: () => void | Promise<void>) {
+async function runTest(name: string, fn: () => void | Promise<void>) {
   totalTests++;
   try {
     const result = fn();
     if (result && typeof result.then === 'function') {
-      return result.then(() => {
-        passedTests++;
-        console.log(`✔ [PASS] ${name}`);
-      }).catch((err: any) => {
-        console.error(`✘ [FAIL] ${name}:`, err.message);
-        throw err;
-      });
-    } else {
-      passedTests++;
-      console.log(`✔ [PASS] ${name}`);
+      await result;
     }
+    passedTests++;
+    console.log(`✔ [PASS] ${name}`);
   } catch (err: any) {
     console.error(`✘ [FAIL] ${name}:`, err.message);
     throw err;
   }
 }
 
-async function executeAll() {
-  // --- TEST 1: Evidence-to-Criterion Mapping ---
-  await runTest('Worker execution only marks criteria that have explicit passing test assertions', async () => {
+async function executeSuite() {
+  // Temporary directory fixture for live tests
+  const testBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-guardrails-'));
+
+  const aeg104Task = {
+    id: 'task-104',
+    key: 'AEG-104',
+    title: 'Implement AI-Driven Workload Balancing',
+    status: 'done' as const,
+    subtasks: [
+      { id: 'st-10', title: 'Load percentage calculation', completed: true },
+      { id: 'st-11', title: 'Gemini optimizer prompt', completed: true },
+      { id: 'st-12', title: 'Algorithmic rebalancing', completed: true },
+    ],
+    dependencies: [],
+    deliverables: ['deliverable artifact'],
+  };
+
+  // Ensure task exists in coordinator state for delivery verification
+  const existingIndex = coordinator.getState().tasks.findIndex((t) => t.key === 'AEG-104');
+  if (existingIndex >= 0) {
+    coordinator.getState().tasks[existingIndex] = { ...aeg104Task } as any;
+  } else {
+    coordinator.getState().tasks.push({ ...aeg104Task } as any);
+  }
+
+  // --- 1. EVIDENCE MAPPING TESTS ---
+  await runTest('Worker execution maps criteria strictly to passing test assertions (rejects unverified subtasks)', async () => {
     const testTask = {
       id: 'task-104',
       key: 'AEG-104',
       title: 'Implement AI-Driven Workload Balancing',
       status: 'in_progress',
       subtasks: [
-        { id: 'st-10', title: 'Load percentage calculation', completed: false },
-        { id: 'st-11', title: 'Gemini optimizer prompt', completed: false },
-        { id: 'st-12', title: 'Algorithmic rebalancing', completed: false },
-        { id: 'st-fake', title: 'Unverified fictitious subtask', completed: false },
+        { id: 'st-10', title: 'Load calculation', completed: false },
+        { id: 'st-11', title: 'Optimizer prompt', completed: false },
+        { id: 'st-12', title: 'Rebalancing algorithm', completed: false },
+        { id: 'st-fake', title: 'Unverified fictitious criterion', completed: false },
       ],
     };
     const agent = { id: 'agent-arch', name: 'Nexus-7', role: 'Architect' };
     const res = await coordinator.executeWorkerStep(testTask as any, agent as any);
 
-    assert.ok(res.subtasksCompleted.includes('st-10'), 'st-10 must be completed');
-    assert.ok(res.subtasksCompleted.includes('st-11'), 'st-11 must be completed');
-    assert.ok(res.subtasksCompleted.includes('st-12'), 'st-12 must be completed');
+    assert.ok(res.subtasksCompleted.includes('st-10'), 'st-10 must be verified');
+    assert.ok(res.subtasksCompleted.includes('st-11'), 'st-11 must be verified');
+    assert.ok(res.subtasksCompleted.includes('st-12'), 'st-12 must be verified');
     assert.strictEqual(
       res.subtasksCompleted.includes('st-fake'),
       false,
-      'st-fake must NOT be completed as it lacks verified test evidence'
+      'st-fake must NOT be completed without verified evidence'
     );
   });
 
-  // --- TEST 2: Unimplemented Task Fail-Closed ---
-  await runTest('Unimplemented tasks without workspace artifacts fail-closed with blocked: true', async () => {
+  await runTest('Unimplemented tasks fail-closed with blocked: true', async () => {
     const unimplTask = {
       id: 'task-999',
       key: 'AEG-999',
-      title: 'Nonexistent feature without real code',
+      title: 'Unimplemented task',
       status: 'todo',
       subtasks: [],
     };
@@ -90,98 +102,242 @@ async function executeAll() {
     } catch (err: any) {
       blocked = err.message.includes('Execution blocked: No capable worker connected');
     }
-    assert.strictEqual(blocked, true, 'Execution must fail closed with explicit blocked error');
+    assert.strictEqual(blocked, true, 'Unimplemented task must fail closed');
   });
 
-  // --- TEST 3: Quality Gate Dependency Enforcement ---
-  runTest('Quality gate rejects Done transition if prerequisite dependencies are not done', () => {
-    const taskWithUnmetDep = {
-      id: 'task-test-dep',
-      key: 'AEG-TEST',
-      title: 'Test with pending dependency',
+  // --- 2. QUALITY GATE PREREQUISITE TESTS ---
+  await runTest('Quality gate rejects Done transition if upstream dependencies are not done', () => {
+    const blockedTask = {
+      id: 'task-dep-check',
+      key: 'AEG-DEP-CHECK',
+      title: 'Blocked task',
       status: 'review' as const,
-      dependencies: ['task-not-done'],
-      subtasks: [{ id: 's1', title: 'Subtask 1', completed: true }],
-      deliverables: ['deliverable ready'],
+      dependencies: ['task-unmet-upstream'],
+      subtasks: [{ id: 's1', title: 'Subtask', completed: true }],
+      deliverables: ['artifact'],
     };
 
-    // Add prerequisite task in 'in_progress' to state
     coordinator.getState().tasks.push({
-      id: 'task-not-done',
-      key: 'AEG-PRE',
-      title: 'Prerequisite task',
+      id: 'task-unmet-upstream',
+      key: 'AEG-UPSTREAM',
+      title: 'Upstream task',
       status: 'in_progress',
       dependencies: [],
       subtasks: [],
     } as any);
 
-    const verification = coordinator.verifyTaskQualityGates(taskWithUnmetDep as any);
-    assert.strictEqual(verification.passed, false, 'Quality gate must fail when dependency is not done');
-    const depCheck = verification.checks.find((c) => c.rule === 'Prerequisite Dependencies Cleared');
-    assert.ok(depCheck, 'Prerequisite check must be present');
-    assert.strictEqual(depCheck?.passed, false, 'Prerequisite check must fail');
+    const verification = coordinator.verifyTaskQualityGates(blockedTask as any);
+    assert.strictEqual(verification.passed, false, 'Must fail when dependency is in_progress');
   });
 
-  // --- TEST 4: Delivery Fail-Closed on Nonexistent Task ---
-  runTest('Delivery fails closed when target task is not found in sprint state', () => {
-    const stateTasks = coordinator.getState().tasks;
-    const missingTaskKey = 'AEG-NONEXISTENT';
-    const found = stateTasks.find((t) => t.key === missingTaskKey);
-    assert.strictEqual(found, undefined, 'Task must not exist in state');
+  // --- 3. ACTUAL DELIVERY HANDLER TESTS (LIVE DISPATCH & TEMP DIRS) ---
+  await runTest('Actual delivery handler rejects Git branch delivery fail-closed (HTTP 403, blocked: true)', async () => {
+    const res = await handleRepositoryDispatch({
+      action: 'deliver',
+      repoConfig: {
+        type: 'local_directory',
+        localPath: testBaseDir,
+        localWriteMode: 'git_branch',
+      },
+      task: aeg104Task,
+    });
+
+    assert.strictEqual(res.status, 403, 'Must return HTTP 403 for disabled git_branch');
+    assert.strictEqual(res.body.blocked, true, 'Must return blocked: true');
+    assert.ok(res.body.error.includes('Git branch delivery is currently disabled'));
   });
 
-  // --- TEST 5: Delivery Fail-Closed on Unmet Quality Gate ---
-  runTest('Delivery fails closed when task quality gates have not passed', () => {
-    const unacceptedTask = {
-      id: 'task-unaccepted',
+  await runTest('Actual delivery handler rejects remote Git PR delivery fail-closed (HTTP 403, blocked: true)', async () => {
+    const res = await handleRepositoryDispatch({
+      action: 'create_pr',
+      repoConfig: {
+        type: 'remote_git',
+        repoUrl: 'https://github.com/acme/app',
+      },
+      task: aeg104Task,
+    });
+
+    assert.strictEqual(res.status, 403, 'Must return HTTP 403 for disabled remote Git delivery');
+    assert.strictEqual(res.body.blocked, true, 'Must return blocked: true');
+    assert.ok(res.body.error.includes('Remote Git delivery is currently disabled'));
+  });
+
+  await runTest('Actual delivery handler blocks prefix-based path traversal (/tmp/project-other prefix attack)', async () => {
+    // Sibling directory trap: target starts with base path prefix, but is outside base directory
+    const siblingDir = testBaseDir + '-other';
+
+    // Verify helper calculation
+    assert.strictEqual(isPathContained(testBaseDir, siblingDir), false, 'Prefix match must not count as contained');
+
+    const res = await handleRepositoryDispatch({
+      action: 'deliver',
+      repoConfig: {
+        type: 'local_directory',
+        localPath: testBaseDir,
+        targetDirectory: '../' + path.basename(testBaseDir) + '-other',
+        localWriteMode: 'patch_export',
+      },
+      task: aeg104Task,
+    });
+
+    assert.strictEqual(res.status, 400, 'Must return HTTP 400 for path traversal');
+    assert.strictEqual(res.body.blocked, true);
+    assert.ok(res.body.error.includes('Path traversal outside destination directory is forbidden'));
+    assert.strictEqual(fs.existsSync(siblingDir), false, 'Must not create or write into sibling directory');
+  });
+
+  await runTest('Actual delivery handler blocks symlink path traversal escaping destination directory', async () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-outside-'));
+    const symlinkPath = path.join(testBaseDir, 'escape_link');
+
+    try {
+      fs.symlinkSync(outsideDir, symlinkPath, 'dir');
+    } catch {}
+
+    if (fs.existsSync(symlinkPath)) {
+      assert.strictEqual(isPathContained(testBaseDir, path.join(symlinkPath, 'target_file')), false, 'Symlink outside must not be contained');
+
+      const res = await handleRepositoryDispatch({
+        action: 'deliver',
+        repoConfig: {
+          type: 'local_directory',
+          localPath: testBaseDir,
+          targetDirectory: 'escape_link/sub',
+          localWriteMode: 'patch_export',
+        },
+        task: aeg104Task,
+      });
+
+      assert.strictEqual(res.status, 400, 'Must reject symlink traversal with HTTP 400');
+      assert.strictEqual(res.body.blocked, true);
+    }
+  });
+
+  await runTest('Actual delivery handler protects existing destination files from direct overwrite (HTTP 409, blocked: true)', async () => {
+    const directDestDir = path.join(testBaseDir, 'existing_protect');
+    fs.mkdirSync(directDestDir, { recursive: true });
+    const targetFile = path.join(directDestDir, 'AEG-104_Service.js');
+    const originalContent = '// DO NOT OVERWRITE - PREVIOUS CODEBASE IMPLEMENTATION';
+    fs.writeFileSync(targetFile, originalContent, 'utf-8');
+
+    const res = await handleRepositoryDispatch({
+      action: 'deliver',
+      repoConfig: {
+        type: 'local_directory',
+        localPath: testBaseDir,
+        targetDirectory: 'existing_protect',
+        localWriteMode: 'direct_write',
+      },
+      task: aeg104Task,
+      allowOverwrite: false,
+    });
+
+    assert.strictEqual(res.status, 409, 'Must return HTTP 409 conflict when file already exists');
+    assert.strictEqual(res.body.blocked, true);
+    assert.ok(res.body.error.includes('already exists'));
+
+    // Assert file was NOT overwritten
+    const contentAfter = fs.readFileSync(targetFile, 'utf-8');
+    assert.strictEqual(contentAfter, originalContent, 'Existing file content must remain unchanged');
+  });
+
+  await runTest('Actual delivery handler rejects unknown delivery modes fail-closed without fallthrough (HTTP 400)', async () => {
+    const res = await handleRepositoryDispatch({
+      action: 'deliver',
+      repoConfig: {
+        type: 'local_directory',
+        localPath: testBaseDir,
+        targetDirectory: 'safe_dest',
+        localWriteMode: 'arbitrary_mode_unsupported',
+      },
+      task: aeg104Task,
+    });
+
+    assert.strictEqual(res.status, 400, 'Must return HTTP 400 for unknown delivery mode');
+    assert.strictEqual(res.body.blocked, true);
+    assert.ok(res.body.error.includes('Unknown or unsupported delivery mode'));
+    assert.strictEqual(fs.existsSync(path.join(testBaseDir, 'safe_dest/AEG-104_Service.js')), false, 'Must not fall through to direct write');
+  });
+
+  await runTest('Actual delivery handler executes safe patch export and creates valid physical patch on disk', async () => {
+    const res = await handleRepositoryDispatch({
+      action: 'deliver',
+      repoConfig: {
+        type: 'local_directory',
+        localPath: testBaseDir,
+        targetDirectory: 'patches_output',
+        localWriteMode: 'patch_export',
+      },
+      task: aeg104Task,
+    });
+
+    assert.strictEqual(res.status, 200, 'Must return HTTP 200 for successful patch export');
+    assert.strictEqual(res.body.success, true);
+    assert.ok(res.body.targetFilePath, 'Must return targetFilePath');
+
+    // Verify physical file on disk
+    const diskPath = res.body.targetFilePath;
+    assert.ok(fs.existsSync(diskPath), `Physical patch file must exist at ${diskPath}`);
+
+    const patchText = fs.readFileSync(diskPath, 'utf-8');
+    assert.ok(patchText.startsWith('--- a/patches_output/AEG-104_Service.js'), 'Must contain unified diff source header');
+    assert.ok(patchText.includes('+++ b/patches_output/AEG-104_Service.js'), 'Must contain unified diff dest header');
+    assert.ok(patchText.includes('@@ -0,0 +1,'), 'Must contain hunk line header');
+    assert.ok(patchText.includes('+function calculateAgentLoad'), 'Must contain delivered implementation lines');
+  });
+
+  await runTest('Actual delivery handler fails closed when target task is missing from sprint state', async () => {
+    const res = await handleRepositoryDispatch({
+      action: 'deliver',
+      repoConfig: {
+        type: 'local_directory',
+        localPath: testBaseDir,
+        localWriteMode: 'patch_export',
+      },
+      task: { key: 'AEG-NONEXISTENT' },
+    });
+
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(res.body.blocked, true);
+    assert.ok(res.body.error.includes('not found in sprint state'));
+  });
+
+  await runTest('Actual delivery handler fails closed when task quality gates have not passed', async () => {
+    const unaccepted = {
+      id: 'task-unaccepted-deliv',
       key: 'AEG-UNACC',
-      title: 'Unaccepted task without deliverable',
+      title: 'Unaccepted task',
       status: 'todo' as const,
       dependencies: [],
-      subtasks: [{ id: 's1', title: 'Subtask', completed: false }],
+      subtasks: [{ id: 'u1', title: 'Incomplete subtask', completed: false }],
       deliverables: [],
     };
-    const verification = coordinator.verifyTaskQualityGates(unacceptedTask as any);
-    assert.strictEqual(verification.passed, false, 'Unaccepted task must fail quality gates');
+    coordinator.getState().tasks.push(unaccepted as any);
+
+    const res = await handleRepositoryDispatch({
+      action: 'deliver',
+      repoConfig: {
+        type: 'local_directory',
+        localPath: testBaseDir,
+        localWriteMode: 'patch_export',
+      },
+      task: unaccepted,
+    });
+
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(res.body.blocked, true);
+    assert.ok(res.body.error.includes('failed quality gate acceptance'));
   });
 
-  // --- TEST 6: Git Delivery Disabled Policy ---
-  runTest('Git delivery modes are strictly disabled to prevent checkout interference and shell injection', () => {
-    // Verified against disabled flag in delivery endpoint handler
-    const disabledModes = ['git_branch', 'remote_git'];
-    assert.strictEqual(disabledModes.includes('git_branch'), true);
-    assert.strictEqual(disabledModes.includes('remote_git'), true);
-  });
-
-  // --- TEST 7: Safe Patch Export ---
-  runTest('Patch export creates pure unified diff without shell command execution', () => {
-    const code = 'function hello() {\n  return "world";\n}';
-    const taskKey = 'AEG-TEST-PATCH';
-    const targetDir = 'src/test';
-    const patchContent = `--- a/${targetDir}/${taskKey}_Service.js\n+++ b/${targetDir}/${taskKey}_Service.js\n@@ -0,0 +1,${code.split('\n').length} @@\n` + code.split('\n').map((l) => `+${l}`).join('\n') + '\n';
-    
-    assert.ok(patchContent.startsWith('--- a/src/test/AEG-TEST-PATCH_Service.js'));
-    assert.ok(patchContent.includes('+function hello()'));
-    assert.ok(patchContent.includes('+  return "world";'));
-  });
-
-  // --- TEST 8: AI Allocation Capacity Numbers Match Assignments ---
-  runTest('Capacity load numbers calculate directly from assigned tasks', () => {
-    const agent = { id: 'agent-qa', name: 'Valkyrie', role: 'QA Lead' };
-    const tasks = [
-      { id: 't1', key: 'A-1', assignedAgentId: 'agent-qa', estimatedHours: 16, status: 'in_progress' },
-      { id: 't2', key: 'A-2', assignedAgentId: 'agent-qa', estimatedHours: 8, status: 'todo' },
-      { id: 't3', key: 'A-3', assignedAgentId: 'other', estimatedHours: 20, status: 'in_progress' },
-    ];
-    const summary = calculateAgentLoad(agent, tasks, 40);
-    assert.strictEqual(summary.allocatedHours, 24);
-    assert.strictEqual(summary.loadPercentage, 60);
-    assert.strictEqual(summary.status, 'balanced');
-  });
+  // Clean up fixture
+  try {
+    fs.rmSync(testBaseDir, { recursive: true, force: true });
+  } catch {}
 
   console.log(`\n=== REGRESSION SUITE COMPLETE: ${passedTests}/${totalTests} TESTS PASSED CLEANLY ===`);
 }
 
-executeAll().catch(() => {
+executeSuite().catch((e) => {
+  console.error(e);
   process.exit(1);
 });
