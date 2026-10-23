@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { IntegrationConfig, CustomProvider, CommunicationMessage, Task } from '../types';
+import { IntegrationConfig, CustomProvider, CommunicationMessage, Task, RepositoryConfig } from '../types';
 import { 
   Share2, 
   Send, 
@@ -14,7 +14,12 @@ import {
   CheckCircle2, 
   Link, 
   ExternalLink,
-  MessageSquare
+  MessageSquare,
+  Folder,
+  GitBranch,
+  GitPullRequest,
+  FolderGit2,
+  HardDrive
 } from 'lucide-react';
 
 interface IntegrationsViewProps {
@@ -30,8 +35,31 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
   communications,
   tasks,
 }) => {
-  const [config, setConfig] = useState<IntegrationConfig>({ ...integrationConfig });
-  const [activeTab, setActiveTab] = useState<'jira' | 'slack' | 'custom' | 'bus'>('jira');
+  const [config, setConfig] = useState<IntegrationConfig>({
+    ...integrationConfig,
+    repository: integrationConfig.repository || {
+      enabled: true,
+      type: 'local_directory',
+      localPath: '/Users/mac/ops/repos/aegis-orchestrator',
+      localWriteMode: 'direct_write',
+      repoUrl: 'https://github.com/acme-corp/aegis-core-system',
+      defaultBranch: 'main',
+      branchPrefix: 'aegis/',
+      deliveryMode: 'pull_request',
+      apiToken: '••••••••••••••••••••••••••••••••',
+      targetDirectory: 'src/services',
+      autoCreatePrOnDone: false,
+      autoWriteToLocalOnDone: true,
+      lastPrUrl: 'https://github.com/acme-corp/aegis-core-system/pull/42',
+      lastCommitHash: '8bd0157f49a2c38d',
+      lastDeliveredPath: '/Users/mac/ops/repos/aegis-orchestrator/src/services/AEG-104_service.ts',
+    },
+  });
+  const [activeTab, setActiveTab] = useState<'repository' | 'jira' | 'slack' | 'custom' | 'bus'>('repository');
+
+  // Destination Repository Test state
+  const [isTestingRepo, setIsTestingRepo] = useState(false);
+  const [repoTestResult, setRepoTestResult] = useState<any | null>(null);
 
   // Jira Test state
   const [isTestingJira, setIsTestingJira] = useState(false);
@@ -50,6 +78,54 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
   const [newProviderName, setNewProviderName] = useState('');
   const [newProviderUrl, setNewProviderUrl] = useState('');
   const [newProviderType, setNewProviderType] = useState<'llm' | 'webhook' | 'agent_rpc' | 'ci_cd'>('llm');
+
+  // Test Destination Repository (Local Directory or Remote Git)
+  const handleTestRepo = async (action: 'verify' | 'deliver' = 'verify') => {
+    setIsTestingRepo(true);
+    setRepoTestResult(null);
+    try {
+      const sampleTask = tasks[0] || {
+        key: 'AEG-104',
+        title: 'Implement AI-Driven Workload Balancing',
+        description: 'Service contract for workload balancing',
+        status: 'done',
+        priority: 'high',
+      };
+
+      const response = await fetch('/api/integrations/repository/dispatch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          repoConfig: config.repository,
+          task: sampleTask,
+        }),
+      });
+
+      const data = await response.json();
+      setRepoTestResult(data);
+
+      if (data.targetFilePath) {
+        const updated = {
+          ...config,
+          repository: { ...config.repository, lastDeliveredPath: data.targetFilePath },
+        };
+        setConfig(updated);
+        onUpdateIntegrationConfig(updated);
+      } else if (data.prUrl) {
+        const updated = {
+          ...config,
+          repository: { ...config.repository, lastPrUrl: data.prUrl, lastCommitHash: data.commitSha },
+        };
+        setConfig(updated);
+        onUpdateIntegrationConfig(updated);
+      }
+    } catch (err: any) {
+      setRepoTestResult({ error: err.message || 'Repository operation failed' });
+    } finally {
+      setIsTestingRepo(false);
+    }
+  };
 
   // Test Jira sync or verification
   const handleTestJiraSync = async (action: 'verify' | 'sync_task' = 'sync_task') => {
@@ -203,6 +279,17 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
         {/* Integration Sub-tabs */}
         <div className="flex space-x-2 mt-4 pt-3 border-t border-slate-800/80 overflow-x-auto scrollbar-none">
           <button
+            onClick={() => setActiveTab('repository')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
+              activeTab === 'repository'
+                ? 'bg-amber-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            <FolderGit2 className="w-3.5 h-3.5" />
+            <span>Destination Repository & Delivery</span>
+          </button>
+          <button
             onClick={() => setActiveTab('jira')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeTab === 'jira'
@@ -244,6 +331,306 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* TAB 0: DESTINATION REPOSITORY & GIT DELIVERY */}
+      {activeTab === 'repository' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-xs font-bold text-slate-100 uppercase tracking-wider flex items-center space-x-2">
+                <FolderGit2 className="w-4 h-4 text-amber-400" />
+                <span>Destination Repository Configuration</span>
+              </h3>
+              <label className="flex items-center space-x-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={config.repository.enabled}
+                  onChange={(e) => setConfig({ ...config, repository: { ...config.repository, enabled: e.target.checked } })}
+                  className="rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500/20"
+                />
+                <span>Enable Delivery</span>
+              </label>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Define where autonomous specialist agents deliver verified code artifacts—either directly into a <strong>local repository directory on disk</strong> or to a <strong>remote Git repository (GitHub / GitLab)</strong> via automated Pull Requests.
+            </p>
+
+            {/* Target Type Selector */}
+            <div>
+              <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                Destination Target Type
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfig({ ...config, repository: { ...config.repository, type: 'local_directory' } })}
+                  className={`flex items-center justify-center space-x-2 p-2.5 rounded-lg border text-xs font-semibold transition-all ${
+                    config.repository.type === 'local_directory'
+                      ? 'bg-amber-950/40 border-amber-500 text-amber-200 shadow-sm'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <HardDrive className="w-4 h-4 text-amber-400" />
+                  <span>Local Repo Directory</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setConfig({ ...config, repository: { ...config.repository, type: 'github' } })}
+                  className={`flex items-center justify-center space-x-2 p-2.5 rounded-lg border text-xs font-semibold transition-all ${
+                    config.repository.type !== 'local_directory'
+                      ? 'bg-amber-950/40 border-amber-500 text-amber-200 shadow-sm'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <GitPullRequest className="w-4 h-4 text-amber-400" />
+                  <span>Remote Git (GitHub/GitLab)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* LOCAL REPO DIRECTORY FIELDS */}
+            {config.repository.type === 'local_directory' ? (
+              <div className="space-y-3 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    Local Repository Path (Absolute or Relative)
+                  </label>
+                  <div className="relative">
+                    <Folder className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" />
+                    <input
+                      type="text"
+                      value={config.repository.localPath || ''}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, localPath: e.target.value } })}
+                      placeholder="/Users/mac/ops/repos/my-application"
+                      className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-amber-500"
+                    />
+                  </div>
+                  <span className="text-[10px] text-slate-500 mt-1 block">
+                    Points to your existing codebase on disk where verified files will be written.
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Subdirectory within Repo
+                    </label>
+                    <input
+                      type="text"
+                      value={config.repository.targetDirectory || ''}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, targetDirectory: e.target.value } })}
+                      placeholder="src/services"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Local Write Strategy
+                    </label>
+                    <select
+                      value={config.repository.localWriteMode || 'direct_write'}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, localWriteMode: e.target.value as any } })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                    >
+                      <option value="direct_write">Direct File Overwrite</option>
+                      <option value="git_branch">Git Feature Branch</option>
+                      <option value="patch_export">Export Unified Diff Patch</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="pt-1">
+                  <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={config.repository.autoWriteToLocalOnDone ?? true}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, autoWriteToLocalOnDone: e.target.checked } })}
+                      className="rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500/20"
+                    />
+                    <span>Automatically write verified code to local directory when task passes Quality Gate</span>
+                  </label>
+                </div>
+              </div>
+            ) : (
+              /* REMOTE GIT REPO FIELDS */
+              <div className="space-y-3 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    Remote Repository URL
+                  </label>
+                  <input
+                    type="text"
+                    value={config.repository.repoUrl || ''}
+                    onChange={(e) => setConfig({ ...config, repository: { ...config.repository, repoUrl: e.target.value } })}
+                    placeholder="https://github.com/acme-corp/aegis-core-system"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Target Base Branch
+                    </label>
+                    <input
+                      type="text"
+                      value={config.repository.defaultBranch || 'main'}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, defaultBranch: e.target.value } })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Branch Prefix
+                    </label>
+                    <input
+                      type="text"
+                      value={config.repository.branchPrefix || 'aegis/'}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, branchPrefix: e.target.value } })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Target Subdirectory
+                    </label>
+                    <input
+                      type="text"
+                      value={config.repository.targetDirectory || 'src/'}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, targetDirectory: e.target.value } })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Personal Access Token (PAT)
+                    </label>
+                    <input
+                      type="password"
+                      value={config.repository.apiToken || ''}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, apiToken: e.target.value } })}
+                      placeholder="ghp_••••••••••••••••••••••••"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-1">
+                  <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={config.repository.autoCreatePrOnDone ?? true}
+                      onChange={(e) => setConfig({ ...config, repository: { ...config.repository, autoCreatePrOnDone: e.target.checked } })}
+                      className="rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500/20"
+                    />
+                    <span>Automatically create Pull Request when task passes Quality Gate</span>
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {/* Save & Action Buttons */}
+            <div className="pt-2 flex flex-wrap gap-2 justify-between items-center">
+              <button
+                onClick={handleSaveConfig}
+                className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg"
+              >
+                Save Repository Settings
+              </button>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => handleTestRepo('verify')}
+                  disabled={isTestingRepo}
+                  className="flex items-center space-x-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold rounded-lg border border-amber-800/50 disabled:opacity-50"
+                  title="Verify repository destination access"
+                >
+                  {isTestingRepo ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
+                  <span>Verify Destination</span>
+                </button>
+
+                <button
+                  onClick={() => handleTestRepo('deliver')}
+                  disabled={isTestingRepo}
+                  className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-lg shadow disabled:opacity-50"
+                >
+                  {isTestingRepo ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <GitBranch className="w-3.5 h-3.5" />}
+                  <span>{config.repository.type === 'local_directory' ? 'Deliver to Local Directory' : 'Dispatch Sample PR'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Repository Diagnostic Results Card */}
+          <div className="bg-slate-950 border border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
+                <span className="text-xs font-bold text-slate-200 flex items-center space-x-2">
+                  <Activity className="w-4 h-4 text-amber-400" />
+                  <span>Repository Destination Status</span>
+                </span>
+                {repoTestResult && (
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    repoTestResult.success ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'
+                  }`}>
+                    {repoTestResult.success ? 'READY' : 'ACTION REQUIRED'}
+                  </span>
+                )}
+              </div>
+
+              {repoTestResult ? (
+                <div className="space-y-3">
+                  <p className="text-xs text-slate-300">{repoTestResult.message || 'Operation executed.'}</p>
+
+                  {repoTestResult.targetFilePath && (
+                    <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Delivered File Path:</span>
+                      <code className="text-xs text-amber-300 font-mono break-all">{repoTestResult.targetFilePath}</code>
+                      <span className="text-[10px] text-slate-500 block">Size: {repoTestResult.bytesWritten} bytes • Task: {repoTestResult.taskKey}</span>
+                    </div>
+                  )}
+
+                  {repoTestResult.prUrl && (
+                    <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Pull Request Target:</span>
+                      <a href={repoTestResult.prUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:underline flex items-center space-x-1 font-mono">
+                        <span>{repoTestResult.prUrl}</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <span className="text-[10px] text-slate-400 block">Branch: <code className="text-amber-300 font-mono">{repoTestResult.branch}</code> • Commit: <code className="font-mono text-slate-300">{repoTestResult.commitSha}</code></span>
+                    </div>
+                  )}
+
+                  {repoTestResult.error && (
+                    <div className="p-3 bg-rose-950/40 border border-rose-800/60 rounded-lg text-xs text-rose-300 flex items-start space-x-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+                      <span>{repoTestResult.error}</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="py-8 text-center text-slate-500 text-xs space-y-2">
+                  <FolderGit2 className="w-8 h-8 mx-auto text-slate-600 opacity-60" />
+                  <p>No repository verification run yet.</p>
+                  <p className="text-[11px] text-slate-600">Click &ldquo;Verify Destination&rdquo; or &ldquo;Deliver to Local Directory&rdquo; to test your target location.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Current Active Target Summary Footer */}
+            <div className="pt-4 border-t border-slate-800/80 mt-4 text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Target: <strong className="text-slate-200">{config.repository.type === 'local_directory' ? 'Local Directory' : 'Remote Git'}</strong></span>
+              <span className="font-mono text-[10px] text-slate-500 truncate max-w-xs">{config.repository.type === 'local_directory' ? config.repository.localPath : config.repository.repoUrl}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: JIRA SYNC */}
       {activeTab === 'jira' && (

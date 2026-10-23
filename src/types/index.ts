@@ -32,6 +32,8 @@ export interface Task {
   lastAgentComment?: string;
   jiraSynced?: boolean;
   slackNotified?: boolean;
+  targetBranch?: string;
+  pullRequestUrl?: string;
   lastUpdated?: string;
 }
 
@@ -115,6 +117,28 @@ export interface CustomProvider {
   latencyMs?: number;
 }
 
+export type RepositoryType = 'local_directory' | 'github' | 'gitlab' | 'bitbucket';
+
+export interface RepositoryConfig {
+  enabled: boolean;
+  type: RepositoryType;
+  // Local repository / directory options
+  localPath: string; // e.g. "/Users/mac/ops/repos/my-app" or "./workspace"
+  localWriteMode: 'direct_write' | 'git_branch' | 'patch_export';
+  // Remote repository options
+  repoUrl: string;
+  defaultBranch: string;
+  branchPrefix: string;
+  deliveryMode: 'pull_request' | 'branch_push' | 'local_artifacts';
+  apiToken: string;
+  targetDirectory: string; // relative subfolder in repo
+  autoCreatePrOnDone: boolean;
+  autoWriteToLocalOnDone: boolean;
+  lastPrUrl?: string;
+  lastCommitHash?: string;
+  lastDeliveredPath?: string;
+}
+
 export interface IntegrationConfig {
   jira: {
     enabled: boolean;
@@ -133,6 +157,7 @@ export interface IntegrationConfig {
     notifyOnBlocker: boolean;
     notifyOnCompletion: boolean;
   };
+  repository: RepositoryConfig;
   customProviders: CustomProvider[];
 }
 

@@ -352,6 +352,23 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
     notifyOnBlocker: true,
     notifyOnCompletion: true,
   },
+  repository: {
+    enabled: true,
+    type: 'local_directory',
+    localPath: '/Users/mac/ops/repos/aegis-orchestrator',
+    localWriteMode: 'direct_write',
+    repoUrl: 'https://github.com/acme-corp/aegis-core-system',
+    defaultBranch: 'main',
+    branchPrefix: 'aegis/',
+    deliveryMode: 'pull_request',
+    apiToken: '••••••••••••••••••••••••••••••••',
+    targetDirectory: 'src/services',
+    autoCreatePrOnDone: false,
+    autoWriteToLocalOnDone: true,
+    lastPrUrl: 'https://github.com/acme-corp/aegis-core-system/pull/42',
+    lastCommitHash: '8bd0157f49a2c38d',
+    lastDeliveredPath: '/Users/mac/ops/repos/aegis-orchestrator/src/services/AEG-104_service.ts',
+  },
   customProviders: [
     {
       id: 'prov-ollama',
