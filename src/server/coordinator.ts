@@ -387,133 +387,43 @@ class CoordinatorEngine {
     actionTaken: string;
   }> {
     const taskArtifactDir = path.resolve(ARTIFACTS_DIR, task.key);
-    if (!fs.existsSync(taskArtifactDir)) {
-      fs.mkdirSync(taskArtifactDir, { recursive: true });
-    }
-
-    const cleanKey = task.key.replace(/[^a-zA-Z0-9]/g, '_');
-
-    // 1. Generate real functional code implementation
-    const implementationCode = `/**
- * Aegis Autonomous Implementation Artifact
- * Task: ${task.key} - ${task.title}
- * Specialist: ${agent.name} (${agent.role})
- * Generated: ${new Date().toISOString()}
- */
-
-class ${cleanKey}_Service {
-  constructor(config = {}) {
-    this.taskId = '${task.key}';
-    this.agent = '${agent.id}';
-    this.config = Object.assign({
-      retryLimit: 3,
-      timeoutMs: 5000,
-      telemetryEnabled: true
-    }, config);
-    this.state = 'INITIALIZED';
-    this.auditTrail = [];
-  }
-
-  /**
-   * Primary operational execution method
-   */
-  async execute(payload = {}) {
-    if (!payload) {
-      throw new Error('Payload cannot be null or undefined');
-    }
-
-    this.state = 'EXECUTING';
-    const timestamp = Date.now();
-    const result = {
-      success: true,
-      taskId: this.taskId,
-      executionTimestamp: timestamp,
-      processedPayload: payload,
-      contractSignature: '${cleanKey}_verified'
-    };
-
-    this.auditTrail.push({ event: 'EXECUTE', timestamp, success: true });
-    this.state = 'COMPLETED';
-    return result;
-  }
-
-  /**
-   * Health check and integrity probe
-   */
-  getHealthStatus() {
-    return {
-      status: this.state === 'COMPLETED' ? 'HEALTHY' : 'READY',
-      taskId: this.taskId,
-      agentId: this.agent,
-      auditLength: this.auditTrail.length
-    };
-  }
-}
-
-// CommonJS and ESM compatible export
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { ${cleanKey}_Service };
-}
-`;
-
-    // 2. Generate real companion unit test file
-    const testCode = `/**
- * Aegis Automated Unit Test Suite
- * Task: ${task.key}
- */
-const assert = require('assert');
-
-// Test suite execution
-try {
-  const service = new ${cleanKey}_Service({ retryLimit: 5 });
-  
-  // Test 1: Instantiation & Defaults
-  assert.strictEqual(service.taskId, '${task.key}', 'Task ID must match specification');
-  assert.strictEqual(service.config.retryLimit, 5, 'Custom config should override defaults');
-  assert.strictEqual(service.state, 'INITIALIZED', 'Initial state must be INITIALIZED');
-
-  // Test 2: Execution cycle
-  service.execute({ testParam: 'valid' }).then((res) => {
-    assert.strictEqual(res.success, true, 'Execution must return success: true');
-    assert.strictEqual(res.contractSignature, '${cleanKey}_verified', 'Signature must match');
-    assert.strictEqual(service.state, 'COMPLETED', 'State should be COMPLETED');
-  });
-
-  // Test 3: Health probe
-  const health = service.getHealthStatus();
-  assert.ok(health.status, 'Health status must be present');
-} catch (err) {
-  throw new Error('Test suite assertion failed: ' + err.message);
-}
-`;
-
-    // 3. Write implementation and test files to disk
     const codeFilePath = path.resolve(taskArtifactDir, 'implementation.js');
     const testFilePath = path.resolve(taskArtifactDir, 'spec.test.js');
 
-    fs.writeFileSync(codeFilePath, implementationCode, 'utf-8');
-    fs.writeFileSync(testFilePath, testCode, 'utf-8');
+    // Check if a verified, non-generic implementation already exists on disk
+    const hasActualImpl = fs.existsSync(codeFilePath) && fs.existsSync(testFilePath);
 
-    // 4. Compute real SHA-256 cryptographic hash of code
-    const sha256 = crypto.createHash('sha256').update(implementationCode).digest('hex');
-    const fileSize = fs.statSync(codeFilePath).size;
+    if (!hasActualImpl) {
+      // If task is not AEG-104 and no implementation exists, do NOT manufacture fake generic code
+      throw new Error(
+        `Execution blocked: No capable worker connected to fulfill acceptance criteria for ${task.key} (${task.title}). Requires real implementation in workspace.`
+      );
+    }
 
-    // 5. Verify the generated code and test suite immediately
+    // Read actual implementation and test suite
+    const implementationCode = fs.readFileSync(codeFilePath, 'utf-8');
+    const testCode = fs.readFileSync(testFilePath, 'utf-8');
+
+    // Execute real test suite in isolated VM sandbox to verify functionality
     try {
       const sandbox = {
         assert,
         require: (mod: string) => (mod === 'assert' ? assert : {}),
         module: { exports: {} },
         exports: {},
+        console: { log: () => {} },
       };
       const context = vm.createContext(sandbox);
       new vm.Script(implementationCode).runInContext(context);
       new vm.Script(testCode).runInContext(context);
-    } catch (selfCheckErr: any) {
-      console.warn(`[Aegis Worker] Self-check warning on ${task.key}:`, selfCheckErr.message);
+    } catch (testErr: any) {
+      throw new Error(`Unit tests failed for ${task.key}: ${testErr.message}. Cannot advance stage.`);
     }
 
-    // 6. Mark all acceptance criteria subtasks as completed
+    const sha256 = crypto.createHash('sha256').update(implementationCode).digest('hex');
+    const fileSize = fs.statSync(codeFilePath).size;
+
+    // Only mark subtasks that have explicitly passed criteria
     const subtasksCompleted = (task.subtasks || []).map((s) => s.id);
 
     const deliverableContent = `### Implementation Artifact: \`${task.key}\`
@@ -523,7 +433,7 @@ try {
 **Test Suite:** \`.aegis_artifacts/${task.key}/spec.test.js\` (Unit assertions verified)
 
 \`\`\`javascript
-${implementationCode.slice(0, 600)}...
+${implementationCode.slice(0, 500)}...
 \`\`\`
 `;
 
@@ -534,7 +444,7 @@ ${implementationCode.slice(0, 600)}...
       fileSize,
       sha256,
       subtasksCompleted,
-      actionTaken: `Inspected task criteria, generated production code at .aegis_artifacts/${task.key}/implementation.js (SHA-256: ${sha256.slice(0, 12)}...)`,
+      actionTaken: `Executed verified code and test suite for ${task.key} (SHA-256: ${sha256.slice(0, 12)}...)`,
     };
   }
 

@@ -698,18 +698,54 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
         const taskKey = task?.key || 'AEG-104';
         const sourceArtifact = path.resolve(__dirname, `.aegis_artifacts/${taskKey}/implementation.js`);
 
+        // Check if real artifact exists on disk - never substitute placeholders
+        if (!fs.existsSync(sourceArtifact)) {
+          return res.status(400).json({
+            success: false,
+            blocked: true,
+            error: `Delivery blocked: No verified artifact found on disk at .aegis_artifacts/${taskKey}/implementation.js. Task must pass quality gates before delivery.`,
+          });
+        }
+
+        const codeToDeliver = fs.readFileSync(sourceArtifact, 'utf-8');
+
         if (!fs.existsSync(targetSubdir)) {
           fs.mkdirSync(targetSubdir, { recursive: true });
         }
 
-        const destinationFilename = `${taskKey}_Service.js`;
-        const destinationPath = path.resolve(targetSubdir, destinationFilename);
+        // Enforce localWriteMode
+        if (localWriteMode === 'patch_export') {
+          const patchFilename = `${taskKey}_delivery.patch`;
+          const patchPath = path.resolve(targetSubdir, patchFilename);
+          const patchContent = `--- a/${targetDirectory}/${taskKey}_Service.js\n+++ b/${targetDirectory}/${taskKey}_Service.js\n@@ -0,0 +1,${codeToDeliver.split('\n').length} @@\n` + codeToDeliver.split('\n').map(l => `+${l}`).join('\n') + '\n';
+          fs.writeFileSync(patchPath, patchContent, 'utf-8');
 
-        let codeToDeliver = `// Autonomous delivery for ${taskKey}\nconsole.log("Aegis execution ready");`;
-        if (fs.existsSync(sourceArtifact)) {
-          codeToDeliver = fs.readFileSync(sourceArtifact, 'utf-8');
+          return res.json({
+            success: true,
+            type: 'local_directory',
+            action: 'deliver',
+            localWriteMode: 'patch_export',
+            targetFilePath: patchPath,
+            bytesWritten: fs.statSync(patchPath).size,
+            taskKey,
+            deliveredAt: new Date().toISOString(),
+            message: `Unified patch file generated at ${patchPath} (${fs.statSync(patchPath).size} bytes).`,
+          });
         }
 
+        if (localWriteMode === 'git_branch') {
+          if (!isGitRepo) {
+            return res.status(400).json({
+              success: false,
+              blocked: true,
+              error: `Git branch delivery blocked: Destination directory ${resolvedLocal} is not an initialized Git repository.`,
+            });
+          }
+        }
+
+        // Default direct_write mode
+        const destinationFilename = `${taskKey}_Service.js`;
+        const destinationPath = path.resolve(targetSubdir, destinationFilename);
         fs.writeFileSync(destinationPath, codeToDeliver, 'utf-8');
         const bytesWritten = fs.statSync(destinationPath).size;
 
@@ -717,11 +753,12 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
           success: true,
           type: 'local_directory',
           action: 'deliver',
+          localWriteMode,
           targetFilePath: destinationPath,
           bytesWritten,
           taskKey,
           deliveredAt: new Date().toISOString(),
-          message: `Code delivered directly into local repository directory: ${destinationPath} (${bytesWritten} bytes).`,
+          message: `Verified code delivered directly to local repository: ${destinationPath} (${bytesWritten} bytes).`,
         });
       }
     }
@@ -729,9 +766,17 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
     // 2. Handle Remote Git Repository (GitHub, GitLab, Bitbucket)
     const cleanUrl = (repoUrl || '').trim();
     const match = cleanUrl.match(/(?:github\.com\/|gitlab\.com\/|^)([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)(?:\.git)?/);
-    const owner = match ? match[1] : 'acme-corp';
-    const repo = match ? match[2].replace(/\.git$/, '') : 'aegis-core-system';
+    const owner = match ? match[1] : null;
+    const repo = match ? match[2].replace(/\.git$/, '') : null;
     const branchName = task ? `${branchPrefix}${task.key.toLowerCase()}` : `${branchPrefix}sprint-delivery`;
+
+    if (!owner || !repo) {
+      return res.status(400).json({
+        success: false,
+        blocked: true,
+        error: `Invalid repository URL "${repoUrl}". Please specify a valid GitHub or GitLab repository in the format "owner/repo" or "https://github.com/owner/repo".`,
+      });
+    }
 
     if (action === 'verify') {
       let realApiCall = false;
@@ -760,11 +805,15 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
             return res.status(ghRes.status).json({
               success: false,
               realApiCall: true,
-              error: `GitHub API error (${ghRes.status}): ${await ghRes.text()}`,
+              error: `GitHub authentication failed (${ghRes.status}): ${await ghRes.text()}`,
             });
           }
         } catch (err: any) {
-          console.warn('GitHub API probe error:', err.message);
+          return res.status(502).json({
+            success: false,
+            realApiCall: true,
+            error: `GitHub connection failed: ${err.message}`,
+          });
         }
       }
 
@@ -781,47 +830,80 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
           fullName: `${owner}/${repo}`,
           defaultBranch,
           configuredDelivery: deliveryMode,
-          status: 'Ready for pull request dispatch',
+          status: 'Configuration saved. Real API credentials required for live dispatch.',
         },
         message: realApiCall 
           ? `Successfully authenticated with ${owner}/${repo} on GitHub.` 
-          : `Destination repository configured for ${owner}/${repo} (default branch: ${defaultBranch}).`,
+          : `Remote repository target set to ${owner}/${repo}. Enter a GitHub Personal Access Token to enable live Pull Request dispatch.`,
       });
     }
 
     if (action === 'create_pr' || action === 'deliver') {
       const taskKey = task?.key || 'AEG-104';
-      const taskTitle = task?.title || 'Autonomous Task Delivery';
-      const prNumber = Math.floor(Math.random() * 80) + 20;
-      const prUrl = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
-      const commitSha = crypto.randomBytes(4).toString('hex') + '8bd0';
+      const sourceArtifact = path.resolve(__dirname, `.aegis_artifacts/${taskKey}/implementation.js`);
 
-      const prBody = `## 🤖 Aegis Autonomous Delivery: ${taskKey}
-### ${taskTitle}
-**Target Branch:** \`${defaultBranch}\` ➔ \`${branchName}\`
-**Verified Artifact:** \`.aegis_artifacts/${taskKey}/implementation.js\`
-**Quality Gate Status:** ✅ PASSED (AST compiler, unit test assertions, dependencies cleared)
+      if (!fs.existsSync(sourceArtifact)) {
+        return res.status(400).json({
+          success: false,
+          blocked: true,
+          error: `Delivery blocked: No verified artifact found on disk at .aegis_artifacts/${taskKey}/implementation.js. Task must pass quality gates before dispatch.`,
+        });
+      }
 
-### Commit Summary:
-- \`${commitSha}\`: feat(${taskKey}): implement production logic and automated test assertions
-- Co-authored-by: Aegis Specialist <agents@aegis.local>
+      // If user has not provided a real GitHub token, report BLOCKED honestly without fabricating a fake PR
+      if (!apiToken || apiToken.includes('•••') || !apiToken.startsWith('ghp_')) {
+        return res.status(400).json({
+          success: false,
+          blocked: true,
+          error: `Remote Pull Request delivery blocked: No valid GitHub Personal Access Token (PAT) configured. To open a real Pull Request on ${owner}/${repo}, enter a token with 'repo' scope in Integrations Settings.`,
+        });
+      }
 
-### Acceptance Subtasks Verified:
-${(task?.subtasks || []).map((s: any) => `- [x] ${s.title}`).join('\n')}
-`;
+      // If real token provided, attempt genuine GitHub PR creation
+      try {
+        const createPrRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiToken}`,
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': 'Aegis-Orchestrator',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            title: `feat(${taskKey}): ${task?.title || 'Autonomous task delivery'}`,
+            head: branchName,
+            base: defaultBranch,
+            body: `## Aegis Autonomous Delivery for ${taskKey}\nDelivered verified code from .aegis_artifacts/${taskKey}/`,
+          }),
+        });
 
-      return res.json({
-        success: true,
-        type: 'remote_git',
-        action: 'create_pr',
-        prUrl,
-        prNumber,
-        branch: branchName,
-        commitSha,
-        prBody,
-        deliveredAt: new Date().toISOString(),
-        message: `Pull Request #${prNumber} opened on ${owner}/${repo} for branch \`${branchName}\`.`,
-      });
+        if (!createPrRes.ok) {
+          const errText = await createPrRes.text();
+          return res.status(createPrRes.status).json({
+            success: false,
+            blocked: true,
+            error: `GitHub PR creation returned HTTP ${createPrRes.status}: ${errText}`,
+          });
+        }
+
+        const prData = await createPrRes.json();
+        return res.json({
+          success: true,
+          type: 'remote_git',
+          action: 'create_pr',
+          prUrl: prData.html_url,
+          prNumber: prData.number,
+          branch: branchName,
+          deliveredAt: new Date().toISOString(),
+          message: `Pull Request #${prData.number} opened on ${owner}/${repo}.`,
+        });
+      } catch (err: any) {
+        return res.status(502).json({
+          success: false,
+          blocked: true,
+          error: `GitHub API call failed: ${err.message}`,
+        });
+      }
     }
 
     res.status(400).json({ error: 'Unknown action' });
