@@ -431,13 +431,13 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                       Local Write Strategy
                     </label>
                     <select
-                      value={config.repository.localWriteMode || 'direct_write'}
+                      value={config.repository.localWriteMode === 'git_branch' ? 'patch_export' : (config.repository.localWriteMode || 'patch_export')}
                       onChange={(e) => setConfig({ ...config, repository: { ...config.repository, localWriteMode: e.target.value as any } })}
                       className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
                     >
-                      <option value="direct_write">Direct File Overwrite</option>
-                      <option value="git_branch">Git Feature Branch</option>
-                      <option value="patch_export">Export Unified Diff Patch</option>
+                      <option value="patch_export">Export Unified Diff Patch (Safe standalone)</option>
+                      <option value="direct_write">Direct File Overwrite (Safe in-tree)</option>
+                      <option value="git_branch" disabled>Git Feature Branch (Disabled - pending worktree isolation)</option>
                     </select>
                   </div>
                 </div>

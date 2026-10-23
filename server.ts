@@ -2,7 +2,6 @@ import express, { Request, Response } from 'express';
 import http from 'http';
 import fs from 'fs';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -721,22 +720,28 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
         const taskKey = task?.key || 'AEG-104';
         const sourceArtifact = path.resolve(__dirname, `.aegis_artifacts/${taskKey}/implementation.js`);
 
-        // Check 1: Delivery checks acceptance, not just file existence
+        // Check 1: Delivery checks acceptance, not just file existence - FAIL CLOSED
         const targetTask = coordinator.getState().tasks.find((t) => t.key === taskKey || t.id === task?.id);
-        if (targetTask) {
-          const verification = coordinator.verifyTaskQualityGates(targetTask);
-          if (!verification.passed) {
-            const failedDetails = verification.checks
-              .filter((c: any) => !c.passed)
-              .map((c: any) => `${c.rule}: ${c.detail}`)
-              .join('; ');
-            return res.status(400).json({
-              success: false,
-              blocked: true,
-              error: `Delivery blocked: Task ${taskKey} failed quality gate acceptance (${failedDetails}). Only accepted tasks that satisfy quality gates can be delivered.`,
-              verification,
-            });
-          }
+        if (!targetTask) {
+          return res.status(400).json({
+            success: false,
+            blocked: true,
+            error: `Delivery blocked: Task "${taskKey}" not found in sprint state. Delivery requires verified task acceptance.`,
+          });
+        }
+
+        const verification = coordinator.verifyTaskQualityGates(targetTask);
+        if (!verification.passed) {
+          const failedDetails = verification.checks
+            .filter((c: any) => !c.passed)
+            .map((c: any) => `${c.rule}: ${c.detail}`)
+            .join('; ');
+          return res.status(400).json({
+            success: false,
+            blocked: true,
+            error: `Delivery blocked: Task ${taskKey} failed quality gate acceptance (${failedDetails}). Only accepted tasks that satisfy quality gates can be delivered.`,
+            verification,
+          });
         }
 
         // Check 2: Check if real artifact exists on disk - never substitute placeholders
@@ -748,13 +753,31 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
           });
         }
 
+        // Check 3: Git branch delivery is strictly disabled until isolated worktree and process argument calls are implemented
+        if (localWriteMode === 'git_branch') {
+          return res.status(403).json({
+            success: false,
+            blocked: true,
+            error: 'Git branch delivery is currently disabled pending isolated worktree execution, process argument isolation, and automated regression testing. Use patch_export mode instead.',
+          });
+        }
+
         const codeToDeliver = fs.readFileSync(sourceArtifact, 'utf-8');
+
+        // Prevent path traversal
+        if (!targetSubdir.startsWith(resolvedLocal)) {
+          return res.status(400).json({
+            success: false,
+            blocked: true,
+            error: 'Delivery blocked: Path traversal outside destination directory is forbidden.',
+          });
+        }
 
         if (!fs.existsSync(targetSubdir)) {
           fs.mkdirSync(targetSubdir, { recursive: true });
         }
 
-        // Enforce localWriteMode
+        // Safe mode 1: patch_export (pure unified diff generation, zero shell execution, no checkout interference)
         if (localWriteMode === 'patch_export') {
           const patchFilename = `${taskKey}_delivery.patch`;
           const patchPath = path.resolve(targetSubdir, patchFilename);
@@ -774,67 +797,7 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
           });
         }
 
-        if (localWriteMode === 'git_branch') {
-          if (!isGitRepo) {
-            return res.status(400).json({
-              success: false,
-              blocked: true,
-              error: `Git branch delivery blocked: Destination directory ${resolvedLocal} is not an initialized Git repository.`,
-            });
-          }
-
-          const gitBranchName = `${branchPrefix || 'feature/'}${taskKey.toLowerCase()}-delivery`;
-          try {
-            // Check current branch
-            let baseBranch = 'master';
-            try {
-              baseBranch = execSync('git branch --show-current', { cwd: resolvedLocal, encoding: 'utf-8' }).trim() || 'master';
-            } catch {}
-
-            // Create and checkout branch (or switch to it if already exists)
-            try {
-              execSync(`git checkout -b "${gitBranchName}"`, { cwd: resolvedLocal, encoding: 'utf-8' });
-            } catch {
-              execSync(`git checkout "${gitBranchName}"`, { cwd: resolvedLocal, encoding: 'utf-8' });
-            }
-
-            // Write verified implementation file to branch
-            const destinationFilename = `${taskKey}_Service.js`;
-            const destinationPath = path.resolve(targetSubdir, destinationFilename);
-            fs.writeFileSync(destinationPath, codeToDeliver, 'utf-8');
-
-            // Stage and commit to git branch
-            execSync(`git add "${destinationPath}"`, { cwd: resolvedLocal, encoding: 'utf-8' });
-            let commitSha = '';
-            try {
-              execSync(`git commit -m "feat(${taskKey}): deliver verified implementation from Aegis"`, { cwd: resolvedLocal, encoding: 'utf-8' });
-            } catch {}
-            commitSha = execSync('git rev-parse HEAD', { cwd: resolvedLocal, encoding: 'utf-8' }).trim();
-
-            return res.json({
-              success: true,
-              type: 'local_directory',
-              action: 'deliver',
-              localWriteMode: 'git_branch',
-              branch: gitBranchName,
-              baseBranch,
-              commitSha,
-              targetFilePath: destinationPath,
-              bytesWritten: fs.statSync(destinationPath).size,
-              taskKey,
-              deliveredAt: new Date().toISOString(),
-              message: `Verified code delivered to git branch "${gitBranchName}" (commit: ${commitSha.slice(0, 8)}).`,
-            });
-          } catch (gitErr: any) {
-            return res.status(500).json({
-              success: false,
-              blocked: true,
-              error: `Git branch checkout/commit failed in ${resolvedLocal}: ${gitErr.message}`,
-            });
-          }
-        }
-
-        // Default direct_write mode
+        // Safe mode 2: direct_write (writes directly to destination subdirectory)
         const destinationFilename = `${taskKey}_Service.js`;
         const destinationPath = path.resolve(targetSubdir, destinationFilename);
         fs.writeFileSync(destinationPath, codeToDeliver, 'utf-8');
@@ -931,70 +894,37 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
 
     if (action === 'create_pr' || action === 'deliver') {
       const taskKey = task?.key || 'AEG-104';
-      const sourceArtifact = path.resolve(__dirname, `.aegis_artifacts/${taskKey}/implementation.js`);
 
-      if (!fs.existsSync(sourceArtifact)) {
+      // Check 1: Delivery checks acceptance, not just file existence - FAIL CLOSED
+      const targetTask = coordinator.getState().tasks.find((t) => t.key === taskKey || t.id === task?.id);
+      if (!targetTask) {
         return res.status(400).json({
           success: false,
           blocked: true,
-          error: `Delivery blocked: No verified artifact found on disk at .aegis_artifacts/${taskKey}/implementation.js. Task must pass quality gates before dispatch.`,
+          error: `Delivery blocked: Task "${taskKey}" not found in sprint state. Delivery requires verified task acceptance.`,
         });
       }
 
-      // If user has not provided a real GitHub token, report BLOCKED honestly without fabricating a fake PR
-      if (!apiToken || apiToken.includes('•••') || !apiToken.startsWith('ghp_')) {
+      const verification = coordinator.verifyTaskQualityGates(targetTask);
+      if (!verification.passed) {
+        const failedDetails = verification.checks
+          .filter((c: any) => !c.passed)
+          .map((c: any) => `${c.rule}: ${c.detail}`)
+          .join('; ');
         return res.status(400).json({
           success: false,
           blocked: true,
-          error: `Remote Pull Request delivery blocked: No valid GitHub Personal Access Token (PAT) configured. To open a real Pull Request on ${owner}/${repo}, enter a token with 'repo' scope in Integrations Settings.`,
+          error: `Delivery blocked: Task ${taskKey} failed quality gate acceptance (${failedDetails}). Only accepted tasks that satisfy quality gates can be delivered.`,
+          verification,
         });
       }
 
-      // If real token provided, attempt genuine GitHub PR creation
-      try {
-        const createPrRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiToken}`,
-            'Accept': 'application/vnd.github+json',
-            'User-Agent': 'Aegis-Orchestrator',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            title: `feat(${taskKey}): ${task?.title || 'Autonomous task delivery'}`,
-            head: branchName,
-            base: defaultBranch,
-            body: `## Aegis Autonomous Delivery for ${taskKey}\nDelivered verified code from .aegis_artifacts/${taskKey}/`,
-          }),
-        });
-
-        if (!createPrRes.ok) {
-          const errText = await createPrRes.text();
-          return res.status(createPrRes.status).json({
-            success: false,
-            blocked: true,
-            error: `GitHub PR creation returned HTTP ${createPrRes.status}: ${errText}`,
-          });
-        }
-
-        const prData = await createPrRes.json();
-        return res.json({
-          success: true,
-          type: 'remote_git',
-          action: 'create_pr',
-          prUrl: prData.html_url,
-          prNumber: prData.number,
-          branch: branchName,
-          deliveredAt: new Date().toISOString(),
-          message: `Pull Request #${prData.number} opened on ${owner}/${repo}.`,
-        });
-      } catch (err: any) {
-        return res.status(502).json({
-          success: false,
-          blocked: true,
-          error: `GitHub API call failed: ${err.message}`,
-        });
-      }
+      // Check 2: Remote Git delivery is strictly disabled until isolated worktree execution is implemented
+      return res.status(403).json({
+        success: false,
+        blocked: true,
+        error: 'Remote Git delivery is currently disabled pending isolated worktree execution, branch creation isolation, and automated regression testing. Use local patch_export mode instead.',
+      });
     }
 
     res.status(400).json({ error: 'Unknown action' });
