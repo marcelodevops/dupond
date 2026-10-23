@@ -405,6 +405,7 @@ class CoordinatorEngine {
     const testCode = fs.readFileSync(testFilePath, 'utf-8');
 
     // Execute real test suite in isolated VM sandbox to verify functionality
+    const verifiedCriteria: string[] = [];
     try {
       const sandbox = {
         assert,
@@ -412,6 +413,11 @@ class CoordinatorEngine {
         module: { exports: {} },
         exports: {},
         console: { log: () => {} },
+        passCriterion: (criterionId: string) => {
+          if (!verifiedCriteria.includes(criterionId)) {
+            verifiedCriteria.push(criterionId);
+          }
+        },
       };
       const context = vm.createContext(sandbox);
       new vm.Script(implementationCode).runInContext(context);
@@ -423,8 +429,10 @@ class CoordinatorEngine {
     const sha256 = crypto.createHash('sha256').update(implementationCode).digest('hex');
     const fileSize = fs.statSync(codeFilePath).size;
 
-    // Only mark subtasks that have explicitly passed criteria
-    const subtasksCompleted = (task.subtasks || []).map((s) => s.id);
+    // Only mark subtasks that have explicitly been mapped to passing test assertions
+    const subtasksCompleted = (task.subtasks || [])
+      .filter((s) => verifiedCriteria.includes(s.id))
+      .map((s) => s.id);
 
     const deliverableContent = `### Implementation Artifact: \`${task.key}\`
 **Specialist:** ${agent.name} (${agent.role})

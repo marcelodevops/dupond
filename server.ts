@@ -34,6 +34,7 @@ if (geminiApiKey) {
 }
 
 import { coordinator } from './src/server/coordinator.js';
+import { balanceWorkload, calculateAgentLoad, buildGeminiOptimizerPrompt } from './src/services/workloadBalancer.js';
 
 async function callGeminiWithTimeout<T>(promise: Promise<T>, timeoutMs = 7000): Promise<T> {
   return Promise.race([
@@ -206,18 +207,21 @@ Return a pure JSON response matching this schema (do NOT include markdown code f
   }
 });
 
-// Endpoint: AI-driven resource allocation & workload balancing
+// Endpoint: AI-driven resource allocation & workload balancing (Connected to AEG-104 module)
 app.post('/api/orchestrate/allocate-resources', async (req: Request, res: Response) => {
   try {
     const { tasks = [], agents = [] } = req.body;
 
-    if (ai && tasks.length > 0 && agents.length > 0) {
+    if (tasks.length === 0 || agents.length === 0) {
+      return res.status(400).json({ error: 'tasks and agents are required' });
+    }
+
+    // Run the verified AEG-104 workload balancing algorithm
+    const balanced = balanceWorkload(agents, tasks);
+
+    if (ai) {
       try {
-        const prompt = `You are Aegis Resource Optimizer Agent.
-Perform AI-driven resource allocation and role matching for the following tasks and agents.
-Consider agent skills, workload balance, task priorities, and dependencies.
-Tasks: ${JSON.stringify(tasks.map((t: any) => ({ id: t.id, key: t.key, title: t.title, priority: t.priority, estimatedHours: t.estimatedHours, tags: t.tags })))}
-Agents: ${JSON.stringify(agents.map((a: any) => ({ id: a.id, name: a.name, role: a.role, skills: a.skills, velocity: a.velocity })))}
+        const prompt = `${buildGeminiOptimizerPrompt(balanced.initialCapacity, agents, tasks.filter((t: any) => t.status !== 'done'))}
 
 Return a pure JSON response (no markdown fences):
 {
@@ -225,22 +229,14 @@ Return a pure JSON response (no markdown fences):
     {
       "taskId": "task-id",
       "agentId": "agent-id",
-      "roleAssumed": "Assumed role title for this assignment",
-      "matchReason": "Detailed reason why this agent is optimal",
+      "roleAssumed": "Assumed role title",
+      "matchReason": "Detailed skill and capacity reason",
       "confidence": 0.95
-    }
-  ],
-  "capacityAnalysis": [
-    {
-      "agentId": "agent-id",
-      "allocatedHours": 24,
-      "loadPercentage": 75,
-      "status": "balanced"
     }
   ],
   "recommendations": [
     "Workload optimization note 1",
-    "Dependency clearance note 2"
+    "Bottleneck mitigation note 2"
   ]
 }`;
 
@@ -254,88 +250,81 @@ Return a pure JSON response (no markdown fences):
         });
 
         const parsed = JSON.parse(response.text || '{}');
-        return res.json(parsed);
+        if (parsed.assignments && Array.isArray(parsed.assignments) && parsed.assignments.length > 0) {
+          return res.json({
+            assignments: parsed.assignments,
+            initialCapacity: balanced.initialCapacity,
+            capacityAnalysis: balanced.balancedCapacity,
+            recommendations: parsed.recommendations || [
+              `Rebalanced ${balanced.reassignments.length} assignments via AEG-104 optimization.`,
+            ],
+          });
+        }
       } catch (geminiError: any) {
         console.warn('Gemini resource allocation fallback:', geminiError?.message);
       }
     }
 
-    // Heuristic allocation fallback
-    const allocation = heuristicAllocateResources(tasks, agents);
-    return res.json(allocation);
+    // Direct return of AEG-104 tested algorithmic rebalancing result
+    const recommendations = balanced.reassignments.length > 0
+      ? balanced.reassignments.map(
+          (r) => `Transferred ${r.taskKey} to ${agents.find((a: any) => a.id === r.newAgentId)?.name || r.newAgentId}: ${r.matchReason}`
+        )
+      : ['All agent workloads are currently within balanced limits (<85% and >40%).'];
+
+    return res.json({
+      assignments: balanced.reassignments.map((r) => ({
+        taskId: r.taskId,
+        agentId: r.newAgentId,
+        roleAssumed: r.roleAssumed,
+        matchReason: r.matchReason,
+        confidence: 0.95,
+      })),
+      initialCapacity: balanced.initialCapacity,
+      capacityAnalysis: balanced.balancedCapacity,
+      recommendations,
+    });
   } catch (error: any) {
     console.error('Error allocating resources:', error);
     res.status(500).json({ error: error.message || 'Failed to allocate resources' });
   }
 });
 
-// Endpoint: Agent step execution (Autonomous orchestration cycle)
+// Endpoint: Agent step execution (Enforced via coordinator quality gate)
 app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
   try {
-    const { task, agent, orchestratorConfig, communicationHistory = [] } = req.body;
+    const { task, agent } = req.body;
 
     if (!task || !agent) {
       return res.status(400).json({ error: 'task and agent are required' });
     }
 
-    if (ai) {
-      try {
-        const prompt = `You are simulating the execution step of an AI Agent in a coordinated autonomous project team.
-Orchestrator Persona & Directives:
-Name: ${orchestratorConfig?.personaName || 'Aegis Core'}
-Directives: ${orchestratorConfig?.systemPrompt || 'Coordinate efficiently with high engineering standards.'}
-Autonomy Mode: ${orchestratorConfig?.autonomyMode || 'semi_autonomous'}
+    try {
+      // Execute the real worker step through the central coordinator
+      const workerResult = await coordinator.executeWorkerStep(task, agent);
+      const isDone = task.status === 'review';
+      const nextStatus = isDone ? 'done' : task.status === 'in_progress' ? 'review' : 'in_progress';
 
-Active Agent:
-Name: ${agent.name}
-Base Role: ${agent.role}
-Specialized Skills: ${(agent.skills || []).join(', ')}
-
-Current Task:
-Key: ${task.key}
-Title: ${task.title}
-Status: ${task.status}
-Description: ${task.description}
-Subtasks: ${JSON.stringify(task.subtasks || [])}
-Existing Deliverables: ${JSON.stringify(task.deliverables || [])}
-
-Recent Team Communication History:
-${communicationHistory.slice(-5).map((m: any) => `[${m.senderRole} -> ${m.recipientId || 'Team'}]: ${m.content}`).join('\n')}
-
-Simulate the agent's next action, role assumption based on requirement/history, concrete technical deliverable, and communication message.
-Return pure JSON (no markdown ticks):
-{
-  "roleAssumed": "Specialized role assumed based on requirement",
-  "reasoning": "Step-by-step reasoning behind execution decision",
-  "actionTaken": "Specific action performed",
-  "deliverableOutput": "Concrete deliverable content (e.g. code snippet, API spec, test results, config or design brief)",
-  "nextStatus": "in_progress", 
-  "subtasksCompleted": ["st-1"],
-  "communicationMessage": {
-    "content": "Message broadcast to the team or orchestrator",
-    "messageType": "status_update"
-  }
-}`;
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.3,
-          },
-        });
-
-        const parsed = JSON.parse(response.text || '{}');
-        return res.json(parsed);
-      } catch (geminiError: any) {
-        console.warn('Gemini agent step fallback:', geminiError?.message);
-      }
+      return res.json({
+        success: true,
+        roleAssumed: `${agent.role} (Assumed for ${task.key})`,
+        reasoning: `Inspected workspace and executed verified test suite for ${task.key} (${workerResult.fileSize} bytes, SHA-256: ${workerResult.sha256.slice(0, 10)}...).`,
+        actionTaken: workerResult.actionTaken,
+        deliverableOutput: workerResult.deliverableContent,
+        nextStatus,
+        subtasksCompleted: workerResult.subtasksCompleted,
+        communicationMessage: {
+          content: `Delivered verified code for ${task.key} (${task.title}). Moving status to ${nextStatus.toUpperCase()}. SHA-256: ${workerResult.sha256.slice(0, 12)}...`,
+          messageType: nextStatus === 'done' ? 'deliverable' : 'status_update',
+        },
+      });
+    } catch (workerErr: any) {
+      return res.status(400).json({
+        success: false,
+        blocked: true,
+        error: workerErr.message || `No capable worker or verified code for ${task.key}`,
+      });
     }
-
-    // Fallback step simulation
-    const fallbackStep = simulateFallbackStep(task, agent);
-    return res.json(fallbackStep);
   } catch (error: any) {
     console.error('Error executing agent step:', error);
     res.status(500).json({ error: error.message || 'Failed to execute agent step' });
@@ -1294,103 +1283,6 @@ function generateFallbackPlanBreakdown(planText: string) {
         ],
       },
     ],
-  };
-}
-
-// Helper: Heuristic resource allocation
-function heuristicAllocateResources(tasks: any[], agents: any[]) {
-  const roleKeywords: Record<string, string[]> = {
-    'Architect': ['Architect', 'Schema', 'Core', 'Design', 'State Machine'],
-    'Frontend': ['Kanban', 'UI', 'React', 'Interactive', 'Component', 'CSS'],
-    'Backend': ['API', 'Webhook', 'Integration', 'Database', 'Server'],
-    'QA': ['Test', 'Security', 'Validation', 'Audit', 'Review'],
-    'DevOps': ['Deploy', 'CI/CD', 'Pipeline', 'Docker', 'Infra'],
-  };
-
-  const agentWorkload: Record<string, number> = {};
-  agents.forEach((a) => (agentWorkload[a.id] = 0));
-
-  const assignments = tasks.map((task) => {
-    // Score each agent
-    let bestAgent = agents[0];
-    let bestScore = -1;
-
-    agents.forEach((agent) => {
-      let score = 10;
-      // Skill match
-      const taskText = `${task.title} ${task.description} ${(task.tags || []).join(' ')}`.toLowerCase();
-      agent.skills?.forEach((skill: string) => {
-        if (taskText.includes(skill.toLowerCase())) score += 15;
-      });
-
-      // Role match
-      Object.entries(roleKeywords).forEach(([key, kws]) => {
-        if (agent.role.toLowerCase().includes(key.toLowerCase())) {
-          kws.forEach((kw) => {
-            if (taskText.includes(kw.toLowerCase())) score += 10;
-          });
-        }
-      });
-
-      // Penalty for heavy workload
-      const currentLoad = agentWorkload[agent.id] || 0;
-      score -= currentLoad * 0.5;
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestAgent = agent;
-      }
-    });
-
-    agentWorkload[bestAgent.id] = (agentWorkload[bestAgent.id] || 0) + (task.estimatedHours || 6);
-
-    return {
-      taskId: task.id,
-      agentId: bestAgent.id,
-      roleAssumed: bestAgent.role,
-      matchReason: `High domain affinity with ${bestAgent.skills?.slice(0, 2).join(', ')} and optimal sprint bandwidth.`,
-      confidence: Math.min(0.98, Math.max(0.75, parseFloat((bestScore / 35).toFixed(2)))),
-    };
-  });
-
-  const capacityAnalysis = agents.map((agent) => {
-    const hours = agentWorkload[agent.id] || 0;
-    const maxCapacity = 40;
-    const loadPercentage = Math.round((hours / maxCapacity) * 100);
-    return {
-      agentId: agent.id,
-      allocatedHours: hours,
-      loadPercentage,
-      status: loadPercentage > 90 ? 'overloaded' : loadPercentage < 40 ? 'underloaded' : 'balanced',
-    };
-  });
-
-  return {
-    assignments,
-    capacityAnalysis,
-    recommendations: [
-      'Workload is distributed within safe 80% utilization buffer across all specialist nodes.',
-      'Critical path tasks prioritized to Lead Architect and Senior Backend dev.',
-    ],
-  };
-}
-
-// Helper: Fallback agent step
-function simulateFallbackStep(task: any, agent: any) {
-  const isDone = task.status === 'review';
-  const nextStatus = isDone ? 'done' : task.status === 'in_progress' ? 'review' : 'in_progress';
-
-  return {
-    roleAssumed: `${agent.role} (Assumed for ${task.key})`,
-    reasoning: `Analyzed task requirements for ${task.key} against current sprint milestones. Executing active work item and generating verified deliverables.`,
-    actionTaken: `Processed ${task.title}. Ran validation checks and synchronized state.`,
-    deliverableOutput: `// Verified deliverable for ${task.key}\nexport const ${task.key.replace('-', '_')}_spec = {\n  status: "${nextStatus}",\n  verifiedBy: "${agent.name}",\n  timestamp: "${new Date().toISOString()}",\n  criteriaMet: true\n};`,
-    nextStatus,
-    subtasksCompleted: (task.subtasks || []).map((s: any) => s.id),
-    communicationMessage: {
-      content: `Completed phase for ${task.key} (${task.title}). Moving status to ${nextStatus}. Ready for subsequent pipeline dependencies.`,
-      messageType: nextStatus === 'done' ? 'deliverable' : 'status_update',
-    },
   };
 }
 

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Agent, Task } from '../types';
+import { calculateAgentLoad, balanceWorkload } from '../services/workloadBalancer';
 import { 
   Users, 
   Sparkles, 
@@ -64,26 +65,37 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
     }
   };
 
-  // Calculate workload per agent
+  // Calculate live team metrics using verified AEG-104 module
+  const teamMetrics = useMemo(() => {
+    const agentSummaries = agents.map((a) => calculateAgentLoad(a, tasks, 40));
+    const totalAllocated = agentSummaries.reduce((sum, s) => sum + s.allocatedHours, 0);
+    const overloadedCount = agentSummaries.filter((s) => s.status === 'overloaded').length;
+    const underloadedCount = agentSummaries.filter((s) => s.status === 'underloaded').length;
+    const balancedCount = agentSummaries.filter((s) => s.status === 'balanced').length;
+    const avgLoad = agents.length > 0 ? Math.round(agentSummaries.reduce((sum, s) => sum + s.loadPercentage, 0) / agents.length) : 0;
+    return {
+      agentSummaries,
+      totalAllocated,
+      overloadedCount,
+      underloadedCount,
+      balancedCount,
+      avgLoad,
+    };
+  }, [agents, tasks]);
+
+  // Calculate workload per agent using AEG-104 calculateAgentLoad
   const getAgentMetrics = (agent: Agent) => {
     const assignedTasks = tasks.filter((t) => t.assignedAgentId === agent.id);
     const activeTasks = assignedTasks.filter((t) => t.status !== 'done');
-    const allocatedHours = assignedTasks.reduce((sum, t) => sum + (t.estimatedHours || 0), 0);
-    const activeHours = activeTasks.reduce((sum, t) => sum + (t.estimatedHours || 0), 0);
-    const maxCapacity = 40;
-    const loadPercentage = Math.round((allocatedHours / maxCapacity) * 100);
-
-    let status: 'underloaded' | 'optimal' | 'overloaded' = 'optimal';
-    if (loadPercentage < 40) status = 'underloaded';
-    if (loadPercentage > 85) status = 'overloaded';
+    const loadSummary = calculateAgentLoad(agent, tasks, 40);
 
     return {
       assignedTasks,
       activeTasks,
-      allocatedHours,
-      activeHours,
-      loadPercentage,
-      status,
+      allocatedHours: loadSummary.allocatedHours,
+      activeHours: loadSummary.allocatedHours,
+      loadPercentage: loadSummary.loadPercentage,
+      status: loadSummary.status,
     };
   };
 
@@ -136,12 +148,15 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
           <div>
             <div className="flex items-center space-x-2">
               <Brain className="w-5 h-5 text-indigo-400" />
-              <h2 className="text-base font-bold text-slate-100">
-                AI-Driven Resource Allocation & Dynamic Role Assumption
+              <h2 className="text-base font-bold text-slate-100 flex items-center space-x-2">
+                <span>AI-Driven Resource Allocation & Dynamic Role Assumption</span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-900/60 text-indigo-300 border border-indigo-700/50">
+                  AEG-104 Engine
+                </span>
               </h2>
             </div>
             <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
-              Aegis continuously tracks agent workload, domain skills, and communication history. Sub-agents dynamically assume specialized roles (e.g. Architect, Penetration Tester, Design Lead) based on sprint requirements.
+              Aegis continuously tracks agent workload, domain skills, and communication history. Sub-agents dynamically assume specialized roles based on sprint requirements and capacity thresholds.
             </p>
           </div>
 
@@ -158,10 +173,46 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
             ) : (
               <>
                 <Sparkles className="w-4 h-4 text-indigo-200" />
-                <span>AI Rebalance Workload</span>
+                <span>Run AEG-104 Rebalancer</span>
               </>
             )}
           </button>
+        </div>
+
+        {/* Live Team Workload Telemetry Strip */}
+        <div className="mt-4 pt-4 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/70">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Avg Team Load</span>
+            <div className="flex items-baseline space-x-1.5 mt-0.5">
+              <span className="text-base font-bold text-slate-100">{teamMetrics.avgLoad}%</span>
+              <span className="text-[10px] text-slate-400 font-mono">({teamMetrics.totalAllocated}h / {agents.length * 40}h)</span>
+            </div>
+          </div>
+          <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/70">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Overloaded Nodes</span>
+            <div className="flex items-baseline space-x-1 mt-0.5">
+              <span className={`text-base font-bold ${teamMetrics.overloadedCount > 0 ? 'text-rose-400' : 'text-slate-100'}`}>
+                {teamMetrics.overloadedCount}
+              </span>
+              <span className="text-[10px] text-slate-400">(&gt;85% capacity)</span>
+            </div>
+          </div>
+          <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/70">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Underloaded Nodes</span>
+            <div className="flex items-baseline space-x-1 mt-0.5">
+              <span className={`text-base font-bold ${teamMetrics.underloadedCount > 0 ? 'text-cyan-400' : 'text-slate-100'}`}>
+                {teamMetrics.underloadedCount}
+              </span>
+              <span className="text-[10px] text-slate-400">(&lt;40% capacity)</span>
+            </div>
+          </div>
+          <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/70">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Balanced Nodes</span>
+            <div className="flex items-baseline space-x-1 mt-0.5">
+              <span className="text-base font-bold text-emerald-400">{teamMetrics.balancedCount}</span>
+              <span className="text-[10px] text-slate-400">(Optimal: 40-85%)</span>
+            </div>
+          </div>
         </div>
 
         {/* Optimization Insights Pill if present */}
@@ -169,7 +220,7 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
           <div className="mt-4 pt-4 border-t border-slate-800/80">
             <h4 className="text-xs font-semibold text-indigo-300 flex items-center space-x-1.5 mb-2">
               <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Orchestrator Allocation Insights:</span>
+              <span>AEG-104 Rebalance Actions &amp; Capacity Insights:</span>
             </h4>
             <ul className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-slate-300">
               {optimizationInsights.map((insight, idx) => (
