@@ -9,6 +9,22 @@
     <meta property="og:description" content="Autonomous AI project orchestrator that organizes curated plans, delegates tasks across specialized agents with dynamic roles, manages real-time Kanban boards, allocates resources, generates stakeholder reports, and integrates with Jira and Slack." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Ignore WebSocket errors in AI Studio iframe environment where HMR is disabled
+      window.addEventListener('unhandledrejection', function(event) {
+        if (event.reason && (
+          (typeof event.reason.message === 'string' && event.reason.message.toLowerCase().includes('websocket')) ||
+          (typeof event.reason === 'string' && event.reason.toLowerCase().includes('websocket'))
+        )) {
+          event.preventDefault();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        if (event.message && typeof event.message === 'string' && event.message.toLowerCase().includes('websocket')) {
+          event.preventDefault();
+        }
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>
