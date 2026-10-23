@@ -497,7 +497,11 @@ ${implementationCode.slice(0, 500)}...
         const agent = agents.find((a) => a.id === inProgressTask.assignedAgentId) || agents[1];
         const workerResult = await this.executeWorkerStep(inProgressTask, agent);
 
-        const updatedSubtasks = (inProgressTask.subtasks || []).map((s) => ({ ...s, completed: true }));
+        // Map subtasks strictly to verified evidence from worker execution
+        const updatedSubtasks = (inProgressTask.subtasks || []).map((s) => ({
+          ...s,
+          completed: s.completed || (workerResult.subtasksCompleted && workerResult.subtasksCompleted.includes(s.id)),
+        }));
         const updatedDeliverables = [...(inProgressTask.deliverables || []), workerResult.deliverableContent];
 
         const updatedTask: Task = {

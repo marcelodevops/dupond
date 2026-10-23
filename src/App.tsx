@@ -163,7 +163,17 @@ export default function App() {
 
       const result = await response.json();
 
-      // Update Task status & deliverables
+      // Check HTTP status and blocked response: DO NOT treat blocked execution as progress
+      if (!response.ok || !result.success || result.blocked) {
+        showToast(
+          'Execution Blocked',
+          result.error || `Task execution blocked: No capable worker or quality gate failed for ${targetTask.key}.`,
+          'alert'
+        );
+        return;
+      }
+
+      // Update Task status & deliverables only on verified success
       const nextStatus = result.nextStatus || (targetTask.status === 'in_progress' ? 'review' : 'done');
       const newDeliverables = result.deliverableOutput
         ? [...(targetTask.deliverables || []), result.deliverableOutput]

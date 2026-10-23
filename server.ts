@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import http from 'http';
 import fs from 'fs';
 import crypto from 'crypto';
+import { execSync } from 'child_process';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -251,12 +252,19 @@ Return a pure JSON response (no markdown fences):
 
         const parsed = JSON.parse(response.text || '{}');
         if (parsed.assignments && Array.isArray(parsed.assignments) && parsed.assignments.length > 0) {
+          // Recompute matching capacity figures directly from Gemini's assignments
+          const geminiUpdatedTasks = tasks.map((t: any) => {
+            const assignment = parsed.assignments.find((a: any) => a.taskId === t.id || a.taskId === t.key);
+            return assignment ? { ...t, assignedAgentId: assignment.agentId } : t;
+          });
+          const geminiCapacity = agents.map((a: any) => calculateAgentLoad(a, geminiUpdatedTasks, 40));
+
           return res.json({
             assignments: parsed.assignments,
             initialCapacity: balanced.initialCapacity,
-            capacityAnalysis: balanced.balancedCapacity,
+            capacityAnalysis: geminiCapacity,
             recommendations: parsed.recommendations || [
-              `Rebalanced ${balanced.reassignments.length} assignments via AEG-104 optimization.`,
+              `Rebalanced ${parsed.assignments.length} assignments via Gemini optimizer.`,
             ],
           });
         }
@@ -304,6 +312,32 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
       const workerResult = await coordinator.executeWorkerStep(task, agent);
       const isDone = task.status === 'review';
       const nextStatus = isDone ? 'done' : task.status === 'in_progress' ? 'review' : 'in_progress';
+
+      // Enforce centralized quality gate and dependency verification before advancing to 'done'
+      if (nextStatus === 'done') {
+        const taskForVerification = {
+          ...task,
+          subtasks: (task.subtasks || []).map((s: any) => ({
+            ...s,
+            completed: s.completed || (workerResult.subtasksCompleted && workerResult.subtasksCompleted.includes(s.id)),
+          })),
+          deliverables: [...(task.deliverables || []), workerResult.deliverableContent],
+        };
+
+        const verification = coordinator.verifyTaskQualityGates(taskForVerification);
+        if (!verification.passed) {
+          const failedRules = verification.checks
+            .filter((c: any) => !c.passed)
+            .map((c: any) => `${c.rule}: ${c.detail}`)
+            .join('; ');
+          return res.status(400).json({
+            success: false,
+            blocked: true,
+            error: `Quality gates failed for ${task.key}. Cannot mark Done: ${failedRules}`,
+            verification,
+          });
+        }
+      }
 
       return res.json({
         success: true,
@@ -687,7 +721,25 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
         const taskKey = task?.key || 'AEG-104';
         const sourceArtifact = path.resolve(__dirname, `.aegis_artifacts/${taskKey}/implementation.js`);
 
-        // Check if real artifact exists on disk - never substitute placeholders
+        // Check 1: Delivery checks acceptance, not just file existence
+        const targetTask = coordinator.getState().tasks.find((t) => t.key === taskKey || t.id === task?.id);
+        if (targetTask) {
+          const verification = coordinator.verifyTaskQualityGates(targetTask);
+          if (!verification.passed) {
+            const failedDetails = verification.checks
+              .filter((c: any) => !c.passed)
+              .map((c: any) => `${c.rule}: ${c.detail}`)
+              .join('; ');
+            return res.status(400).json({
+              success: false,
+              blocked: true,
+              error: `Delivery blocked: Task ${taskKey} failed quality gate acceptance (${failedDetails}). Only accepted tasks that satisfy quality gates can be delivered.`,
+              verification,
+            });
+          }
+        }
+
+        // Check 2: Check if real artifact exists on disk - never substitute placeholders
         if (!fs.existsSync(sourceArtifact)) {
           return res.status(400).json({
             success: false,
@@ -728,6 +780,56 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
               success: false,
               blocked: true,
               error: `Git branch delivery blocked: Destination directory ${resolvedLocal} is not an initialized Git repository.`,
+            });
+          }
+
+          const gitBranchName = `${branchPrefix || 'feature/'}${taskKey.toLowerCase()}-delivery`;
+          try {
+            // Check current branch
+            let baseBranch = 'master';
+            try {
+              baseBranch = execSync('git branch --show-current', { cwd: resolvedLocal, encoding: 'utf-8' }).trim() || 'master';
+            } catch {}
+
+            // Create and checkout branch (or switch to it if already exists)
+            try {
+              execSync(`git checkout -b "${gitBranchName}"`, { cwd: resolvedLocal, encoding: 'utf-8' });
+            } catch {
+              execSync(`git checkout "${gitBranchName}"`, { cwd: resolvedLocal, encoding: 'utf-8' });
+            }
+
+            // Write verified implementation file to branch
+            const destinationFilename = `${taskKey}_Service.js`;
+            const destinationPath = path.resolve(targetSubdir, destinationFilename);
+            fs.writeFileSync(destinationPath, codeToDeliver, 'utf-8');
+
+            // Stage and commit to git branch
+            execSync(`git add "${destinationPath}"`, { cwd: resolvedLocal, encoding: 'utf-8' });
+            let commitSha = '';
+            try {
+              execSync(`git commit -m "feat(${taskKey}): deliver verified implementation from Aegis"`, { cwd: resolvedLocal, encoding: 'utf-8' });
+            } catch {}
+            commitSha = execSync('git rev-parse HEAD', { cwd: resolvedLocal, encoding: 'utf-8' }).trim();
+
+            return res.json({
+              success: true,
+              type: 'local_directory',
+              action: 'deliver',
+              localWriteMode: 'git_branch',
+              branch: gitBranchName,
+              baseBranch,
+              commitSha,
+              targetFilePath: destinationPath,
+              bytesWritten: fs.statSync(destinationPath).size,
+              taskKey,
+              deliveredAt: new Date().toISOString(),
+              message: `Verified code delivered to git branch "${gitBranchName}" (commit: ${commitSha.slice(0, 8)}).`,
+            });
+          } catch (gitErr: any) {
+            return res.status(500).json({
+              success: false,
+              blocked: true,
+              error: `Git branch checkout/commit failed in ${resolvedLocal}: ${gitErr.message}`,
             });
           }
         }
