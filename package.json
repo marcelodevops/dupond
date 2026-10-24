@@ -9,7 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "test": "tsx tests/guardrails.test.ts && tsx workspace/AEG-104/workloadBalancer.test.ts",
+    "test": "tsx tests/guardrails.test.ts && tsx tests/trackA.test.ts && tsx workspace/AEG-104/workloadBalancer.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

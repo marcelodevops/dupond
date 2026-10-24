@@ -33,9 +33,25 @@ if (geminiApiKey) {
   });
 }
 
-import { coordinator } from './src/server/coordinator.js';
+import { coordinator, isMaskedSecret } from './src/server/coordinator.js';
 import { balanceWorkload, calculateAgentLoad, buildGeminiOptimizerPrompt } from './src/services/workloadBalancer.js';
 import { handleRepositoryDispatch } from './src/server/deliveryHandler.js';
+import { safeRequest, EgressBlockedError } from './src/server/egress.js';
+
+/** Jira Cloud only: keeps this endpoint from becoming a token-forwarding proxy. */
+const JIRA_ALLOWED_HOSTS = ['.atlassian.net'];
+const SLACK_ALLOWED_HOSTS = ['hooks.slack.com'];
+
+/**
+ * /custom-providers targets loopback and RFC1918 by design (local Ollama, LAN
+ * vLLM), which is exactly the traffic the SSRF filter blocks. Default stays
+ * fail-closed; a deployment that genuinely serves local models opts in.
+ */
+const ALLOW_PRIVATE_PROVIDER_HOSTS = process.env.AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS === 'true';
+
+function isBlockedError(error: any): boolean {
+  return error instanceof EgressBlockedError;
+}
 
 async function callGeminiWithTimeout<T>(promise: Promise<T>, timeoutMs = 7000): Promise<T> {
   return Promise.race([
@@ -56,7 +72,9 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 // Endpoint: Server-authoritative state management
 app.get('/api/orchestrate/state', (_req: Request, res: Response) => {
-  res.json(coordinator.getState());
+  // Redacted view: credentials stay server-side even though the UI round-trips
+  // this object back through POST /state.
+  res.json(coordinator.getStateView());
 });
 
 app.post('/api/orchestrate/state', (req: Request, res: Response) => {
@@ -65,12 +83,12 @@ app.post('/api/orchestrate/state', (req: Request, res: Response) => {
 });
 
 // Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
-app.post('/api/orchestrate/tasks/:id/transition', (req: Request, res: Response) => {
+app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Response) => {
   try {
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: 'status is required' });
 
-    const result = coordinator.transitionTaskStatus(req.params.id, status);
+    const result = await coordinator.transitionTaskStatus(req.params.id, status);
     if (!result.success) {
       return res.status(422).json(result);
     }
@@ -88,7 +106,7 @@ app.post('/api/orchestrate/engine/step', async (_req: Request, res: Response) =>
       success: true,
       result,
       cycleCount: coordinator.getState().cycleCount,
-      state: coordinator.getState(),
+      state: coordinator.getStateView(),
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Step execution failed' });
@@ -116,12 +134,12 @@ app.get('/api/orchestrate/engine/status', (_req: Request, res: Response) => {
 });
 
 // Endpoint: Strict Quality Gate Verification for "Done"
-app.post('/api/orchestrate/verify-task', (req: Request, res: Response) => {
+app.post('/api/orchestrate/verify-task', async (req: Request, res: Response) => {
   try {
     const { task } = req.body;
     if (!task) return res.status(400).json({ error: 'task is required' });
 
-    const verification = coordinator.verifyTaskQualityGates(task);
+    const verification = await coordinator.verifyTaskQualityGates(task);
     res.json(verification);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Verification failed' });
@@ -324,7 +342,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
           deliverables: [...(task.deliverables || []), workerResult.deliverableContent],
         };
 
-        const verification = coordinator.verifyTaskQualityGates(taskForVerification);
+        const verification = await coordinator.verifyTaskQualityGates(taskForVerification);
         if (!verification.passed) {
           const failedRules = verification.checks
             .filter((c: any) => !c.passed)
@@ -467,125 +485,131 @@ Generate a rigorous, professional stakeholder report in pure JSON (no markdown t
   }
 });
 
-// Endpoint: Real Atlassian Jira Cloud REST API integration
+// Endpoint: Atlassian Jira Cloud REST integration
 app.post('/api/integrations/jira/sync', async (req: Request, res: Response) => {
   try {
-    const { action = 'sync_task', task, hostUrl, userEmail, apiToken, projectKey = 'AEG' } = req.body;
-    const isConfigured = hostUrl && userEmail && apiToken && !apiToken.includes('••••') && hostUrl.includes('.');
+    const { action = 'sync_task', task } = req.body || {};
 
-    if (isConfigured) {
-      const cleanHost = hostUrl.trim().replace(/\/+$/, '');
-      const authHeader = `Basic ${Buffer.from(`${userEmail.trim()}:${apiToken.trim()}`).toString('base64')}`;
+    // Credentials and destination come from server-held config only. The body
+    // used to supply hostUrl + apiToken, which let any caller point a Basic-auth
+    // token at an arbitrary origin — a credential-smuggling oracle.
+    const jira = coordinator.getIntegrationSecrets().jira;
+    const hostUrl = jira.hostUrl;
+    const userEmail = jira.userEmail;
+    let apiToken = jira.apiToken;
 
-      // Real Jira Verification Probe
-      if (action === 'verify') {
-        const jiraRes = await fetch(`${cleanHost}/rest/api/3/myself`, {
-          headers: {
-            'Authorization': authHeader,
-            'Accept': 'application/json',
-          },
-          signal: AbortSignal.timeout(7000),
-        });
+    // A UI form posts back the mask it was handed when the user did not retype
+    // the token; accept a freshly typed value only as a replacement for a mask.
+    const submitted = req.body?.apiToken;
+    if (typeof submitted === 'string' && submitted.trim() !== '' && !isMaskedSecret(submitted)) {
+      apiToken = submitted.trim();
+    }
 
-        if (!jiraRes.ok) {
-          const errText = await jiraRes.text();
-          return res.json({
-            success: false,
-            realJiraCall: true,
-            statusCode: jiraRes.status,
-            error: `Jira authentication failed (${jiraRes.status}): ${errText.slice(0, 200)}`,
-          });
-        }
-
-        const userData = await jiraRes.json();
-        return res.json({
-          success: true,
-          realJiraCall: true,
-          verified: true,
-          displayName: userData.displayName,
-          emailAddress: userData.emailAddress,
-          accountType: userData.accountType,
-          message: `Connected successfully to Jira Cloud as ${userData.displayName} (${userData.emailAddress})!`,
-        });
-      }
-
-      // Real Jira Issue Creation
-      const summary = task?.title ? `[Aegis] ${task.key}: ${task.title}` : `[Aegis] Autonomous Task`;
-      const descriptionADF = {
-        type: 'doc',
-        version: 1,
-        content: [
-          {
-            type: 'paragraph',
-            content: [
-              {
-                type: 'text',
-                text: task?.description || 'Autonomous sprint deliverable managed by Aegis Orchestrator.',
-              },
-            ],
-          },
-        ],
-      };
-
-      const createRes = await fetch(`${cleanHost}/rest/api/3/issue`, {
-        method: 'POST',
-        headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
+    if (!(hostUrl && userEmail && apiToken && !isMaskedSecret(apiToken))) {
+      const projectKey = jira.projectKey || 'AEG';
+      const defaultHost = (hostUrl || 'https://acme-enterprise.atlassian.net').replace(/\/+$/, '');
+      const defaultKey = task?.key || `${projectKey}-101`;
+      return res.json({
+        success: true,
+        realJiraCall: false,
+        action,
+        jiraIssueId: defaultKey,
+        issueUrl: `${defaultHost}/browse/${defaultKey}`,
+        syncedAt: new Date().toISOString(),
+        mappedStatus: task?.status === 'done' ? 'Closed' : task?.status === 'review' ? 'In Review' : 'In Progress',
+        notice: 'Live Jira Cloud connector is ready. Save a real Atlassian user email, API token and *.atlassian.net host to create and transition live tickets.',
+        fields: {
+          summary: task?.title || 'Autonomous Task',
+          assignee: task?.assignedAgentId || 'Aegis Bot',
+          priority: task?.priority || 'Medium',
         },
-        body: JSON.stringify({
-          fields: {
-            project: { key: projectKey },
-            summary,
-            description: descriptionADF,
-            issuetype: { name: 'Task' },
-          },
-        }),
-        signal: AbortSignal.timeout(8000),
+      });
+    }
+
+    const cleanHost = hostUrl.trim().replace(/\/+$/, '');
+    const authHeader = `Basic ${Buffer.from(`${userEmail.trim()}:${apiToken.trim()}`).toString('base64')}`;
+    const headers = { authorization: authHeader, accept: 'application/json' };
+
+    // Real Jira Verification Probe
+    if (action === 'verify') {
+      const probe = await safeRequest(`${cleanHost}/rest/api/3/myself`, {
+        method: 'GET',
+        headers,
+        allowedHosts: JIRA_ALLOWED_HOSTS,
+        timeoutMs: 7000,
       });
 
-      if (createRes.ok) {
-        const createdData = await createRes.json();
-        return res.json({
-          success: true,
-          realJiraCall: true,
-          jiraIssueId: createdData.key,
-          issueUrl: `${cleanHost}/browse/${createdData.key}`,
-          syncedAt: new Date().toISOString(),
-          mappedStatus: task?.status === 'done' ? 'Closed' : task?.status === 'review' ? 'In Review' : 'In Progress',
-          message: `Successfully synchronized task ${task?.key} to real Jira issue ${createdData.key}!`,
-        });
-      } else {
-        const errText = await createRes.text();
+      if (!probe.ok) {
         return res.json({
           success: false,
           realJiraCall: true,
-          statusCode: createRes.status,
-          error: `Jira API returned HTTP ${createRes.status}: ${errText.slice(0, 300)}`,
+          statusCode: probe.status,
+          error: `Jira authentication failed (${probe.status}): ${probe.body.slice(0, 200)}`,
         });
       }
+
+      const userData = JSON.parse(probe.body);
+      return res.json({
+        success: true,
+        realJiraCall: true,
+        verified: true,
+        displayName: userData.displayName,
+        emailAddress: userData.emailAddress,
+        accountType: userData.accountType,
+        message: `Connected successfully to Jira Cloud as ${userData.displayName} (${userData.emailAddress})!`,
+      });
     }
 
-    // Diagnostic response when credentials are not yet entered
-    const defaultHost = (hostUrl || 'https://acme-enterprise.atlassian.net').replace(/\/+$/, '');
-    const defaultKey = task?.key || `${projectKey}-101`;
+    const summary = task?.title ? `[Aegis] ${task.key}: ${task.title}` : '[Aegis] Autonomous Task';
+    const descriptionADF = {
+      type: 'doc',
+      version: 1,
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: task?.description || 'Autonomous sprint deliverable managed by Aegis Orchestrator.' }],
+        },
+      ],
+    };
+
+    const created = await safeRequest(`${cleanHost}/rest/api/3/issue`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          project: { key: req.body?.projectKey || jira.projectKey || 'AEG' },
+          summary,
+          description: descriptionADF,
+          issuetype: { name: 'Task' },
+        },
+      }),
+      allowedHosts: JIRA_ALLOWED_HOSTS,
+      timeoutMs: 8000,
+    });
+
+    if (created.ok) {
+      const createdData = JSON.parse(created.body);
+      return res.json({
+        success: true,
+        realJiraCall: true,
+        jiraIssueId: createdData.key,
+        issueUrl: `${cleanHost}/browse/${createdData.key}`,
+        syncedAt: new Date().toISOString(),
+        mappedStatus: task?.status === 'done' ? 'Closed' : task?.status === 'review' ? 'In Review' : 'In Progress',
+        message: `Successfully synchronized task ${task?.key} to real Jira issue ${createdData.key}!`,
+      });
+    }
+
     return res.json({
-      success: true,
-      realJiraCall: false,
-      action: action || 'sync_task',
-      jiraIssueId: defaultKey,
-      issueUrl: `${defaultHost}/browse/${defaultKey}`,
-      syncedAt: new Date().toISOString(),
-      mappedStatus: task?.status === 'done' ? 'Closed' : task?.status === 'review' ? 'In Review' : 'In Progress',
-      notice: 'Live Jira Cloud connector is ready. Enter your real Atlassian User Email and API Token above to create and transition live Jira tickets.',
-      fields: {
-        summary: task?.title || 'Autonomous Task',
-        assignee: task?.assignedAgentId || 'Aegis Bot',
-        priority: task?.priority || 'Medium',
-      },
+      success: false,
+      realJiraCall: true,
+      statusCode: created.status,
+      error: `Jira API returned HTTP ${created.status}: ${created.body.slice(0, 300)}`,
     });
   } catch (error: any) {
+    if (isBlockedError(error)) {
+      return res.status(403).json({ success: false, blocked: true, error: error.message });
+    }
     res.status(500).json({ error: error.message || 'Jira sync failed' });
   }
 });
@@ -646,17 +670,22 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
     let realHttpStatus = null;
     let responseBody = null;
 
-    if (webhookUrl && webhookUrl.startsWith('https://hooks.slack.com/')) {
+    // Allowlist plus no-redirect: fetch followed 3xx by default, so a genuine
+    // hooks.slack.com URL could bounce the post (and its token) to any host.
+    if (webhookUrl && String(webhookUrl).startsWith('https://hooks.slack.com/')) {
       try {
-        const slackResponse = await fetch(webhookUrl, {
+        const slackResponse = await safeRequest(webhookUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'content-type': 'application/json' },
           body: JSON.stringify(blockKitPayload),
-          signal: AbortSignal.timeout(6000),
+          allowedHosts: SLACK_ALLOWED_HOSTS,
+          timeoutMs: 6000,
         });
         realDispatchSuccess = slackResponse.ok;
         realHttpStatus = slackResponse.status;
-        responseBody = await slackResponse.text();
+        responseBody = slackResponse.location
+          ? `refused redirect to ${slackResponse.location}`
+          : slackResponse.body;
       } catch (err: any) {
         console.warn('Real Slack webhook dispatch error:', err.message);
         responseBody = err.message;
@@ -784,7 +813,7 @@ Respond directly, strategically, and concisely to the operator's directive or in
         return res.json({
           reply: finalReply,
           appliedAction: appliedAction || null,
-          state: coordinator.getState(),
+          state: coordinator.getStateView(),
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         });
       } catch (err: any) {
@@ -799,7 +828,7 @@ Respond directly, strategically, and concisely to the operator's directive or in
     return res.json({
       reply: fallbackReply,
       appliedAction: appliedAction || null,
-      state: coordinator.getState(),
+      state: coordinator.getStateView(),
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     });
   } catch (error: any) {
@@ -870,9 +899,7 @@ app.post('/api/custom-providers/execute', async (req: Request, res: Response) =>
     const { endpointUrl, headers = {}, prompt, providerType = 'llm' } = req.body;
     if (!endpointUrl) return res.status(400).json({ error: 'endpointUrl is required' });
 
-    const startTime = Date.now();
     let bodyData: any = { prompt };
-
     if (providerType === 'llm') {
       bodyData = {
         model: 'default',
@@ -882,31 +909,45 @@ app.post('/api/custom-providers/execute', async (req: Request, res: Response) =>
       };
     }
 
-    const response = await fetch(endpointUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...headers,
-      },
-      body: JSON.stringify(bodyData),
-      signal: AbortSignal.timeout(10000),
-    });
-
-    const latencyMs = Date.now() - startTime;
-    const rawText = await response.text();
-    let parsedText = rawText;
-
+    const startTime = Date.now();
     try {
-      const jsonRes = JSON.parse(rawText);
-      parsedText = jsonRes.choices?.[0]?.message?.content || jsonRes.response || jsonRes.text || rawText;
-    } catch {}
+      const response = await safeRequest(endpointUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(bodyData),
+        allowedHosts: ['*'],
+        allowPrivateAddressing: ALLOW_PRIVATE_PROVIDER_HOSTS,
+        timeoutMs: 10000,
+      });
 
-    return res.json({
-      success: response.ok,
-      status: response.status,
-      latencyMs,
-      output: parsedText,
-    });
+      const latencyMs = Date.now() - startTime;
+      let parsedText = response.body;
+
+      try {
+        const jsonRes = JSON.parse(response.body);
+        parsedText = jsonRes.choices?.[0]?.message?.content || jsonRes.response || jsonRes.text || response.body;
+      } catch {}
+
+      return res.json({
+        success: response.ok,
+        status: response.status,
+        latencyMs,
+        redirected: Boolean(response.location),
+        output: parsedText,
+      });
+    } catch (error: any) {
+      if (isBlockedError(error)) {
+        return res.status(403).json({
+          success: false,
+          blocked: true,
+          error: error.message,
+          hint: ALLOW_PRIVATE_PROVIDER_HOSTS
+            ? undefined
+            : 'Local/LAN endpoints (Ollama, vLLM) require AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS=true.',
+        });
+      }
+      throw error;
+    }
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Provider execution failed' });
   }
@@ -922,32 +963,37 @@ app.post('/api/custom-providers/ping', async (req: Request, res: Response) => {
 
     const startTime = Date.now();
     try {
-      const response = await fetch(endpointUrl, {
+      const response = await safeRequest(endpointUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...headers,
-        },
+        headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(5000),
+        allowedHosts: ['*'],
+        allowPrivateAddressing: ALLOW_PRIVATE_PROVIDER_HOSTS,
+        timeoutMs: 5000,
       });
 
       const latencyMs = Date.now() - startTime;
-      const data = await response.text();
-
       return res.json({
         success: response.ok,
         status: response.status,
         latencyMs,
-        responsePreview: data.slice(0, 500),
+        redirected: Boolean(response.location),
+        responsePreview: response.body.slice(0, 500),
       });
     } catch (fetchErr: any) {
       const latencyMs = Date.now() - startTime;
-      return res.json({
-        success: false,
-        error: fetchErr.message || 'Connection failed',
-        latencyMs,
-      });
+      if (isBlockedError(fetchErr)) {
+        return res.status(403).json({
+          success: false,
+          blocked: true,
+          error: fetchErr.message,
+          latencyMs,
+          hint: ALLOW_PRIVATE_PROVIDER_HOSTS
+            ? undefined
+            : 'Local/LAN endpoints (Ollama, vLLM) require AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS=true.',
+        });
+      }
+      return res.json({ success: false, error: fetchErr.message || 'Connection failed', latencyMs });
     }
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Provider ping failed' });

@@ -1,10 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import vm from 'vm';
-import assert from 'assert';
 import { fileURLToPath } from 'url';
-import { 
+import {
+  isPathLexicallyContained,
+  isSafePathSegment,
+  readTextIfExists,
+} from './artifactPaths';
+import { runArtifactVerification } from './artifactRunner';
+import {
   Task, 
   Agent, 
   Epic, 
@@ -27,8 +31,54 @@ const __dirname = path.dirname(__filename);
 
 // Server-authoritative storage paths
 const DATA_DIR = path.resolve(__dirname, '../../data');
-const STATE_FILE = path.resolve(DATA_DIR, 'aegis_state.json');
+// Overridable so a test run cannot write credentials into the shipped state file.
+const STATE_FILE = process.env.AEGIS_STATE_FILE
+  ? path.resolve(process.env.AEGIS_STATE_FILE)
+  : path.resolve(DATA_DIR, 'aegis_state.json');
 const ARTIFACTS_DIR = path.resolve(__dirname, '../../.aegis_artifacts');
+
+/** Placeholder standing in for a stored secret. Matches the UI's masked value. */
+export const REDACTED = '•'.repeat(32);
+
+/**
+ * True when a client-submitted secret is really the mask it was handed, i.e.
+ * the user re-submitted a form they never re-typed. Callers must then fall back
+ * to the value already held server-side.
+ */
+export function isMaskedSecret(value: unknown): boolean {
+  return typeof value === 'string' && value.includes('•');
+}
+
+/**
+ * A state file written before a section existed (`data/aegis_state.json` ships
+ * without `repository`) must not take down the credential surface, so both
+ * accessors treat a missing section as an empty one rather than trusting the
+ * declared type.
+ */
+function fillSection<T extends object>(section: T | undefined): T {
+  return (section ?? {}) as T;
+}
+
+/** Replace one credential with the mask, leaving the section otherwise intact. */
+function redactSecret<T extends object>(section: T | undefined, key: keyof T): T {
+  const value = section?.[key];
+  return { ...fillSection(section), [key]: typeof value === 'string' && value !== '' ? REDACTED : '' } as T;
+}
+
+/**
+ * Resolves the artifact directory for a task key, failing closed.
+ *
+ * task.key reaches this code from HTTP bodies, so an unsanitized value made it
+ * possible to point the artifact lookup anywhere on the filesystem
+ * (`.aegis_artifacts/../../somewhere/implementation.js`) and have that file
+ * accepted as a "verified physical code artifact". The containment check alone
+ * would not help: path.resolve collapses the `..` segments before the check.
+ */
+function resolveArtifactDir(taskKey: string): string | null {
+  if (!isSafePathSegment(taskKey)) return null;
+  const resolved = path.resolve(ARTIFACTS_DIR, taskKey);
+  return isPathLexicallyContained(ARTIFACTS_DIR, resolved) ? resolved : null;
+}
 
 export interface ServerState {
   tasks: Task[];
@@ -127,6 +177,74 @@ class CoordinatorEngine {
     return this.state;
   }
 
+  /**
+   * State for client consumption. Server-held credentials are never included:
+   * integrationConfig used to be returned verbatim by GET /api/orchestrate/state,
+   * which put the Jira API token, the Slack webhook token (embedded in its URL
+   * path) and the repository token on every page load. Slack and Jira webhook
+   * URLs are bearer secrets in this product, not merely addresses.
+   *
+   * Internal code keeps using getState(); only the wire view is redacted.
+   */
+  public getStateView(): ServerState {
+    return { ...this.state, integrationConfig: this.getIntegrationConfigView() };
+  }
+
+  public getIntegrationConfigView(): IntegrationConfig {
+    const config = this.state.integrationConfig;
+    return {
+      ...config,
+      jira: redactSecret(config.jira, 'apiToken'),
+      slack: redactSecret(config.slack, 'webhookUrl'),
+      repository: redactSecret(config.repository, 'apiToken'),
+      customProviders: (config.customProviders ?? []).map((provider) => ({
+        ...provider,
+        apiKeyHeader: provider.apiKeyHeader ? REDACTED : provider.apiKeyHeader,
+      })),
+    };
+  }
+
+  /**
+   * Credentials for server-side use only (Jira/Slack dispatch). Never return
+   * this to a client.
+   */
+  public getIntegrationSecrets(): IntegrationConfig {
+    const config = this.state.integrationConfig;
+    return {
+      ...config,
+      jira: fillSection(config.jira),
+      slack: fillSection(config.slack),
+      repository: fillSection(config.repository),
+      customProviders: config.customProviders ?? [],
+    };
+  }
+
+  private preserveMaskedSecrets(partial: Partial<ServerState>): Partial<ServerState> {
+    if (!partial.integrationConfig) return partial;
+
+    const stored = this.getIntegrationSecrets();
+    const incoming = partial.integrationConfig;
+
+    // The UI is handed masked values; re-saving without retyping must not
+    // replace the real credential with the mask it was shown.
+    const keep = (candidate: string | undefined, existing: string | undefined): string =>
+      candidate === undefined || candidate === '' || isMaskedSecret(candidate) ? (existing ?? '') : candidate;
+
+    return {
+      ...partial,
+      integrationConfig: {
+        ...incoming,
+        jira: { ...incoming.jira, apiToken: keep(incoming.jira?.apiToken, stored.jira.apiToken) },
+        slack: { ...incoming.slack, webhookUrl: keep(incoming.slack?.webhookUrl, stored.slack.webhookUrl) },
+        repository: { ...incoming.repository, apiToken: keep(incoming.repository?.apiToken, stored.repository.apiToken) },
+        customProviders: (incoming.customProviders ?? []).map((provider) => {
+          const existing = stored.customProviders.find((p) => p.id === provider.id);
+          return { ...provider, apiKeyHeader: keep(provider.apiKeyHeader, existing?.apiKeyHeader) };
+        }),
+      },
+    };
+  }
+
   // --- Central State Enforcement with Quality Gates ---
   public updateState(partial: Partial<ServerState>): { state: ServerState; rejectedDoneTasks: string[] } {
     const rejectedDoneTasks: string[] = [];
@@ -139,8 +257,8 @@ class CoordinatorEngine {
 
         // Check if task is requested to be 'done'
         if (task.status === 'done') {
-          // Verify quality gates
-          const verification = this.verifyTaskQualityGates(task);
+          // Enforce everything verifiable without spawning a compiler/test run.
+          const verification = this.preflightQualityGates(task);
           if (!verification.passed) {
             rejectedDoneTasks.push(task.key);
             const failingReasons = verification.checks
@@ -161,9 +279,14 @@ class CoordinatorEngine {
       });
     }
 
+    // Now that the wire view of integrationConfig is masked, a UI that re-saves
+    // its form without the user re-typing would post the mask back. Preserve the
+    // stored secret instead of overwriting it with '••••'.
+    const partialWithTasks = this.preserveMaskedSecrets(partial);
+
     this.state = {
       ...this.state,
-      ...partial,
+      ...partialWithTasks,
       lastUpdated: new Date().toISOString(),
     };
 
@@ -183,19 +306,19 @@ class CoordinatorEngine {
   }
 
   // Centralized transition method
-  public transitionTaskStatus(taskId: string, targetStatus: TaskStatus): {
+  public async transitionTaskStatus(taskId: string, targetStatus: TaskStatus): Promise<{
     success: boolean;
     task?: Task;
     verification?: VerificationResult;
     error?: string;
-  } {
+  }> {
     const task = this.state.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
       return { success: false, error: `Task ${taskId} not found` };
     }
 
     if (targetStatus === 'done') {
-      const verification = this.verifyTaskQualityGates(task);
+      const verification = await this.verifyTaskQualityGates(task);
       if (!verification.passed) {
         return {
           success: false,
@@ -220,12 +343,100 @@ class CoordinatorEngine {
     };
   }
 
-  // --- Strict Multi-Rule Quality Gate Verification ---
-  public verifyTaskQualityGates(task: Task): VerificationResult {
+  /**
+   * Cheap, synchronous gate used on the write path (updateState). It enforces
+   * the checks that do not require executing anything: dependencies, acceptance
+   * subtasks, and the *presence* of a physically contained artifact.
+   *
+   * The syntax and test-suite checks are deferred to verifyTaskQualityGates,
+   * which must run a child process and therefore cannot be synchronous. The
+   * artifact-presence check here is what makes "mark everything done" requests
+   * from a client fail closed, so the write path keeps that property without
+   * paying subprocess costs per task.
+   */
+  public preflightQualityGates(task: Task): VerificationResult {
+    const checks: VerificationCheck[] = [...this.staticChecks(task)];
+    const artifact = this.locateArtifact(task.key);
+
+    checks.push({
+      rule: 'Inspected Physical Code Artifact on Disk',
+      passed: artifact !== null,
+      detail: artifact
+        ? `Physical artifact verified on disk at ${path.relative(process.cwd(), artifact.path)} (${fs.statSync(artifact.path).size} bytes)`
+        : `No physical code artifact found on disk in .aegis_artifacts/${task.key}/`,
+    });
+
+    // Only the checks that actually ran contribute to the verdict; compilation
+    // and test execution belong to verifyTaskQualityGates.
+    return {
+      passed: checks.every((c) => c.passed),
+      taskId: task.id,
+      taskKey: task.key,
+      checks,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      logs: checks.map((c) => `[${c.passed ? 'PASS' : 'FAIL'}] ${c.rule}: ${c.detail}`).join('\n'),
+      sha256: artifact?.sha256,
+    };
+  }
+
+  /**
+   * Strict, multi-rule verification. Runs artifact compilation and its test
+   * suite in an isolated child process (see artifactRunner.ts).
+   */
+  public async verifyTaskQualityGates(task: Task): Promise<VerificationResult> {
+    const checks: VerificationCheck[] = [...this.staticChecks(task)];
+    const artifact = this.locateArtifact(task.key);
+
+    checks.push({
+      rule: 'Inspected Physical Code Artifact on Disk',
+      passed: artifact !== null,
+      detail: artifact
+        ? `Physical artifact verified on disk at ${path.relative(process.cwd(), artifact.path)} (${fs.statSync(artifact.path).size} bytes)`
+        : `No physical code artifact found on disk in .aegis_artifacts/${task.key}/`,
+    });
+
+    let syntaxPassed = false;
+    let syntaxDetail = 'No code artifact available for syntax compilation';
+    let testPassed = false;
+    let testDetail = 'Automated unit test suite not found on disk';
+
+    if (artifact) {
+      const run = await runArtifactVerification(artifact.code, artifact.testCode);
+
+      if (artifact.isLegacyMarkdown && !run.testsOk && !run.syntaxOk) {
+        // Legacy deliverables are markdown; their embedded snippet was never a
+        // standalone module, so only the compilation result is meaningful.
+        syntaxPassed = false;
+        syntaxDetail = `Syntax compilation error: ${run.detail}`;
+        testDetail = `Legacy artifact: compilation of embedded snippet failed (${run.detail})`;
+      } else {
+        syntaxPassed = run.syntaxOk;
+        syntaxDetail = run.syntaxOk
+          ? `Compiler AST verified: 0 syntax errors detected across ${artifact.code.split('\n').length} lines`
+          : `Syntax compilation error: ${run.detail}`;
+
+        if (run.testsOk) {
+          testPassed = true;
+          testDetail = `Automated unit assertions passed in isolated subprocess (SHA-256: ${artifact.sha256.slice(0, 16)}...)`;
+        } else {
+          testDetail = artifact.testCode === null
+            ? 'Automated unit test suite not found on disk'
+            : `Unit assertion failure: ${run.detail}`;
+        }
+      }
+    }
+
+    checks.push({ rule: 'Real Compiler AST Syntax Verification', passed: syntaxPassed, detail: syntaxDetail });
+    checks.push({ rule: 'Automated Test Suite & Cryptographic Hash', passed: testPassed, detail: testDetail });
+
+    return this.assemble(task, checks, artifact?.sha256);
+  }
+
+  /** Checks that need neither the filesystem nor a subprocess. */
+  private staticChecks(task: Task): VerificationCheck[] {
     const checks: VerificationCheck[] = [];
     const allTasks = this.state.tasks;
 
-    // Check 1: Prerequisite Dependencies Cleared (Fixes bug: missing dependencies must fail!)
     const dependencies = task.dependencies || [];
     const failingDependencies: string[] = [];
 
@@ -242,13 +453,12 @@ class CoordinatorEngine {
       rule: 'Prerequisite Dependencies Cleared',
       passed: failingDependencies.length === 0,
       detail: failingDependencies.length === 0
-        ? dependencies.length > 0 
+        ? dependencies.length > 0
           ? `All ${dependencies.length} upstream dependencies verified Done`
           : 'No upstream dependencies required'
         : `Blocked by dependencies: ${failingDependencies.join('; ')}`,
     });
 
-    // Check 2: Acceptance Criteria Subtasks Verified
     const subtasks = task.subtasks || [];
     const uncompletedSubtasks = subtasks.filter((st) => !st.completed);
     checks.push({
@@ -261,118 +471,68 @@ class CoordinatorEngine {
         : `${uncompletedSubtasks.length} of ${subtasks.length} subtask(s) still incomplete`,
     });
 
-    // Check 3: Physical Disk Code Artifact Verification
-    // Artifact must exist on disk inside .aegis_artifacts/<taskKey>/
-    const taskArtifactDir = path.resolve(ARTIFACTS_DIR, task.key);
-    const codeFilePath = path.resolve(taskArtifactDir, 'implementation.js');
-    const legacyPath = path.resolve(ARTIFACTS_DIR, `${task.key}_deliverable.md`);
-    const hasCodeArtifact = fs.existsSync(codeFilePath) && fs.statSync(codeFilePath).size > 0;
-    const hasLegacyArtifact = fs.existsSync(legacyPath) && fs.statSync(legacyPath).size > 0;
-    const verifiedPath = hasCodeArtifact ? codeFilePath : hasLegacyArtifact ? legacyPath : null;
+    return checks;
+  }
 
-    checks.push({
-      rule: 'Inspected Physical Code Artifact on Disk',
-      passed: verifiedPath !== null,
-      detail: verifiedPath !== null
-        ? `Physical artifact verified on disk at ${path.relative(process.cwd(), verifiedPath)} (${fs.statSync(verifiedPath).size} bytes)`
-        : `No physical code artifact found on disk in .aegis_artifacts/${task.key}/`,
-    });
+  /**
+   * Locates the task's artifact, returning null for any key that is not a safe
+   * single path component. `code` holds the snippet that gets compiled/run.
+   */
+  private locateArtifact(taskKey: string): {
+    path: string;
+    dir: string;
+    code: string;
+    testCode: string | null;
+    sha256: string;
+    isLegacyMarkdown: boolean;
+  } | null {
+    const dir = resolveArtifactDir(taskKey);
+    if (!dir) return null;
 
-    // Check 4: Real Syntax & AST Compiler Verification
-    let syntaxPassed = false;
-    let syntaxDetail = 'No code artifact available for syntax compilation';
-    let codeContent = '';
+    const codeFilePath = path.resolve(dir, 'implementation.js');
+    const testFilePath = path.resolve(dir, 'spec.test.js');
+    const legacyPath = path.resolve(path.dirname(dir), `${taskKey}_deliverable.md`);
 
-    if (verifiedPath) {
-      try {
-        codeContent = fs.readFileSync(verifiedPath, 'utf-8');
-        // If markdown, extract code block or validate raw JS
-        let jsToCompile = codeContent;
-        if (codeContent.includes('```')) {
-          const match = codeContent.match(/```(?:typescript|javascript|js|ts)?\n([\s\S]*?)```/);
-          if (match && match[1]) {
-            jsToCompile = match[1];
-          }
-        }
-
-        // Run real Node.js AST parser / VM script compiler
-        new vm.Script(jsToCompile);
-        syntaxPassed = true;
-        syntaxDetail = `Compiler AST verified: 0 syntax errors detected across ${jsToCompile.split('\n').length} lines`;
-      } catch (compileErr: any) {
-        syntaxPassed = false;
-        syntaxDetail = `Syntax compilation error: ${compileErr.message}`;
-      }
+    const code = readTextIfExists(codeFilePath);
+    if (code !== null && code.length > 0) {
+      return {
+        path: codeFilePath,
+        dir,
+        code,
+        testCode: readTextIfExists(testFilePath),
+        sha256: crypto.createHash('sha256').update(code).digest('hex'),
+        isLegacyMarkdown: false,
+      };
     }
 
-    checks.push({
-      rule: 'Real Compiler AST Syntax Verification',
-      passed: syntaxPassed,
-      detail: syntaxDetail,
-    });
+    const legacy = readTextIfExists(legacyPath);
+    if (legacy === null || legacy.length === 0) return null;
 
-    // Check 5: Automated Unit Test Suite & Cryptographic Integrity Check
-    const testFilePath = path.resolve(taskArtifactDir, 'spec.test.js');
-    let testPassed = false;
-    let testDetail = 'Automated unit test suite not found on disk';
-    let computedSha256 = '';
-
-    if (codeContent) {
-      computedSha256 = crypto.createHash('sha256').update(codeContent).digest('hex');
+    let snippet = legacy;
+    if (legacy.includes('```')) {
+      const match = legacy.match(/```(?:typescript|javascript|js|ts)?\n([\s\S]*?)```/);
+      if (match && match[1]) snippet = match[1];
     }
-
-    if (fs.existsSync(testFilePath)) {
-      try {
-        const testCode = fs.readFileSync(testFilePath, 'utf-8');
-        // Execute test suite in isolated VM context with assert
-        const sandbox = {
-          assert,
-          require: (mod: string) => {
-            if (mod === 'assert' || mod === 'node:assert') return assert;
-            if (mod === 'crypto' || mod === 'node:crypto') return crypto;
-            return {};
-          },
-          module: { exports: {} },
-          exports: {},
-          console: { log: () => {}, warn: () => {}, error: () => {} },
-        };
-
-        const context = vm.createContext(sandbox);
-        // Load implementation first if available
-        if (hasCodeArtifact) {
-          const implCode = fs.readFileSync(codeFilePath, 'utf-8');
-          new vm.Script(implCode).runInContext(context);
-        }
-        // Run test suite
-        new vm.Script(testCode).runInContext(context);
-        testPassed = true;
-        testDetail = `Automated unit assertions passed (SHA-256: ${computedSha256.slice(0, 16)}...)`;
-      } catch (testErr: any) {
-        testPassed = false;
-        testDetail = `Unit assertion failure: ${testErr.message}`;
-      }
-    } else if (hasLegacyArtifact) {
-      // For legacy artifacts, check that SHA-256 is present
-      testPassed = syntaxPassed;
-      testDetail = `Cryptographic integrity signature verified (SHA-256: ${computedSha256.slice(0, 16)}...)`;
-    }
-
-    checks.push({
-      rule: 'Automated Test Suite & Cryptographic Hash',
-      passed: testPassed,
-      detail: testDetail,
-    });
-
-    const passed = checks.every((c) => c.passed);
 
     return {
-      passed,
+      path: legacyPath,
+      dir,
+      code: snippet,
+      testCode: null,
+      sha256: crypto.createHash('sha256').update(snippet).digest('hex'),
+      isLegacyMarkdown: true,
+    };
+  }
+
+  private assemble(task: Task, checks: VerificationCheck[], sha256?: string): VerificationResult {
+    return {
+      passed: checks.every((c) => c.passed),
       taskId: task.id,
       taskKey: task.key,
       checks,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       logs: checks.map((c) => `[${c.passed ? 'PASS' : 'FAIL'}] ${c.rule}: ${c.detail}`).join('\n'),
-      sha256: computedSha256 || undefined,
+      sha256,
     };
   }
 
@@ -386,48 +546,35 @@ class CoordinatorEngine {
     subtasksCompleted: string[];
     actionTaken: string;
   }> {
-    const taskArtifactDir = path.resolve(ARTIFACTS_DIR, task.key);
+    const blocked = () => new Error(
+      `Execution blocked: No capable worker connected to fulfill acceptance criteria for ${task.key} (${task.title}). Requires real implementation in workspace.`
+    );
+
+    const taskArtifactDir = resolveArtifactDir(task.key);
+    if (!taskArtifactDir) throw blocked();
+
     const codeFilePath = path.resolve(taskArtifactDir, 'implementation.js');
     const testFilePath = path.resolve(taskArtifactDir, 'spec.test.js');
 
     // Check if a verified, non-generic implementation already exists on disk
-    const hasActualImpl = fs.existsSync(codeFilePath) && fs.existsSync(testFilePath);
+    if (!isPathLexicallyContained(ARTIFACTS_DIR, taskArtifactDir)) throw blocked();
 
-    if (!hasActualImpl) {
-      // If task is not AEG-104 and no implementation exists, do NOT manufacture fake generic code
-      throw new Error(
-        `Execution blocked: No capable worker connected to fulfill acceptance criteria for ${task.key} (${task.title}). Requires real implementation in workspace.`
-      );
+    const implementationCode = readTextIfExists(codeFilePath);
+    const testCode = readTextIfExists(testFilePath);
+
+    if (implementationCode === null || testCode === null) throw blocked();
+
+    // Execute the suite in a short-lived child process with no inherited
+    // secrets and a hard timeout. See artifactRunner.ts for the threat model.
+    const run = await runArtifactVerification(implementationCode, testCode);
+
+    if (!run.testsOk) {
+      throw new Error(`Unit tests failed for ${task.key}: ${run.detail}. Cannot advance stage.`);
     }
 
-    // Read actual implementation and test suite
-    const implementationCode = fs.readFileSync(codeFilePath, 'utf-8');
-    const testCode = fs.readFileSync(testFilePath, 'utf-8');
-
-    // Execute real test suite in isolated VM sandbox to verify functionality
-    const verifiedCriteria: string[] = [];
-    try {
-      const sandbox = {
-        assert,
-        require: (mod: string) => (mod === 'assert' ? assert : {}),
-        module: { exports: {} },
-        exports: {},
-        console: { log: () => {} },
-        passCriterion: (criterionId: string) => {
-          if (!verifiedCriteria.includes(criterionId)) {
-            verifiedCriteria.push(criterionId);
-          }
-        },
-      };
-      const context = vm.createContext(sandbox);
-      new vm.Script(implementationCode).runInContext(context);
-      new vm.Script(testCode).runInContext(context);
-    } catch (testErr: any) {
-      throw new Error(`Unit tests failed for ${task.key}: ${testErr.message}. Cannot advance stage.`);
-    }
-
+    const verifiedCriteria = run.criteria;
     const sha256 = crypto.createHash('sha256').update(implementationCode).digest('hex');
-    const fileSize = fs.statSync(codeFilePath).size;
+    const fileSize = Buffer.byteLength(implementationCode, 'utf8');
 
     // Only mark subtasks that have explicitly been mapped to passing test assertions
     const subtasksCompleted = (task.subtasks || [])
@@ -534,7 +681,7 @@ ${implementationCode.slice(0, 500)}...
       // 2. Check tasks in 'review' -> run STRICT verification gates
       const reviewTask = tasks.find((t) => t.status === 'review');
       if (reviewTask) {
-        const verification = this.verifyTaskQualityGates(reviewTask);
+        const verification = await this.verifyTaskQualityGates(reviewTask);
 
         if (verification.passed) {
           const updatedTask: Task = {
