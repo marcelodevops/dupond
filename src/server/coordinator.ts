@@ -13,6 +13,7 @@ import {
   CommunicationMessage,
   TaskStatus 
 } from '../types';
+import { StateMutationSchema } from '../types/schemas.js';
 import { 
   DEFAULT_TASKS, 
   DEFAULT_AGENTS, 
@@ -127,14 +128,25 @@ class CoordinatorEngine {
     return this.state;
   }
 
-  // --- Central State Enforcement with Quality Gates ---
-  public updateState(partial: Partial<ServerState>): { state: ServerState; rejectedDoneTasks: string[] } {
+  // --- Central State Enforcement with Quality Gates & Schema Validation ---
+  public updateState(partial: unknown): { success: boolean; state: ServerState; rejectedDoneTasks: string[]; error?: string } {
+    const parseResult = StateMutationSchema.safeParse(partial);
+    if (!parseResult.success) {
+      return {
+        success: false,
+        state: this.state,
+        rejectedDoneTasks: [],
+        error: `State validation failed: ${parseResult.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ')}`,
+      };
+    }
+
+    const validatedPartial = parseResult.data as Partial<ServerState>;
     const rejectedDoneTasks: string[] = [];
 
     // If incoming tasks are marked as 'done', verify each one strictly
-    if (partial.tasks) {
+    if (validatedPartial.tasks) {
       const existingTasks = this.state.tasks;
-      partial.tasks = partial.tasks.map((task) => {
+      validatedPartial.tasks = validatedPartial.tasks.map((task) => {
         const existing = existingTasks.find((t) => t.id === task.id || t.key === task.key);
 
         // Check if task is requested to be 'done'
@@ -163,7 +175,7 @@ class CoordinatorEngine {
 
     this.state = {
       ...this.state,
-      ...partial,
+      ...validatedPartial,
       lastUpdated: new Date().toISOString(),
     };
 
@@ -179,7 +191,7 @@ class CoordinatorEngine {
     }
 
     this.saveStateToDisk();
-    return { state: this.state, rejectedDoneTasks };
+    return { success: true, state: this.state, rejectedDoneTasks };
   }
 
   // Centralized transition method

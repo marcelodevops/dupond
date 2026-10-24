@@ -3,7 +3,7 @@ import {
   calculateAgentLoad, 
   buildGeminiOptimizerPrompt, 
   balanceWorkload 
-} from './workloadBalancer.js';
+} from '../../src/services/workloadBalancer.js';
 
 console.log('--- RUNNING INDEPENDENT TESTS FOR AEG-104 ---');
 
