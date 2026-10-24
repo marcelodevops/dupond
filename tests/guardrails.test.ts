@@ -1,5 +1,5 @@
 /**
- * Aegis Orchestrator - Guardrails & Delivery Fail-Closed Regression Suite
+ * Dupond Orchestrator - Guardrails & Delivery Fail-Closed Regression Suite
  * 
  * Tests the ACTUAL application delivery and coordinator handlers using
  * isolated temporary disk directories (fs.mkdtempSync).
@@ -13,7 +13,7 @@ import { coordinator } from '../src/server/coordinator.js';
 import { handleRepositoryDispatch, isPathContained } from '../src/server/deliveryHandler.js';
 import { calculateAgentLoad } from '../src/services/workloadBalancer.js';
 
-console.log('=== RUNNING AEGIS GUARDRAILS & LIVE DELIVERY REGRESSION SUITE ===\n');
+console.log('=== RUNNING DUPOND GUARDRAILS & LIVE DELIVERY REGRESSION SUITE ===\n');
 
 let passedTests = 0;
 let totalTests = 0;
@@ -35,7 +35,7 @@ async function runTest(name: string, fn: () => void | Promise<void>) {
 
 async function executeSuite() {
   // Temporary directory fixture for live tests
-  const testBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-guardrails-'));
+  const testBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-guardrails-'));
 
   const aeg104Task = {
     id: 'task-104',
@@ -187,7 +187,7 @@ async function executeSuite() {
   });
 
   await runTest('Actual delivery handler blocks symlink path traversal escaping destination directory', async () => {
-    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-outside-'));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-outside-'));
     const symlinkPath = path.join(testBaseDir, 'escape_link');
 
     try {

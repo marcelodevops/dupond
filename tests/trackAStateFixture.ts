@@ -9,8 +9,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-export const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-tracka-state-'));
-export const STATE_FILE = path.join(STATE_DIR, 'aegis_state.json');
+export const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-tracka-state-'));
+export const STATE_FILE = path.join(STATE_DIR, 'dupond_state.json');
 
 export const SENTINELS = {
   jiraApiToken: 'SENTINEL-jira-api-token-must-never-leave-the-server',
@@ -33,7 +33,9 @@ export const SENTINEL_SECRETS: string[] = [
 
 function seed(): void {
   const repoRoot = path.resolve(import.meta.dirname, '..');
-  const shippedPath = path.join(repoRoot, 'data', 'aegis_state.json');
+  const shippedPath = fs.existsSync(path.join(repoRoot, 'data', 'dupond_state.json'))
+    ? path.join(repoRoot, 'data', 'dupond_state.json')
+    : path.join(repoRoot, 'data', 'aegis_state.json');
 
   // Start from the shipped shape when present so the section-missing case is
   // exercised too, otherwise fall back to a hand-built config.
@@ -51,7 +53,7 @@ function seed(): void {
   const sentinelProvider = {
     id: 'prov-sentinel',
     name: 'Sentinel provider',
-    endpointUrl: 'https://provider.example.invalid/hooks/aegis',
+    endpointUrl: 'https://provider.example.invalid/hooks/dupond',
     providerType: 'webhook' as const,
     active: true,
     apiKeyHeader: SENTINELS.providerApiKey,
@@ -91,4 +93,5 @@ function seed(): void {
 }
 
 seed();
+process.env.DUPOND_STATE_FILE = STATE_FILE;
 process.env.AEGIS_STATE_FILE = STATE_FILE;

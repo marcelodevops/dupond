@@ -150,7 +150,7 @@ export const StakeholderReports: React.FC<StakeholderReportsProps> = ({
                 </span>
                 <h3 className="text-lg font-bold text-slate-100">{report.title}</h3>
                 <p className="text-xs text-slate-400">
-                  Synthesized by Aegis Orchestrator • {report.generatedAt}
+                  Synthesized by Dupond Orchestrator • {report.generatedAt}
                 </p>
               </div>
 
@@ -335,7 +335,7 @@ export const StakeholderReports: React.FC<StakeholderReportsProps> = ({
           <div>
             <h3 className="text-base font-bold text-slate-100">No Stakeholder Brief Generated Yet</h3>
             <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
-              Click the "Generate Stakeholder Brief" button above. Aegis will aggregate the real-time Kanban board status, milestones, velocity, and generate C-suite and engineering notes.
+              Click the "Generate Stakeholder Brief" button above. Dupond will aggregate the real-time Kanban board status, milestones, velocity, and generate C-suite and engineering notes.
             </p>
           </div>
           <button

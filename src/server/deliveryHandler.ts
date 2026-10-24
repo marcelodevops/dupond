@@ -7,9 +7,11 @@ import { isPathLexicallyContained, isSafePathSegment } from './artifactPaths.js'
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/** Root of this application; artifacts live under `.aegis_artifacts/<key>/`. */
+/** Root of this application; artifacts live under `.dupond_artifacts/<key>/`. */
 const PROJECT_ROOT = path.resolve(__dirname, '../../');
-const ARTIFACTS_DIR = path.resolve(PROJECT_ROOT, '.aegis_artifacts');
+const ARTIFACTS_DIR = fs.existsSync(path.resolve(PROJECT_ROOT, '.dupond_artifacts'))
+  ? path.resolve(PROJECT_ROOT, '.dupond_artifacts')
+  : path.resolve(PROJECT_ROOT, '.aegis_artifacts');
 
 export interface DeliveryResult {
   status: number;
@@ -88,9 +90,9 @@ export async function handleRepositoryDispatch(params: {
     type = 'local_directory',
     localPath = process.cwd(),
     localWriteMode = 'patch_export',
-    repoUrl = 'https://github.com/acme-corp/aegis-core-system', 
+    repoUrl = 'https://github.com/acme-corp/dupond-core-system', 
     defaultBranch = 'main', 
-    branchPrefix = 'aegis/', 
+    branchPrefix = 'dupond/', 
     apiToken, 
     deliveryMode = 'pull_request', 
     targetDirectory = 'src/services' 
@@ -191,7 +193,7 @@ export async function handleRepositoryDispatch(params: {
           body: {
             success: false,
             blocked: true,
-            error: `Delivery blocked: No verified artifact found on disk at .aegis_artifacts/${taskKey}/implementation.js. Task must pass quality gates before delivery.`,
+            error: `Delivery blocked: No verified artifact found on disk at .dupond_artifacts/${taskKey}/implementation.js. Task must pass quality gates before delivery.`,
           },
         };
       }

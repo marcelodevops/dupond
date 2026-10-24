@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Out-of-process executor for Aegis artifact verification.
+ * Out-of-process executor for Dupond artifact verification.
  *
  * The payload arrives on stdin, so no attacker-controlled value ever reaches
  * argv or the process table. Untrusted implementation/spec code is compiled

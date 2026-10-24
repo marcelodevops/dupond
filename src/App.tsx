@@ -40,7 +40,7 @@ export default function App() {
   // Load state from localStorage or default
   const [tasks, setTasks] = useState<Task[]>(() => {
     try {
-      const saved = localStorage.getItem('aegis_tasks');
+      const saved = localStorage.getItem('dupond_tasks') || localStorage.getItem('aegis_tasks');
       return saved ? JSON.parse(saved) : DEFAULT_TASKS;
     } catch {
       return DEFAULT_TASKS;
@@ -49,7 +49,7 @@ export default function App() {
 
   const [agents, setAgents] = useState<Agent[]>(() => {
     try {
-      const saved = localStorage.getItem('aegis_agents');
+      const saved = localStorage.getItem('dupond_agents') || localStorage.getItem('aegis_agents');
       return saved ? JSON.parse(saved) : DEFAULT_AGENTS;
     } catch {
       return DEFAULT_AGENTS;
@@ -58,7 +58,7 @@ export default function App() {
 
   const [epics, setEpics] = useState<Epic[]>(() => {
     try {
-      const saved = localStorage.getItem('aegis_epics');
+      const saved = localStorage.getItem('dupond_epics') || localStorage.getItem('aegis_epics');
       return saved ? JSON.parse(saved) : DEFAULT_EPICS;
     } catch {
       return DEFAULT_EPICS;
@@ -67,7 +67,7 @@ export default function App() {
 
   const [orchestratorConfig, setOrchestratorConfig] = useState<OrchestratorConfig>(() => {
     try {
-      const saved = localStorage.getItem('aegis_orchestrator_config');
+      const saved = localStorage.getItem('dupond_orchestrator_config') || localStorage.getItem('aegis_orchestrator_config');
       return saved ? JSON.parse(saved) : DEFAULT_ORCHESTRATOR_CONFIG;
     } catch {
       return DEFAULT_ORCHESTRATOR_CONFIG;
@@ -76,7 +76,7 @@ export default function App() {
 
   const [integrationConfig, setIntegrationConfig] = useState<IntegrationConfig>(() => {
     try {
-      const saved = localStorage.getItem('aegis_integration_config');
+      const saved = localStorage.getItem('dupond_integration_config') || localStorage.getItem('aegis_integration_config');
       return saved ? JSON.parse(saved) : DEFAULT_INTEGRATION_CONFIG;
     } catch {
       return DEFAULT_INTEGRATION_CONFIG;
@@ -85,7 +85,7 @@ export default function App() {
 
   const [communications, setCommunications] = useState<CommunicationMessage[]>(() => {
     try {
-      const saved = localStorage.getItem('aegis_communications');
+      const saved = localStorage.getItem('dupond_communications') || localStorage.getItem('aegis_communications');
       return saved ? JSON.parse(saved) : DEFAULT_COMMUNICATIONS;
     } catch {
       return DEFAULT_COMMUNICATIONS;

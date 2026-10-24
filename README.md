@@ -1,4 +1,4 @@
-# Aegis Orchestrator 🛡️🤖
+# Dupond Orchestrator 🛡️🤖
 ### Autonomous AI Project Orchestration, Dynamic Role Allocation & Real-Time Telemetry Engine
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
@@ -15,7 +15,7 @@
 
 Modern software engineering initiatives often suffer from **fragmented task delegation, specialist burnout, stale status tracking, and manual reporting overhead**. 
 
-**Aegis Orchestrator** resolves this by operating as an **Autonomous Project Management Engine**. It digests high-level curated project specs, automatically decomposes them into epics and actionable tasks, models topological prerequisite dependencies, and orchestrates an autonomous team of specialized AI agents. 
+**Dupond Orchestrator** resolves this by operating as an **Autonomous Project Management Engine**. It digests high-level curated project specs, automatically decomposes them into epics and actionable tasks, models topological prerequisite dependencies, and orchestrates an autonomous team of specialized AI agents. 
 
 Crucially, sub-agents **dynamically assume specialized roles** (such as *Solutions Architect*, *Penetration Tester*, *Design Systems Lead*, or *SRE*) based on emerging technical bottlenecks, project constraints, and inter-agent communication history. Real-time execution is surfaced on an interactive Kanban board, visual DAG diagrams, and automated executive digests with bi-directional Atlassian Jira and Slack synchronization.
 
@@ -54,7 +54,7 @@ flowchart TB
 
     subgraph BrainTier["Intelligence & Agent Cluster"]
         GeminiCore["Google GenAI SDK<br/>(gemini-3.8-flash)"]
-        OrchestratorAgent["Aegis Prime Core<br/>(Chief Orchestrator Agent)"]
+        OrchestratorAgent["Dupond Prime Core<br/>(Chief Orchestrator Agent)"]
         
         subgraph SpecialistNodes["Specialized Autonomous Agent Cluster"]
             Agent_Arch["Nexus-7<br/>(Solutions Architect / Data Lead)"]
@@ -105,7 +105,7 @@ flowchart TB
 
 ```
 +---------------------------------------------------------------------------------------------------+
-|                                     AEGIS ORCHESTRATOR PLATFORM                                    |
+|                                     DUPOND ORCHESTRATOR PLATFORM                                    |
 +---------------------------------------------------------------------------------------------------+
 |  PRESENTATION LAYER (React 19 + Tailwind CSS)                                                      |
 |  +-------------------------+  +--------------------------+  +----------------------------------+  |
@@ -218,7 +218,7 @@ flowchart TB
 Clone the repository (or open your downloaded project directory):
 ```bash
 git clone <repository-url>
-cd aegis-orchestrator
+cd dupond-orchestrator
 ```
 
 ### Step 2: Install Dependencies
@@ -242,10 +242,10 @@ APP_URL="http://localhost:3000"
 
 # Optional: Allow custom providers to target private/loopback hosts (Ollama, vLLM)
 # Default is "false" which enforces strict SSRF loopback & private IP blocking.
-AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS="false"
+DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS="false"
 
-# Optional: Custom state file path (defaults to ./data/aegis_state.json)
-# AEGIS_STATE_FILE="./data/aegis_state.json"
+# Optional: Custom state file path (defaults to ./data/dupond_state.json)
+# DUPOND_STATE_FILE="./data/dupond_state.json"
 ```
 
 ### Step 4: Run the Development Server
@@ -255,7 +255,7 @@ npm run dev
 
 The Express server with embedded Vite middleware will start:
 ```
-Aegis Orchestrator server running on http://0.0.0.0:3000
+Dupond Orchestrator server running on http://0.0.0.0:3000
 ```
 Open **[http://localhost:3000](http://localhost:3000)** in your browser.
 
@@ -274,11 +274,11 @@ npm start
 1. Click the **"Ingest Plan"** button in the top navigation bar.
 2. Choose one of the curated enterprise templates (e.g., *Enterprise AI Workflow MVP*) or select **"Clear / New Custom Plan"** to paste your own product spec.
 3. Click **"Decompose & Orchestrate Plan with AI"**.
-4. Aegis will parse the plan into epics, granular tasks, estimated effort, and recommended agent roles.
+4. Dupond will parse the plan into epics, granular tasks, estimated effort, and recommended agent roles.
 5. Click **"Adopt Plan to Kanban Board"** to populate the workspace.
 
 ### 2. Managing the Autonomous Execution Loop
-- **Auto-Pilot Mode**: Click the green **"Auto-Pilot"** button in the header. Aegis will continuously cycle through eligible tasks, advancing them through *In Progress*, *Review*, and *Done* stages while generating technical code deliverables and broadcasting handoff messages.
+- **Auto-Pilot Mode**: Click the green **"Auto-Pilot"** button in the header. Dupond will continuously cycle through eligible tasks, advancing them through *In Progress*, *Review*, and *Done* stages while generating technical code deliverables and broadcasting handoff messages.
 - **Step-by-Step Mode**: Click **"Next Cycle"** to trigger a single deterministic agent execution step.
 - **Manual Drag / Click Transitions**: On the Kanban board, click the forward (`→`) or backward (`←`) arrow on any task card to move it across columns.
 
@@ -312,7 +312,7 @@ Navigate to the **"Diagrams & Progress"** tab:
 1. In the **"Orchestrator Studio"** tab:
    - Edit the Chief Orchestrator's persona and system prompt directives.
    - Adjust autonomy mode, reasoning depth, and risk tolerance.
-   - Use the **Directives Terminal** on the right to chat directly with Aegis.
+   - Use the **Directives Terminal** on the right to chat directly with Dupond.
 2. In the **"Jira & Slack Sync"** tab:
    - Set up your Jira Cloud URL and test synchronization.
    - Configure your incoming Slack webhook URL.
@@ -325,7 +325,7 @@ Navigate to the **"Diagrams & Progress"** tab:
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/health` | Health probe returning service status, Gemini API key, and coordinator daemon state |
-| `GET` | `/api/orchestrate/state` | Returns the server-authoritative sprint state (`data/aegis_state.json`) |
+| `GET` | `/api/orchestrate/state` | Returns the server-authoritative sprint state (`data/dupond_state.json`) |
 | `POST` | `/api/orchestrate/state` | Updates authoritative state with central Quality Gate validation |
 | `POST` | `/api/orchestrate/tasks/:id/transition` | Centralized transition endpoint enforcing dependencies, AST syntax, tests, and disk code artifacts |
 | `POST` | `/api/orchestrate/verify-task` | Multi-rule quality gate evaluator (Dependencies, Subtasks, Disk Artifact, Compiler AST, Unit Assertions) |
@@ -346,7 +346,7 @@ Navigate to the **"Diagrams & Progress"** tab:
 
 ## 🔒 Security Architecture & Guardrails
 
-Aegis implements strict enterprise-grade security boundaries protecting against RCE, SSRF, directory traversal, credential leakage, and arbitrary state tampering:
+Dupond implements strict enterprise-grade security boundaries protecting against RCE, SSRF, directory traversal, credential leakage, and arbitrary state tampering:
 
 ### 1. Child-Process Sandbox Execution (Zero RCE Risk)
 - **Isolated Runner**: Sub-agent code artifacts and deliverable verification scripts run in isolated child processes ([`src/server/artifactRunner.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/artifactRunner.ts)) rather than insecure in-process VM contexts.
@@ -374,7 +374,7 @@ Aegis implements strict enterprise-grade security boundaries protecting against 
 
 ## 🧪 Testing & Verification Suite
 
-Aegis includes a unified test suite with 37 automated tests covering security guardrails, sandbox isolation, SSRF prevention, and business logic:
+Dupond includes a unified test suite with 37 automated tests covering security guardrails, sandbox isolation, SSRF prevention, and business logic:
 
 ```bash
 # Run all 37 regression tests

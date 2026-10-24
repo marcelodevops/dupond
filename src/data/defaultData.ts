@@ -1,8 +1,8 @@
 import { Agent, Epic, IntegrationConfig, OrchestratorConfig, PlanTemplate, Task, CommunicationMessage } from '../types';
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
-  personaName: 'Aegis Prime Core',
-  systemPrompt: `You are Aegis Prime, Chief Autonomous Project Orchestrator. 
+  personaName: 'Dupond Prime Core',
+  systemPrompt: `You are Dupond Prime, Chief Autonomous Project Orchestrator. 
 Your mandate is to organize complex product visions into high-velocity sprint pipelines, assign tasks dynamically based on specialist capabilities and communication history, enforce zero-defect quality gates, and maintain transparency with stakeholders via automated reporting and Jira/Slack telemetry.`,
   autonomyMode: 'semi_autonomous',
   model: 'gemini-3.8-flash',
@@ -23,7 +23,7 @@ Your mandate is to organize complex product visions into high-velocity sprint pi
 export const DEFAULT_AGENTS: Agent[] = [
   {
     id: 'agent-orch',
-    name: 'Aegis Prime',
+    name: 'Dupond Prime',
     role: 'Chief Orchestrator',
     baseRole: 'Chief Orchestrator',
     avatar: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80',
@@ -355,19 +355,19 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   repository: {
     enabled: true,
     type: 'local_directory',
-    localPath: '/Users/mac/ops/repos/aegis-orchestrator',
+    localPath: '/Users/mac/ops/repos/dupond-agent',
     localWriteMode: 'direct_write',
-    repoUrl: 'https://github.com/acme-corp/aegis-core-system',
+    repoUrl: 'https://github.com/acme-corp/dupond-core-system',
     defaultBranch: 'main',
-    branchPrefix: 'aegis/',
+    branchPrefix: 'dupond/',
     deliveryMode: 'pull_request',
     apiToken: '••••••••••••••••••••••••••••••••',
     targetDirectory: 'src/services',
     autoCreatePrOnDone: false,
     autoWriteToLocalOnDone: true,
-    lastPrUrl: 'https://github.com/acme-corp/aegis-core-system/pull/42',
+    lastPrUrl: 'https://github.com/acme-corp/dupond-core-system/pull/42',
     lastCommitHash: '8bd0157f49a2c38d',
-    lastDeliveredPath: '/Users/mac/ops/repos/aegis-orchestrator/src/services/AEG-104_service.ts',
+    lastDeliveredPath: '/Users/mac/ops/repos/dupond-agent/src/services/AEG-104_service.ts',
   },
   customProviders: [
     {
@@ -394,7 +394,7 @@ export const DEFAULT_COMMUNICATIONS: CommunicationMessage[] = [
     id: 'comm-1',
     timestamp: '10:02 AM',
     senderId: 'agent-orch',
-    senderName: 'Aegis Prime',
+    senderName: 'Dupond Prime',
     senderRole: 'Chief Orchestrator',
     recipientId: 'all',
     content: 'Sprint 1 Plan ingested. 7 tasks decomposed across 4 Epics. Critical path initiated with Architecture contracts.',
@@ -416,7 +416,7 @@ export const DEFAULT_COMMUNICATIONS: CommunicationMessage[] = [
     id: 'comm-3',
     timestamp: '10:45 AM',
     senderId: 'agent-orch',
-    senderName: 'Aegis Prime',
+    senderName: 'Dupond Prime',
     senderRole: 'Chief Orchestrator',
     recipientId: 'agent-fe',
     content: 'AEG-101 is Done. Delegating AEG-102 (Interactive Kanban) to Lyra UI. Prioritize visual agent status pulses.',

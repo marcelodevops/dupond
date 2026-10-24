@@ -40,19 +40,19 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
     repository: integrationConfig.repository || {
       enabled: true,
       type: 'local_directory',
-      localPath: '/Users/mac/ops/repos/aegis-orchestrator',
+      localPath: '/Users/mac/ops/repos/dupond-agent',
       localWriteMode: 'direct_write',
-      repoUrl: 'https://github.com/acme-corp/aegis-core-system',
+      repoUrl: 'https://github.com/acme-corp/dupond-core-system',
       defaultBranch: 'main',
-      branchPrefix: 'aegis/',
+      branchPrefix: 'dupond/',
       deliveryMode: 'pull_request',
       apiToken: '••••••••••••••••••••••••••••••••',
       targetDirectory: 'src/services',
       autoCreatePrOnDone: false,
       autoWriteToLocalOnDone: true,
-      lastPrUrl: 'https://github.com/acme-corp/aegis-core-system/pull/42',
+      lastPrUrl: 'https://github.com/acme-corp/dupond-core-system/pull/42',
       lastCommitHash: '8bd0157f49a2c38d',
-      lastDeliveredPath: '/Users/mac/ops/repos/aegis-orchestrator/src/services/AEG-104_service.ts',
+      lastDeliveredPath: '/Users/mac/ops/repos/dupond-agent/src/services/AEG-104_service.ts',
     },
   });
   const [activeTab, setActiveTab] = useState<'repository' | 'jira' | 'slack' | 'custom' | 'bus'>('repository');
@@ -173,7 +173,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
           webhookUrl: config.slack.webhookUrl,
           channel: config.slack.channel,
           message: {
-            text: `🔔 *Aegis Orchestrator Telemetry Test*\n• Status: All systems nominal\n• Active tasks: ${tasks.length}\n• Timestamp: ${new Date().toLocaleTimeString()}`,
+            text: `🔔 *Dupond Orchestrator Telemetry Test*\n• Status: All systems nominal\n• Active tasks: ${tasks.length}\n• Timestamp: ${new Date().toLocaleTimeString()}`,
           },
         }),
       });
@@ -196,7 +196,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           endpointUrl: provider.endpointUrl,
-          payload: { prompt: 'Aegis ping probe', timestamp: Date.now() },
+          payload: { prompt: 'Dupond ping probe', timestamp: Date.now() },
         }),
       });
 
@@ -465,7 +465,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                     type="text"
                     value={config.repository.repoUrl || ''}
                     onChange={(e) => setConfig({ ...config, repository: { ...config.repository, repoUrl: e.target.value } })}
-                    placeholder="https://github.com/acme-corp/aegis-core-system"
+                    placeholder="https://github.com/acme-corp/dupond-core-system"
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-amber-500"
                   />
                 </div>
@@ -488,7 +488,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                     </label>
                     <input
                       type="text"
-                      value={config.repository.branchPrefix || 'aegis/'}
+                      value={config.repository.branchPrefix || 'dupond/'}
                       onChange={(e) => setConfig({ ...config, repository: { ...config.repository, branchPrefix: e.target.value } })}
                       className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
                     />
@@ -710,7 +710,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  Aegis Inbound Webhook Listener
+                  Dupond Inbound Webhook Listener
                 </label>
                 <input
                   type="text"
@@ -776,7 +776,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
             </div>
 
             <p className="text-[11px] text-slate-400 pt-3 border-t border-slate-800/80">
-              When tasks move to In Progress, Review, or Done on Aegis, status transitions are dispatched immediately to Jira issue keys.
+              When tasks move to In Progress, Review, or Done on Dupond, status transitions are dispatched immediately to Jira issue keys.
             </p>
           </div>
         </div>

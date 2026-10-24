@@ -33,10 +33,14 @@ const __dirname = path.dirname(__filename);
 // Server-authoritative storage paths
 const DATA_DIR = path.resolve(__dirname, '../../data');
 // Overridable so a test run cannot write credentials into the shipped state file.
-const STATE_FILE = process.env.AEGIS_STATE_FILE
-  ? path.resolve(process.env.AEGIS_STATE_FILE)
-  : path.resolve(DATA_DIR, 'aegis_state.json');
-const ARTIFACTS_DIR = path.resolve(__dirname, '../../.aegis_artifacts');
+const STATE_FILE = process.env.DUPOND_STATE_FILE || process.env.AEGIS_STATE_FILE
+  ? path.resolve(process.env.DUPOND_STATE_FILE || process.env.AEGIS_STATE_FILE!)
+  : (fs.existsSync(path.resolve(DATA_DIR, 'dupond_state.json'))
+      ? path.resolve(DATA_DIR, 'dupond_state.json')
+      : path.resolve(DATA_DIR, 'aegis_state.json'));
+const ARTIFACTS_DIR = fs.existsSync(path.resolve(__dirname, '../../.dupond_artifacts'))
+  ? path.resolve(__dirname, '../../.dupond_artifacts')
+  : path.resolve(__dirname, '../../.aegis_artifacts');
 
 /** Placeholder standing in for a stored secret. Matches the UI's masked value. */
 export const REDACTED = '•'.repeat(32);
@@ -51,7 +55,7 @@ export function isMaskedSecret(value: unknown): boolean {
 }
 
 /**
- * A state file written before a section existed (`data/aegis_state.json` ships
+ * A state file written before a section existed (`data/dupond_state.json` ships
  * without `repository`) must not take down the credential surface, so both
  * accessors treat a missing section as an empty one rather than trusting the
  * declared type.
@@ -71,7 +75,7 @@ function redactSecret<T extends object>(section: T | undefined, key: keyof T): T
  *
  * task.key reaches this code from HTTP bodies, so an unsanitized value made it
  * possible to point the artifact lookup anywhere on the filesystem
- * (`.aegis_artifacts/../../somewhere/implementation.js`) and have that file
+ * (`.dupond_artifacts/../../somewhere/implementation.js`) and have that file
  * accepted as a "verified physical code artifact". The containment check alone
  * would not help: path.resolve collapses the `..` segments before the check.
  */
@@ -146,7 +150,7 @@ class CoordinatorEngine {
         };
       }
     } catch (err) {
-      console.warn('Failed to load aegis_state.json, initializing defaults:', err);
+      console.warn('Failed to load dupond_state.json, initializing defaults:', err);
     }
 
     const initialState: ServerState = {
@@ -170,7 +174,7 @@ class CoordinatorEngine {
       data.lastUpdated = new Date().toISOString();
       fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2), 'utf-8');
     } catch (err) {
-      console.error('Failed to write aegis_state.json to disk:', err);
+      console.error('Failed to write dupond_state.json to disk:', err);
     }
   }
 
@@ -305,7 +309,7 @@ class CoordinatorEngine {
     if (rejectedDoneTasks.length > 0) {
       this.addCommunication({
         senderId: 'agent-orch',
-        senderName: 'Aegis Prime Core',
+        senderName: 'Dupond Prime Core',
         senderRole: 'Chief Orchestrator',
         recipientId: 'all',
         content: `Central Quality Gate enforced: Rejected unauthorized "Done" transition for [${rejectedDoneTasks.join(', ')}]. Quality checks must pass before completion.`,
@@ -375,7 +379,7 @@ class CoordinatorEngine {
       passed: artifact !== null,
       detail: artifact
         ? `Physical artifact verified on disk at ${path.relative(process.cwd(), artifact.path)} (${fs.statSync(artifact.path).size} bytes)`
-        : `No physical code artifact found on disk in .aegis_artifacts/${task.key}/`,
+        : `No physical code artifact found on disk in .dupond_artifacts/${task.key}/`,
     });
 
     // Only the checks that actually ran contribute to the verdict; compilation
@@ -404,7 +408,7 @@ class CoordinatorEngine {
       passed: artifact !== null,
       detail: artifact
         ? `Physical artifact verified on disk at ${path.relative(process.cwd(), artifact.path)} (${fs.statSync(artifact.path).size} bytes)`
-        : `No physical code artifact found on disk in .aegis_artifacts/${task.key}/`,
+        : `No physical code artifact found on disk in .dupond_artifacts/${task.key}/`,
     });
 
     let syntaxPassed = false;
@@ -595,9 +599,9 @@ class CoordinatorEngine {
 
     const deliverableContent = `### Implementation Artifact: \`${task.key}\`
 **Specialist:** ${agent.name} (${agent.role})
-**File Path:** \`.aegis_artifacts/${task.key}/implementation.js\` (${fileSize} bytes)
+**File Path:** \`.dupond_artifacts/${task.key}/implementation.js\` (${fileSize} bytes)
 **SHA-256 Hash:** \`${sha256}\`
-**Test Suite:** \`.aegis_artifacts/${task.key}/spec.test.js\` (Unit assertions verified)
+**Test Suite:** \`.dupond_artifacts/${task.key}/spec.test.js\` (Unit assertions verified)
 
 \`\`\`javascript
 ${implementationCode.slice(0, 500)}...
@@ -606,8 +610,8 @@ ${implementationCode.slice(0, 500)}...
 
     return {
       deliverableContent,
-      artifactFilePath: `.aegis_artifacts/${task.key}/implementation.js`,
-      testFilePath: `.aegis_artifacts/${task.key}/spec.test.js`,
+      artifactFilePath: `.dupond_artifacts/${task.key}/implementation.js`,
+      testFilePath: `.dupond_artifacts/${task.key}/spec.test.js`,
       fileSize,
       sha256,
       subtasksCompleted,
@@ -621,7 +625,7 @@ ${implementationCode.slice(0, 500)}...
     this.state.daemonRunning = true;
     this.saveStateToDisk();
 
-    console.log(`[Aegis Daemon] Server-Authoritative Coordinator started (Interval: ${intervalMs}ms)`);
+    console.log(`[Dupond Daemon] Server-Authoritative Coordinator started (Interval: ${intervalMs}ms)`);
 
     this.daemonTimer = setInterval(async () => {
       await this.runDaemonTick();
@@ -635,7 +639,7 @@ ${implementationCode.slice(0, 500)}...
     }
     this.state.daemonRunning = false;
     this.saveStateToDisk();
-    console.log('[Aegis Daemon] Server coordinator paused');
+    console.log('[Dupond Daemon] Server coordinator paused');
   }
 
   public isDaemonRunning(): boolean {
@@ -711,7 +715,7 @@ ${implementationCode.slice(0, 500)}...
 
           this.addCommunication({
             senderId: 'agent-orch',
-            senderName: 'Aegis Prime Core',
+            senderName: 'Dupond Prime Core',
             senderRole: 'Chief Orchestrator',
             recipientId: 'all',
             content: `Quality Gate PASSED for ${reviewTask.key}. Compiler AST check & test assertions validated. Task marked DONE.`,
@@ -737,7 +741,7 @@ ${implementationCode.slice(0, 500)}...
 
           this.addCommunication({
             senderId: 'agent-orch',
-            senderName: 'Aegis Prime Core',
+            senderName: 'Dupond Prime Core',
             senderRole: 'Chief Orchestrator',
             recipientId: 'all',
             content: `Quality Gate BLOCKED for ${reviewTask.key}: ${failureReason}. Task routed back to IN_PROGRESS.`,
@@ -787,7 +791,7 @@ ${implementationCode.slice(0, 500)}...
 
       return { advanced: false };
     } catch (tickErr) {
-      console.error('[Aegis Daemon] Tick error:', tickErr);
+      console.error('[Dupond Daemon] Tick error:', tickErr);
       return { advanced: false };
     } finally {
       this.isProcessingTick = false;

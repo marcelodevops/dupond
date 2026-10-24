@@ -1,7 +1,7 @@
 /**
  * Task AEG-104: Workload Balancing & Resource Allocation Matrix
  * 
- * Production Module for Aegis Orchestrator
+ * Production Module for Dupond Orchestrator
  * Fulfills Acceptance Criteria:
  * 1. Formulate load percentage calculation (allocated / max) and status thresholds
  * 2. Integrate Gemini API resource optimizer prompt
@@ -79,7 +79,7 @@ export function buildGeminiOptimizerPrompt(
   availableAgents: Array<{ id: string; name: string; role: string; skills: string[] }>,
   unassignedOrBlockedTasks: Array<{ key: string; title: string; estimatedHours?: number; priority: string }>
 ): string {
-  return `You are Aegis Workload Allocation Strategist.
+  return `You are Dupond Workload Allocation Strategist.
 Review the current team capacity matrix and rebalance task assignments to ensure zero agents exceed 85% utilization while maximizing domain skill affinity.
 
 Current Workload State:

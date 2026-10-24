@@ -156,7 +156,7 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
               </h2>
             </div>
             <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
-              Aegis continuously tracks agent workload, domain skills, and communication history. Sub-agents dynamically assume specialized roles based on sprint requirements and capacity thresholds.
+              Dupond continuously tracks agent workload, domain skills, and communication history. Sub-agents dynamically assume specialized roles based on sprint requirements and capacity thresholds.
             </p>
           </div>
 

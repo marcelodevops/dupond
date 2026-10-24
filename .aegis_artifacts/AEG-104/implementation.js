@@ -32,7 +32,7 @@ function calculateAgentLoad(agent, tasks, maxCapacityHours = 40) {
 }
 
 function buildGeminiOptimizerPrompt(summaries, availableAgents, pendingTasks) {
-  return `You are Aegis Workload Allocation Strategist.
+  return `You are Dupond Workload Allocation Strategist.
 Review the current team capacity matrix and rebalance task assignments to ensure zero agents exceed 85% utilization while maximizing domain skill affinity.
 
 Current Workload State:
