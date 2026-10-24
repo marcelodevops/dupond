@@ -2,7 +2,7 @@ import dns from 'dns';
 import http from 'http';
 import https from 'https';
 import net from 'net';
-import { URL } from 'url';
+import tls from 'tls';
 
 const DEFAULT_TIMEOUT_MS = 8000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -184,6 +184,10 @@ function lookupAll(host: string): Promise<dns.LookupAddress[]> {
   });
 }
 
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  return Object.keys(headers).some((key) => key.toLowerCase() === name);
+}
+
 /**
  * Server-initiated HTTP with SSRF defences that `fetch` cannot provide.
  *
@@ -232,7 +236,11 @@ export async function safeRequest(rawUrl: string, options: SafeRequestOptions = 
   }
 
   const pinned = addresses.map((record) => record.address);
-  const transport = url.protocol === 'https:' ? https : http;
+  const isTls = url.protocol === 'https:';
+  // SNI is a hostname or nothing: TLS refuses an IP literal as servername, and
+  // for an IP target the certificate is validated against its IP SANs instead.
+  const sniHostname = net.isIP(hostname) ? undefined : hostname;
+  const port = Number(url.port) || (isTls ? 443 : 80);
   const headers: Record<string, string> = { accept: '*/*', ...options.headers };
   if (options.body !== undefined && !hasHeader(headers, 'content-length')) {
     headers['content-length'] = String(Buffer.byteLength(options.body, 'utf8'));
@@ -252,105 +260,129 @@ export async function safeRequest(rawUrl: string, options: SafeRequestOptions = 
       resolve(response);
     };
 
-    const connect = (index: number): void => {
+    // Every destination is dialled by IP literal, so neither the plain socket
+    // below nor the TLS handshake can re-resolve the name. For https the socket
+    // is wrapped here rather than left to Node: handing ClientRequest a raw
+    // socket while claiming a secure transport sends plaintext to port 443,
+    // which hangs instead of failing. SNI and certificate identity still use
+    // the original hostname.
+    const dial = (index: number, onReady: (socket: net.Socket) => void): void => {
       if (index >= pinned.length) {
         fail(new EgressBlockedError('connection to every resolved address failed'));
         return;
       }
 
-      const isTls = transport === https;
-      const port = Number(url.port) || (isTls ? 443 : 80);
-      const socket = net.connect({
-        host: pinned[index],
-        port,
-        keepAlive: false,
-      });
-      socket.setTimeout(timeoutMs);
+      const raw = net.connect({ host: pinned[index], port, keepAlive: false });
+      raw.setTimeout(timeoutMs);
 
-      const onError = (err: Error) => {
-        socket.destroy();
-        connect(index + 1);
+      const failover = () => {
+        raw.destroy();
+        dial(index + 1, onReady);
       };
-      socket.once('error', onError);
-      socket.once('timeout', () => {
-        socket.destroy();
+      raw.once('error', failover);
+      raw.once('timeout', () => {
+        raw.destroy();
         fail(new EgressBlockedError(`connection to '${hostname}' timed out`));
       });
 
-      socket.once(isTls ? 'secureConnect' : 'connect', () => {
-        socket.removeListener('error', onError);
-
-        const transportRequest = isTls ? https.request : http.request;
-        const request = transportRequest(
-          {
-            agent: false,
-            createConnection: () => socket,
-            servername: isTls ? hostname : undefined,
-            method: options.method ?? 'GET',
-            path: `${url.pathname}${url.search}`,
-            // host/port must name the *validated* address even though the
-            // socket is supplied. With agent:false, Node ignores createConnection
-            // and falls back to its default destination (localhost:80) when these
-            // are absent — silently connecting somewhere that was never checked.
-            host: pinned[index],
-            port,
-            headers: { host: net.isIP(hostname) === 6 ? `[${hostname}]` : hostname, ...headers },
-            timeout: timeoutMs,
-          },
-          (response) => {
-            const chunks: Buffer[] = [];
-            let received = 0;
-
-            response.on('data', (chunk: Buffer) => {
-              received += chunk.length;
-              if (received > MAX_BODY_BYTES) {
-                response.destroy();
-                fail(new EgressBlockedError(`response exceeded the ${MAX_BODY_BYTES}-byte limit`));
-                return;
-              }
-              chunks.push(chunk);
-            });
-
-            response.on('error', (err) => fail(err));
-            response.on('end', () => {
-              const status = response.statusCode ?? 0;
-              const isRedirect = status >= 300 && status < 400;
-              if (isRedirect) {
-                // Refusing to follow is the point: a public host must not be
-                // able to bounce this request into an internal address.
-                socket.destroy();
-                succeed({
-                  status,
-                  ok: false,
-                  body: '',
-                  location: (response.headers.location as string) || undefined,
-                });
-                return;
-              }
-              socket.destroy();
-              succeed({ status, ok: status >= 200 && status < 300, body: Buffer.concat(chunks).toString('utf8') });
-            });
-          },
-        );
-
-        request.on('error', (err) => {
+      const attach = (socket: net.Socket) => {
+        socket.removeListener('error', failover);
+        socket.once('error', (err) => {
           socket.destroy();
           fail(err);
         });
-        request.on('timeout', () => {
+        socket.once('timeout', () => {
           socket.destroy();
-          fail(new EgressBlockedError(`request to '${hostname}' timed out`));
+          fail(new EgressBlockedError(`connection to '${hostname}' timed out`));
         });
+        onReady(socket);
+      };
 
-        if (options.body !== undefined) request.write(options.body);
-        request.end();
-      });
+      if (isTls) {
+        raw.once('connect', () => {
+          // Past this point a refused address must not fail over: the remaining
+          // records would be dialled behind a handshake that is already failing.
+          raw.removeListener('error', failover);
+          let secure: tls.TLSSocket;
+          try {
+            secure = tls.connect({ socket: raw, servername: sniHostname });
+          } catch (err) {
+            // A rejected handshake option throws synchronously inside a socket
+            // callback, which would take down the whole server process.
+            raw.destroy();
+            fail(err as Error);
+            return;
+          }
+          secure.once('secureConnect', () => attach(secure));
+          secure.once('error', (err) => {
+            secure.destroy();
+            fail(new EgressBlockedError(`TLS handshake with '${hostname}' failed: ${err.message}`));
+          });
+        });
+        return;
+      }
+      raw.once('connect', () => attach(raw));
     };
 
-    connect(0);
-  });
-}
+    const send = (socket: net.Socket, index: number): void => {
+      const transportRequest = isTls ? https.request : http.request;
+      const request = transportRequest(
+        {
+          // host/port name the validated address even though the socket is
+          // supplied: with agent:false Node otherwise ignores createConnection
+          // and dials its own default destination (localhost:80).
+          agent: false,
+          createConnection: () => socket,
+          servername: sniHostname,
+          host: pinned[index],
+          port,
+          method: options.method ?? 'GET',
+          path: `${url.pathname}${url.search}`,
+          headers: { host: net.isIP(hostname) === 6 ? `[${hostname}]` : hostname, ...headers },
+          timeout: timeoutMs,
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          let received = 0;
 
-function hasHeader(headers: Record<string, string>, name: string): boolean {
-  return Object.keys(headers).some((key) => key.toLowerCase() === name);
+          response.on('data', (chunk: Buffer) => {
+            received += chunk.length;
+            if (received > MAX_BODY_BYTES) {
+              response.destroy();
+              fail(new EgressBlockedError(`response exceeded the ${MAX_BODY_BYTES}-byte limit`));
+              return;
+            }
+            chunks.push(chunk);
+          });
+
+          response.on('error', (err) => fail(err));
+          response.on('end', () => {
+            const status = response.statusCode ?? 0;
+            socket.destroy();
+            if (status >= 300 && status < 400) {
+              // Refusing to follow is the point: a public host must not be able
+              // to bounce this request into an internal address.
+              succeed({ status, ok: false, body: '', location: (response.headers.location as string) || undefined });
+              return;
+            }
+            succeed({ status, ok: status >= 200 && status < 300, body: Buffer.concat(chunks).toString('utf8') });
+          });
+        },
+      );
+
+      request.on('error', (err) => {
+        socket.destroy();
+        fail(err);
+      });
+      request.on('timeout', () => {
+        socket.destroy();
+        fail(new EgressBlockedError(`request to '${hostname}' timed out`));
+      });
+
+      if (options.body !== undefined) request.write(options.body);
+      request.end();
+    };
+
+    dial(0, (socket) => send(socket, 0));
+  });
 }
