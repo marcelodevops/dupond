@@ -82,8 +82,10 @@ export const StateMutationSchema = z.object({
   tasks: z.array(TaskSchema).optional(),
   agents: z.array(AgentSchema).optional(),
   epics: z.array(EpicSchema).optional(),
+  orchestratorConfig: z.record(z.any()).optional(),
+  integrationConfig: z.record(z.any()).optional(),
   communications: z.array(CommunicationMessageSchema).optional(),
   cycleCount: z.number().int().nonnegative().optional(),
   daemonRunning: z.boolean().optional(),
   version: z.number().int().nonnegative().optional(),
-}).strict();
+});
