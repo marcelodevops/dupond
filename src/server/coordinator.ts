@@ -17,6 +17,7 @@ import {
   CommunicationMessage,
   TaskStatus 
 } from '../types';
+import { StateMutationSchema } from '../types/schemas.js';
 import { 
   DEFAULT_TASKS, 
   DEFAULT_AGENTS, 
@@ -177,82 +178,25 @@ class CoordinatorEngine {
     return this.state;
   }
 
-  /**
-   * State for client consumption. Server-held credentials are never included:
-   * integrationConfig used to be returned verbatim by GET /api/orchestrate/state,
-   * which put the Jira API token, the Slack webhook token (embedded in its URL
-   * path) and the repository token on every page load. Slack and Jira webhook
-   * URLs are bearer secrets in this product, not merely addresses.
-   *
-   * Internal code keeps using getState(); only the wire view is redacted.
-   */
-  public getStateView(): ServerState {
-    return { ...this.state, integrationConfig: this.getIntegrationConfigView() };
-  }
+  // --- Central State Enforcement with Quality Gates & Schema Validation ---
+  public updateState(partial: unknown): { success: boolean; state: ServerState; rejectedDoneTasks: string[]; error?: string } {
+    const parseResult = StateMutationSchema.safeParse(partial);
+    if (!parseResult.success) {
+      return {
+        success: false,
+        state: this.state,
+        rejectedDoneTasks: [],
+        error: `State validation failed: ${parseResult.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ')}`,
+      };
+    }
 
-  public getIntegrationConfigView(): IntegrationConfig {
-    const config = this.state.integrationConfig;
-    return {
-      ...config,
-      jira: redactSecret(config.jira, 'apiToken'),
-      slack: redactSecret(config.slack, 'webhookUrl'),
-      repository: redactSecret(config.repository, 'apiToken'),
-      customProviders: (config.customProviders ?? []).map((provider) => ({
-        ...provider,
-        apiKeyHeader: provider.apiKeyHeader ? REDACTED : provider.apiKeyHeader,
-      })),
-    };
-  }
-
-  /**
-   * Credentials for server-side use only (Jira/Slack dispatch). Never return
-   * this to a client.
-   */
-  public getIntegrationSecrets(): IntegrationConfig {
-    const config = this.state.integrationConfig;
-    return {
-      ...config,
-      jira: fillSection(config.jira),
-      slack: fillSection(config.slack),
-      repository: fillSection(config.repository),
-      customProviders: config.customProviders ?? [],
-    };
-  }
-
-  private preserveMaskedSecrets(partial: Partial<ServerState>): Partial<ServerState> {
-    if (!partial.integrationConfig) return partial;
-
-    const stored = this.getIntegrationSecrets();
-    const incoming = partial.integrationConfig;
-
-    // The UI is handed masked values; re-saving without retyping must not
-    // replace the real credential with the mask it was shown.
-    const keep = (candidate: string | undefined, existing: string | undefined): string =>
-      candidate === undefined || candidate === '' || isMaskedSecret(candidate) ? (existing ?? '') : candidate;
-
-    return {
-      ...partial,
-      integrationConfig: {
-        ...incoming,
-        jira: { ...incoming.jira, apiToken: keep(incoming.jira?.apiToken, stored.jira.apiToken) },
-        slack: { ...incoming.slack, webhookUrl: keep(incoming.slack?.webhookUrl, stored.slack.webhookUrl) },
-        repository: { ...incoming.repository, apiToken: keep(incoming.repository?.apiToken, stored.repository.apiToken) },
-        customProviders: (incoming.customProviders ?? []).map((provider) => {
-          const existing = stored.customProviders.find((p) => p.id === provider.id);
-          return { ...provider, apiKeyHeader: keep(provider.apiKeyHeader, existing?.apiKeyHeader) };
-        }),
-      },
-    };
-  }
-
-  // --- Central State Enforcement with Quality Gates ---
-  public updateState(partial: Partial<ServerState>): { state: ServerState; rejectedDoneTasks: string[] } {
+    const validatedPartial = parseResult.data as Partial<ServerState>;
     const rejectedDoneTasks: string[] = [];
 
     // If incoming tasks are marked as 'done', verify each one strictly
-    if (partial.tasks) {
+    if (validatedPartial.tasks) {
       const existingTasks = this.state.tasks;
-      partial.tasks = partial.tasks.map((task) => {
+      validatedPartial.tasks = validatedPartial.tasks.map((task) => {
         const existing = existingTasks.find((t) => t.id === task.id || t.key === task.key);
 
         // Check if task is requested to be 'done'
@@ -282,7 +226,7 @@ class CoordinatorEngine {
     // Now that the wire view of integrationConfig is masked, a UI that re-saves
     // its form without the user re-typing would post the mask back. Preserve the
     // stored secret instead of overwriting it with '••••'.
-    const partialWithTasks = this.preserveMaskedSecrets(partial);
+    const partialWithTasks = this.preserveMaskedSecrets(validatedPartial);
 
     this.state = {
       ...this.state,
@@ -302,7 +246,7 @@ class CoordinatorEngine {
     }
 
     this.saveStateToDisk();
-    return { state: this.state, rejectedDoneTasks };
+    return { success: true, state: this.state, rejectedDoneTasks };
   }
 
   // Centralized transition method
