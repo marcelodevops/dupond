@@ -672,9 +672,17 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
 
     // Allowlist plus no-redirect: fetch followed 3xx by default, so a genuine
     // hooks.slack.com URL could bounce the post (and its token) to any host.
-    if (webhookUrl && String(webhookUrl).startsWith('https://hooks.slack.com/')) {
+    // The wire view masks this credential, so the UI can only ever post the mask
+    // back (or nothing): the server-held webhook is authoritative, and a value
+    // the user actually typed is treated as an override.
+    const submittedWebhook = typeof webhookUrl === 'string' ? webhookUrl.trim() : '';
+    const targetWebhook = !submittedWebhook || isMaskedSecret(submittedWebhook)
+      ? coordinator.getIntegrationSecrets().slack.webhookUrl
+      : submittedWebhook;
+
+    if (targetWebhook && targetWebhook.startsWith('https://hooks.slack.com/')) {
       try {
-        const slackResponse = await safeRequest(webhookUrl, {
+        const slackResponse = await safeRequest(targetWebhook, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(blockKitPayload),
