@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const httpServer = http.createServer(app);
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(express.json({ limit: '10mb' }));
@@ -1136,7 +1136,7 @@ if (!isProduction) {
   const vite = await createViteServer({
     server: {
       middlewareMode: true,
-      hmr: {
+      ws: {
         server: httpServer,
       },
     },
@@ -1150,6 +1150,16 @@ if (!isProduction) {
     res.sendFile(path.resolve(distPath, 'index.html'));
   });
 }
+
+httpServer.on('error', (err: any) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Error: Port ${PORT} is already in use by another process.`);
+    console.error(`👉 You can free port ${PORT} or run on an alternate port:`);
+    console.error(`   PORT=${PORT + 1} npm run dev\n`);
+    process.exit(1);
+  }
+  throw err;
+});
 
 httpServer.listen(PORT, () => {
   console.log(`Dupond Orchestrator server running on http://0.0.0.0:${PORT}`);
