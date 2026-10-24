@@ -106,7 +106,7 @@ async function executeSuite() {
   });
 
   // --- 2. QUALITY GATE PREREQUISITE TESTS ---
-  await runTest('Quality gate rejects Done transition if upstream dependencies are not done', () => {
+  await runTest('Quality gate rejects Done transition if upstream dependencies are not done', async () => {
     const blockedTask = {
       id: 'task-dep-check',
       key: 'AEG-DEP-CHECK',
@@ -126,7 +126,7 @@ async function executeSuite() {
       subtasks: [],
     } as any);
 
-    const verification = coordinator.verifyTaskQualityGates(blockedTask as any);
+    const verification = await coordinator.verifyTaskQualityGates(blockedTask as any);
     assert.strictEqual(verification.passed, false, 'Must fail when dependency is in_progress');
   });
 

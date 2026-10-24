@@ -2,9 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { coordinator } from './coordinator.js';
+import { isPathLexicallyContained, isSafePathSegment } from './artifactPaths.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/** Root of this application; artifacts live under `.aegis_artifacts/<key>/`. */
+const PROJECT_ROOT = path.resolve(__dirname, '../../');
+const ARTIFACTS_DIR = path.resolve(PROJECT_ROOT, '.aegis_artifacts');
 
 export interface DeliveryResult {
   status: number;
@@ -15,19 +20,17 @@ export interface DeliveryResult {
  * Robust path containment check.
  * - Prevents prefix collision (e.g. /tmp/project-other vs /tmp/project)
  * - Resolves and prevents symlink escapes
+ *
+ * Lexical rules come from artifactPaths so the artifact reader and the delivery
+ * writer cannot drift apart on what "contained" means.
  */
 export function isPathContained(baseDir: string, targetPath: string): boolean {
+  if (!isPathLexicallyContained(baseDir, targetPath)) return false;
+
+  // Symlink resolution containment
+  // If resolvedBase exists, resolve its canonical real path
   const resolvedBase = path.resolve(baseDir);
   const resolvedTarget = path.resolve(targetPath);
-
-  // 1. Lexical containment using path.relative
-  const rel = path.relative(resolvedBase, resolvedTarget);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    return false;
-  }
-
-  // 2. Symlink resolution containment
-  // If resolvedBase exists, resolve its canonical real path
   if (fs.existsSync(resolvedBase)) {
     const realBase = fs.realpathSync(resolvedBase);
 
@@ -121,8 +124,35 @@ export async function handleRepositoryDispatch(params: {
 
     if (action === 'create_pr' || action === 'deliver') {
       const taskKey = task?.key || 'AEG-104';
-      const rootDir = path.resolve(__dirname, '../../');
-      const sourceArtifact = path.resolve(rootDir, `.aegis_artifacts/${taskKey}/implementation.js`);
+
+      // Check 0: the artifact is read using task.key, which arrives in the
+      // request body. Without this, a crafted key such as '../../some/dir'
+      // turned the quality gate into an arbitrary-file reader and the delivered
+      // copy into an arbitrary-file writer within the destination directory.
+      if (!isSafePathSegment(taskKey)) {
+        return {
+          status: 400,
+          body: {
+            success: false,
+            blocked: true,
+            error: `Delivery blocked: Task key "${taskKey}" is not a safe artifact path segment.`,
+          },
+        };
+      }
+
+      const taskArtifactDir = path.resolve(ARTIFACTS_DIR, taskKey);
+      if (!isPathLexicallyContained(ARTIFACTS_DIR, taskArtifactDir)) {
+        return {
+          status: 400,
+          body: {
+            success: false,
+            blocked: true,
+            error: 'Delivery blocked: Resolved artifact path escapes the artifact store.',
+          },
+        };
+      }
+
+      const sourceArtifact = path.resolve(taskArtifactDir, 'implementation.js');
 
       // Check 1: Delivery checks acceptance, not just file existence - FAIL CLOSED
       const targetTask = coordinator.getState().tasks.find((t) => t.key === taskKey || t.id === task?.id);
@@ -137,7 +167,7 @@ export async function handleRepositoryDispatch(params: {
         };
       }
 
-      const verification = coordinator.verifyTaskQualityGates(targetTask);
+      const verification = await coordinator.verifyTaskQualityGates(targetTask);
       if (!verification.passed) {
         const failedDetails = verification.checks
           .filter((c: any) => !c.passed)
@@ -348,7 +378,7 @@ export async function handleRepositoryDispatch(params: {
       };
     }
 
-    const verification = coordinator.verifyTaskQualityGates(targetTask);
+    const verification = await coordinator.verifyTaskQualityGates(targetTask);
     if (!verification.passed) {
       const failedDetails = verification.checks
         .filter((c: any) => !c.passed)
