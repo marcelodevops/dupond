@@ -271,6 +271,32 @@ async function main() {
     }
   });
 
+  await runTest('https targets negotiate TLS instead of hanging on a raw socket', async () => {
+    // A plain HTTP listener on a TLS port: the client must reach the handshake
+    // and fail fast. Sending the request in cleartext instead never answers.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end('not-tls');
+    });
+    await new Promise<void>((resolve) => server.listen(8082, '127.0.0.1', resolve));
+    const started = Date.now();
+    try {
+      await assert.rejects(
+        () =>
+          safeRequest('https://127.0.0.1:8082/', {
+            allowedHosts: ['*'],
+            allowPrivateAddressing: true,
+            timeoutMs: 6000,
+          }),
+        (err: any) => err instanceof EgressBlockedError && /TLS handshake/.test(err.message),
+        'expected a TLS handshake failure',
+      );
+      assert.ok(Date.now() - started < 5000, 'handshake failure must not consume the whole timeout');
+    } finally {
+      server.close();
+    }
+  });
+
   // --- 4. CREDENTIAL EXPOSURE ---
 
   await runTest('state view masks every stored credential', () => {
