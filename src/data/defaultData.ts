@@ -365,9 +365,9 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
     targetDirectory: 'src/services',
     autoCreatePrOnDone: false,
     autoWriteToLocalOnDone: true,
-    lastPrUrl: 'https://github.com/acme-corp/dupond-core-system/pull/42',
-    lastCommitHash: '8bd0157f49a2c38d',
-    lastDeliveredPath: '/Users/mac/ops/repos/dupond-agent/src/services/AEG-104_service.ts',
+    lastPrUrl: undefined,
+    lastCommitHash: undefined,
+    lastDeliveredPath: undefined,
   },
   customProviders: [
     {
