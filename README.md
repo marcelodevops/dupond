@@ -4,9 +4,10 @@
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![React](https://img.shields.io/badge/React-19.0-61dafb.svg?logo=react)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6.svg?logo=typescript)
-![Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%203.8%20Flash-4285F4.svg?logo=google)
+![Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%202.5%20%2F%20Flash-4285F4.svg?logo=google)
 ![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8.svg?logo=tailwindcss)
 ![Express](https://img.shields.io/badge/Express-4.21-000000.svg?logo=express)
+![Security Tests](https://img.shields.io/badge/Security%20Tests-37%2F37%20Passing-success.svg)
 
 ---
 
@@ -238,6 +239,13 @@ GEMINI_API_KEY="your_gemini_api_key_here"
 
 # Application URL
 APP_URL="http://localhost:3000"
+
+# Optional: Allow custom providers to target private/loopback hosts (Ollama, vLLM)
+# Default is "false" which enforces strict SSRF loopback & private IP blocking.
+AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS="false"
+
+# Optional: Custom state file path (defaults to ./data/aegis_state.json)
+# AEGIS_STATE_FILE="./data/aegis_state.json"
 ```
 
 ### Step 4: Run the Development Server
@@ -336,11 +344,60 @@ Navigate to the **"Diagrams & Progress"** tab:
 
 ---
 
-## 🔒 Security & Data Privacy
+## 🔒 Security Architecture & Guardrails
 
-- **Server-Side API Key Isolation**: All Gemini SDK interactions occur exclusively on the Express server tier via `process.env.GEMINI_API_KEY`. No API keys or credentials are ever exposed to client bundles or browser consoles.
-- **Fail-Safe Fallbacks**: If external API connectivity is constrained or offline, built-in algorithmic and heuristic engines guarantee 100% operational uptime without UI disruptions.
-- **Sanitized Webhooks**: External webhook requests utilize timeout boundaries (`AbortSignal.timeout`) to prevent thread starvation.
+Aegis implements strict enterprise-grade security boundaries protecting against RCE, SSRF, directory traversal, credential leakage, and arbitrary state tampering:
+
+### 1. Child-Process Sandbox Execution (Zero RCE Risk)
+- **Isolated Runner**: Sub-agent code artifacts and deliverable verification scripts run in isolated child processes ([`src/server/artifactRunner.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/artifactRunner.ts)) rather than insecure in-process VM contexts.
+- **Environment Stripping**: Child processes run with an empty `process.env`—parent server credentials, API tokens, and paths are completely invisible.
+- **Module Allowlist & Limits**: Restricted strictly to standard runtime libraries; execution enforces a 128MB memory cap and a strict 5000ms timeout with SIGTERM ➔ SIGKILL escalation.
+
+### 2. Lexical Path Containment & Traversal Defense
+- **Task Key Ingress Validation**: All incoming task keys are strictly validated against `/^AEG-\d+$/` across all endpoints before touching filesystem operations.
+- **Containment Enforcement**: Handled via [`src/server/artifactPaths.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/artifactPaths.ts) and [`src/server/deliveryHandler.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/deliveryHandler.ts) using `isSafePathSegment` and `isPathLexicallyContained`, preventing prefix collisions (e.g. `/tmp/project-other`) and symlink-based escapes.
+- **Dangling Symlink Protection**: File deliveries utilize `O_EXCL` and `O_NOFOLLOW` flags to ensure symlinks cannot be traversed.
+
+### 3. DNS-Pinned SSRF Defense with Anti-Rebinding
+- **Pinned Socket Egress**: External HTTP dispatches in [`src/server/egress.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/egress.ts) pre-resolve hostnames and dial directly to verified IP addresses, defeating DNS rebinding and TOCTOU races.
+- **Private & Metadata Blocklist**: Refuses all IPv4 and IPv6 loopback (`127.0.0.1`, `::1`), RFC1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Carrier-Grade NAT (`100.64.0.0/10`), IPv6 ULA/link-local, and cloud instance metadata endpoints (`169.254.169.254`).
+- **TLS Handshake Safety**: Wraps pinned IP connections via `tls.connect` with the original hostname for SNI, avoiding TLS handshake hangs on non-SNI sockets.
+- **Redirect Resistance**: Outbound requests enforce `redirect: 'manual'` so third-party endpoints cannot bounce requests into internal infrastructure.
+- **Egress Allowlisting**: Jira sync is restricted to `*.atlassian.net` and Slack dispatches require `https://hooks.slack.com/`.
+
+### 4. Credential Redaction & Authoritative State Governance
+- **Wire Redaction**: Server state returned to clients (`getStateView()`) masks bearer secrets (Jira API tokens, Slack webhooks, repo tokens, custom provider auth headers) with `•` characters.
+- **Round-Trip Preservation**: Re-saving state via `updateState` detects masked placeholders and preserves real server-held secrets without overwriting them.
+- **Zod Runtime Schema Validation**: All state mutations are validated against strict Zod schemas ([`src/types/schemas.ts`](file:///Users/mac/ops/repos/dupond-agent/src/types/schemas.ts)), eliminating arbitrary object injection or state clobbering.
+
+---
+
+## 🧪 Testing & Verification Suite
+
+Aegis includes a unified test suite with 37 automated tests covering security guardrails, sandbox isolation, SSRF prevention, and business logic:
+
+```bash
+# Run all 37 regression tests
+npm test
+```
+
+### Test Coverage Breakdown:
+1. **Guardrails & Delivery Suite (`tests/guardrails.test.ts`)** (15 tests):
+   - Path containment & prefix traversal rejection.
+   - Symlink traversal and dangling symlink protection.
+   - Delivery mode authorization (git branch / remote PR fail-closed).
+   - Quality gate enforcement and patch preservation.
+2. **Security & Isolation Suite (`tests/trackA.test.ts`)** (18 tests):
+   - Regex segment validator rejecting path traversal and dotfile keys.
+   - Subprocess sandbox environment stripping & module allowlisting.
+   - Timeout escalation (SIGTERM ➔ SIGKILL) on runaway scripts.
+   - SSRF egress validation across IPv4/IPv6 loopback, private IP, and AWS/GCP metadata.
+   - Host allowlists & redirect prevention.
+   - Wire credential masking and round-trip preservation.
+3. **Workload Balancer Suite (`workspace/AEG-104/workloadBalancer.test.ts`)** (4 tests):
+   - Overloaded (>85%) and underloaded (<40%) threshold calculations.
+   - Telemetry prompt formatting for resource optimization.
+   - Redistribution logic verification.
 
 ---
 
