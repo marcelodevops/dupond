@@ -178,6 +178,74 @@ class CoordinatorEngine {
     return this.state;
   }
 
+  /**
+   * State for client consumption. Server-held credentials are never included:
+   * integrationConfig used to be returned verbatim by GET /api/orchestrate/state,
+   * which put the Jira API token, the Slack webhook token (embedded in its URL
+   * path) and the repository token on every page load. Slack and Jira webhook
+   * URLs are bearer secrets in this product, not merely addresses.
+   *
+   * Internal code keeps using getState(); only the wire view is redacted.
+   */
+  public getStateView(): ServerState {
+    return { ...this.state, integrationConfig: this.getIntegrationConfigView() };
+  }
+
+  public getIntegrationConfigView(): IntegrationConfig {
+    const config = this.state.integrationConfig;
+    return {
+      ...config,
+      jira: redactSecret(config.jira, 'apiToken'),
+      slack: redactSecret(config.slack, 'webhookUrl'),
+      repository: redactSecret(config.repository, 'apiToken'),
+      customProviders: (config.customProviders ?? []).map((provider) => ({
+        ...provider,
+        apiKeyHeader: provider.apiKeyHeader ? REDACTED : provider.apiKeyHeader,
+      })),
+    };
+  }
+
+  /**
+   * Credentials for server-side use only (Jira/Slack dispatch). Never return
+   * this to a client.
+   */
+  public getIntegrationSecrets(): IntegrationConfig {
+    const config = this.state.integrationConfig;
+    return {
+      ...config,
+      jira: fillSection(config.jira),
+      slack: fillSection(config.slack),
+      repository: fillSection(config.repository),
+      customProviders: config.customProviders ?? [],
+    };
+  }
+
+  private preserveMaskedSecrets(partial: Partial<ServerState>): Partial<ServerState> {
+    if (!partial.integrationConfig) return partial;
+
+    const stored = this.getIntegrationSecrets();
+    const incoming = partial.integrationConfig;
+
+    // The UI is handed masked values; re-saving without retyping must not
+    // replace the real credential with the mask it was shown.
+    const keep = (candidate: string | undefined, existing: string | undefined): string =>
+      candidate === undefined || candidate === '' || isMaskedSecret(candidate) ? (existing ?? '') : candidate;
+
+    return {
+      ...partial,
+      integrationConfig: {
+        ...incoming,
+        jira: { ...incoming.jira, apiToken: keep(incoming.jira?.apiToken, stored.jira.apiToken) },
+        slack: { ...incoming.slack, webhookUrl: keep(incoming.slack?.webhookUrl, stored.slack.webhookUrl) },
+        repository: { ...incoming.repository, apiToken: keep(incoming.repository?.apiToken, stored.repository.apiToken) },
+        customProviders: (incoming.customProviders ?? []).map((provider) => {
+          const existing = stored.customProviders.find((p) => p.id === provider.id);
+          return { ...provider, apiKeyHeader: keep(provider.apiKeyHeader, existing?.apiKeyHeader) };
+        }),
+      },
+    };
+  }
+
   // --- Central State Enforcement with Quality Gates & Schema Validation ---
   public updateState(partial: unknown): { success: boolean; state: ServerState; rejectedDoneTasks: string[]; error?: string } {
     const parseResult = StateMutationSchema.safeParse(partial);
