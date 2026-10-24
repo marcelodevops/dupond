@@ -47,7 +47,9 @@ const SLACK_ALLOWED_HOSTS = ['hooks.slack.com'];
  * vLLM), which is exactly the traffic the SSRF filter blocks. Default stays
  * fail-closed; a deployment that genuinely serves local models opts in.
  */
-const ALLOW_PRIVATE_PROVIDER_HOSTS = process.env.AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS === 'true';
+const ALLOW_PRIVATE_PROVIDER_HOSTS =
+  process.env.DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS === 'true' ||
+  process.env.AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS === 'true';
 
 function isBlockedError(error: any): boolean {
   return error instanceof EgressBlockedError;
@@ -156,7 +158,7 @@ app.post('/api/orchestrate/parse-plan', async (req: Request, res: Response) => {
 
     if (ai) {
       try {
-        const prompt = `You are Aegis Chief Orchestrator, an enterprise-level Autonomous Project Management Agent.
+        const prompt = `You are Dupond Chief Orchestrator, an enterprise-level Autonomous Project Management Agent.
 Analyze the following project plan and decompose it into a structured sprint plan with Epics, granular Tasks, clear dependencies, recommended specialized agent roles, and estimated effort in hours.
 
 The available agent roles or specialist profiles in the organization include:
@@ -396,7 +398,7 @@ app.post('/api/orchestrate/generate-report', async (req: Request, res: Response)
 
     if (ai) {
       try {
-        const prompt = `You are Aegis Chief Orchestrator generating a comprehensive executive status report for enterprise stakeholders and engineering leadership.
+        const prompt = `You are Dupond Chief Orchestrator generating a comprehensive executive status report for enterprise stakeholders and engineering leadership.
 Sprint Information:
 - Sprint: ${sprintNumber} (${period})
 - Total Tasks: ${tasks.length}
@@ -474,8 +476,8 @@ Generate a rigorous, professional stakeholder report in pure JSON (no markdown t
         'Complete end-to-end integration and smoke test suite',
         'Deploy release candidate to staging environment with real-time health telemetry',
       ],
-      slackDigest: `🚀 *Aegis Orchestrator - Sprint ${sprintNumber} Executive Brief*\n• *Progress:* ${completionRate}% (${completedTasks.length}/${tasks.length} tasks completed)\n• *Active Work:* ${inProgressTasks.length} in development, ${reviewTasks.length} in QA\n• *Health:* 🟢 On Track`,
-      jiraDigest: `h3. Aegis Sprint ${sprintNumber} Automated Sync\n* *Status:* ${completionRate}% completed\n* *Verified Tasks:* ${completedTasks.map((t: any) => t.key).join(', ') || 'AEG-101'}\n* *Orchestrator Verdict:* Sprint objectives on schedule.`,
+      slackDigest: `🚀 *Dupond Orchestrator - Sprint ${sprintNumber} Executive Brief*\n• *Progress:* ${completionRate}% (${completedTasks.length}/${tasks.length} tasks completed)\n• *Active Work:* ${inProgressTasks.length} in development, ${reviewTasks.length} in QA\n• *Health:* 🟢 On Track`,
+      jiraDigest: `h3. Dupond Sprint ${sprintNumber} Automated Sync\n* *Status:* ${completionRate}% completed\n* *Verified Tasks:* ${completedTasks.map((t: any) => t.key).join(', ') || 'AEG-101'}\n* *Orchestrator Verdict:* Sprint objectives on schedule.`,
     };
 
     return res.json(fallbackReport);
@@ -520,7 +522,7 @@ app.post('/api/integrations/jira/sync', async (req: Request, res: Response) => {
         notice: 'Live Jira Cloud connector is ready. Save a real Atlassian user email, API token and *.atlassian.net host to create and transition live tickets.',
         fields: {
           summary: task?.title || 'Autonomous Task',
-          assignee: task?.assignedAgentId || 'Aegis Bot',
+          assignee: task?.assignedAgentId || 'Dupond Bot',
           priority: task?.priority || 'Medium',
         },
       });
@@ -560,14 +562,14 @@ app.post('/api/integrations/jira/sync', async (req: Request, res: Response) => {
       });
     }
 
-    const summary = task?.title ? `[Aegis] ${task.key}: ${task.title}` : '[Aegis] Autonomous Task';
+    const summary = task?.title ? `[Dupond] ${task.key}: ${task.title}` : '[Dupond] Autonomous Task';
     const descriptionADF = {
       type: 'doc',
       version: 1,
       content: [
         {
           type: 'paragraph',
-          content: [{ type: 'text', text: task?.description || 'Autonomous sprint deliverable managed by Aegis Orchestrator.' }],
+          content: [{ type: 'text', text: task?.description || 'Autonomous sprint deliverable managed by Dupond Orchestrator.' }],
         },
       ],
     };
@@ -619,20 +621,20 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
   try {
     const { webhookUrl, message, channel = '#engineering-sprint', task, eventType = 'status_update' } = req.body;
 
-    const taskText = task ? `*${task.key}: ${task.title}*` : (message?.text || message || 'Aegis Sprint Notification');
+    const taskText = task ? `*${task.key}: ${task.title}*` : (message?.text || message || 'Dupond Sprint Notification');
     const priorityEmoji = task?.priority === 'critical' ? '🔴' : task?.priority === 'high' ? '🟠' : '🟢';
 
     // Construct Slack Block Kit layout
     const blockKitPayload = {
       channel,
-      username: 'Aegis Orchestrator',
+      username: 'Dupond Orchestrator',
       icon_emoji: ':robot_face:',
       blocks: [
         {
           type: 'header',
           text: {
             type: 'plain_text',
-            text: `⚡ Aegis Orchestrator Telemetry Alert`,
+            text: `⚡ Dupond Orchestrator Telemetry Alert`,
             emoji: true,
           },
         },
@@ -726,7 +728,7 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
   }
 });
 
-// Endpoint: Real Interactive Chat with Aegis Chief Orchestrator
+// Endpoint: Real Interactive Chat with Dupond Chief Orchestrator
 app.post('/api/orchestrate/chat', async (req: Request, res: Response) => {
   try {
     const { message, orchestratorConfig, tasks = [], agents = [] } = req.body;
@@ -789,7 +791,7 @@ app.post('/api/orchestrate/chat', async (req: Request, res: Response) => {
           })).length,
         };
 
-        const systemInstruction = `You are ${orchestratorConfig?.personaName || 'Aegis Prime Core'}, the Chief Autonomous Project Orchestrator.
+        const systemInstruction = `You are ${orchestratorConfig?.personaName || 'Dupond Prime Core'}, the Chief Autonomous Project Orchestrator.
 Your direct mandate: ${orchestratorConfig?.systemPrompt || 'Coordinate efficiently with high engineering standards.'}
 Autonomy Mode: ${orchestratorConfig?.autonomyMode || 'semi_autonomous'}.
 Reasoning Depth: ${orchestratorConfig?.reasoningLevel || 'deep_thinking'}.
@@ -852,7 +854,7 @@ app.post('/api/orchestrate/suggest-role', async (req: Request, res: Response) =>
 
     if (ai) {
       try {
-        const prompt = `You are Aegis Agent Role Strategist.
+        const prompt = `You are Dupond Agent Role Strategist.
 Analyze this agent's profile, skill set, and current sprint bottlenecks to suggest a specialized dynamic role they should assume.
 
 Agent: ${agent.name}
@@ -951,7 +953,7 @@ app.post('/api/custom-providers/execute', async (req: Request, res: Response) =>
           error: error.message,
           hint: ALLOW_PRIVATE_PROVIDER_HOSTS
             ? undefined
-            : 'Local/LAN endpoints (Ollama, vLLM) require AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS=true.',
+            : 'Local/LAN endpoints (Ollama, vLLM) require DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS=true.',
         });
       }
       throw error;
@@ -998,7 +1000,7 @@ app.post('/api/custom-providers/ping', async (req: Request, res: Response) => {
           latencyMs,
           hint: ALLOW_PRIVATE_PROVIDER_HOSTS
             ? undefined
-            : 'Local/LAN endpoints (Ollama, vLLM) require AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS=true.',
+            : 'Local/LAN endpoints (Ollama, vLLM) require DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS=true.',
         });
       }
       return res.json({ success: false, error: fetchErr.message || 'Connection failed', latencyMs });
@@ -1150,5 +1152,5 @@ if (!isProduction) {
 }
 
 httpServer.listen(PORT, () => {
-  console.log(`Aegis Orchestrator server running on http://0.0.0.0:${PORT}`);
+  console.log(`Dupond Orchestrator server running on http://0.0.0.0:${PORT}`);
 });

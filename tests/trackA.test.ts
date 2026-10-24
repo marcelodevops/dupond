@@ -11,7 +11,7 @@ import os from 'os';
 import path from 'path';
 import fs from 'fs';
 // Must precede the coordinator import: redirects server state to a temp file.
-import { SENTINELS, SENTINEL_SECRETS, STATE_DIR } from './trackAStateFixture.js';
+import { SENTINELS, SENTINEL_SECRETS, STATE_DIR, STATE_FILE } from './trackAStateFixture.js';
 import { coordinator, REDACTED, isMaskedSecret } from '../src/server/coordinator.js';
 import { runArtifactVerification } from '../src/server/artifactRunner.js';
 import { handleRepositoryDispatch } from '../src/server/deliveryHandler.js';
@@ -39,7 +39,9 @@ const TRAVERSAL_KEYS = ['../outside', '../../tmp/evil', '..', 'AEG-104/../../sec
 async function main() {
   console.log('=== TRACK A: ISOLATION, CONTAINMENT, SSRF, CREDENTIALS ===\n');
 
-  const ARTIFACTS_ROOT = path.resolve(import.meta.dirname, '../.aegis_artifacts');
+  const ARTIFACTS_ROOT = fs.existsSync(path.resolve(import.meta.dirname, '../.dupond_artifacts'))
+    ? path.resolve(import.meta.dirname, '../.dupond_artifacts')
+    : path.resolve(import.meta.dirname, '../.aegis_artifacts');
 
   // --- 1. PATH CONTAINMENT ---
 
@@ -56,7 +58,7 @@ async function main() {
     // A naive startsWith(base) check passes for this path, which is exactly how
     // the original bug stayed hidden.
     const sneaky = path.resolve(ARTIFACTS_ROOT, '../outside/implementation.js');
-    assert.ok(sneaky.startsWith(path.resolve(ARTIFACTS_ROOT).replace(/\.aegis_artifacts$/, '')));
+    assert.ok(sneaky.startsWith(path.resolve(ARTIFACTS_ROOT).replace(/\.(dupond|aegis)_artifacts$/, '')));
     assert.strictEqual(isPathLexicallyContained(ARTIFACTS_ROOT, sneaky), false);
     assert.strictEqual(isPathLexicallyContained(ARTIFACTS_ROOT, path.resolve(ARTIFACTS_ROOT, 'AEG-104')), true);
   });
@@ -113,18 +115,18 @@ async function main() {
   // --- 2. EXECUTION ISOLATION ---
 
   await runTest('artifact child process inherits no parent environment secrets', async () => {
-    process.env.AEGIS_TRACKA_SECRET = 'do-not-leak';
+    process.env.DUPOND_TRACKA_SECRET = 'do-not-leak';
     const run = await runArtifactVerification(
-      "function probe() { return process.env.AEGIS_TRACKA_SECRET === 'do-not-leak'; }\n",
+      "function probe() { return process.env.DUPOND_TRACKA_SECRET === 'do-not-leak'; }\n",
       "const assert = require('assert');\nassert.strictEqual(typeof probe, 'function');\n",
     );
-    delete process.env.AEGIS_TRACKA_SECRET;
+    delete process.env.DUPOND_TRACKA_SECRET;
 
     assert.strictEqual(run.testsOk, true, `suite should pass: ${run.detail}`);
 
     // Read the env from inside the artifact's own execution.
     const leakRun = await runArtifactVerification(
-      'const seen = process.env.AEGIS_TRACKA_SECRET || null;\nfunction gotSecret() { return seen; }\n',
+      'const seen = process.env.DUPOND_TRACKA_SECRET || null;\nfunction gotSecret() { return seen; }\n',
       "const assert = require('assert');\nassert.strictEqual(gotSecret(), null, 'child must not see parent env');\n",
     );
     assert.strictEqual(leakRun.testsOk, true, `parent secret leaked to child: ${leakRun.detail}`);
@@ -342,7 +344,7 @@ async function main() {
       'mask must not overwrite the stored secret',
     );
     assert.ok(
-      fs.readFileSync(path.join(STATE_DIR, 'aegis_state.json'), 'utf-8').includes(SENTINELS.jiraApiToken),
+      fs.readFileSync(STATE_FILE, 'utf-8').includes(SENTINELS.jiraApiToken),
       'the credential must stay held server-side',
     );
 

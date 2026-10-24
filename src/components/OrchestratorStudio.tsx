@@ -39,7 +39,7 @@ export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
   const [terminalLogs, setTerminalLogs] = useState<{ sender: 'user' | 'orchestrator'; text: string; time: string }[]>([
     {
       sender: 'orchestrator',
-      text: 'Aegis Prime Core initialized. Directives loaded. Standing by for strategic inputs or autonomous execution command.',
+      text: 'Dupond Prime Core initialized. Directives loaded. Standing by for strategic inputs or autonomous execution command.',
       time: '10:00 AM',
     },
   ]);
@@ -331,7 +331,7 @@ export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
             <div className="flex items-center space-x-2">
               <Terminal className="w-4 h-4 text-indigo-400" />
               <span className="text-xs font-bold text-slate-200 font-mono">
-                Aegis Directives Terminal
+                Dupond Directives Terminal
               </span>
             </div>
             <span className="flex items-center space-x-1 text-[10px] text-emerald-400 font-mono">
@@ -353,7 +353,7 @@ export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
               >
                 <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
                   <span className="font-bold">
-                    {log.sender === 'user' ? 'Operator' : 'Aegis Core'}
+                    {log.sender === 'user' ? 'Operator' : 'Dupond Core'}
                   </span>
                   <span>{log.time}</span>
                 </div>
@@ -375,7 +375,7 @@ export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
               type="text"
               value={terminalInput}
               onChange={(e) => setTerminalInput(e.target.value)}
-              placeholder="Inject real-time directive or ask Aegis a question..."
+              placeholder="Inject real-time directive or ask Dupond a question..."
               className="flex-1 px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <button

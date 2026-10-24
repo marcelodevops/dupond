@@ -173,8 +173,8 @@
         "Gemini"
       ],
       "deliverables": [
-        "### Implementation Artifact: `AEG-104`\n**Specialist:** Nexus-7 (Solutions Architect & Tech Lead)\n**File Path:** `.aegis_artifacts/AEG-104/implementation.js` (1487 bytes)\n**SHA-256 Hash:** `ca074e5dced3a6c310f931e2b24ae51cf51b9c937a3b12253a6e9c664f515ad6`\n**Test Suite:** `.aegis_artifacts/AEG-104/spec.test.js` (Unit assertions verified)\n\n```javascript\n/**\n * Aegis Autonomous Implementation Artifact\n * Task: AEG-104 - Implement AI-Driven Workload Balancing & Resource Allocation Matrix\n * Specialist: Nexus-7 (Solutions Architect & Tech Lead)\n * Generated: 2026-10-23T21:21:07.541Z\n */\n\nclass AEG_104_Service {\n  constructor(config = {}) {\n    this.taskId = 'AEG-104';\n    this.agent = 'agent-arch';\n    this.config = Object.assign({\n      retryLimit: 3,\n      timeoutMs: 5000,\n      telemetryEnabled: true\n    }, config);\n    this.state = 'INITIALIZED';\n    this.auditTrail = [];\n  }\n\n  /**\n   * Primary operational execution method\n   */\n  async exe...\n```\n",
-        "### Implementation Artifact: `AEG-104`\n**Specialist:** Nexus-7 (Solutions Architect & Tech Lead)\n**File Path:** `.aegis_artifacts/AEG-104/implementation.js` (3772 bytes)\n**SHA-256 Hash:** `c327d7d0b5d96640ecc58afb357dbaba24dc53784acbf3202067caa7fb40e8c2`\n**Test Suite:** `.aegis_artifacts/AEG-104/spec.test.js` (Unit assertions verified)\n\n```javascript\n/**\n * Task AEG-104: Workload Balancing & Resource Allocation Matrix\n * Specialist: Nexus-7 (Solutions Architect & Tech Lead)\n * Verified against acceptance criteria: st-10, st-11, st-12\n */\n\nfunction calculateAgentLoad(agent, tasks, maxCapacityHours = 40) {\n  const activeTasks = tasks.filter(\n    (t) => t.assignedAgentId === agent.id && t.status !== 'done'\n  );\n\n  const allocatedHours = activeTasks.reduce((sum, t) => sum + (t.estimatedHours || 6), 0);\n  const loadPercentage = Math.round((alloca...\n```\n"
+        "### Implementation Artifact: `AEG-104`\n**Specialist:** Nexus-7 (Solutions Architect & Tech Lead)\n**File Path:** `.dupond_artifacts/AEG-104/implementation.js` (1487 bytes)\n**SHA-256 Hash:** `ca074e5dced3a6c310f931e2b24ae51cf51b9c937a3b12253a6e9c664f515ad6`\n**Test Suite:** `.dupond_artifacts/AEG-104/spec.test.js` (Unit assertions verified)\n\n```javascript\n/**\n * Dupond Autonomous Implementation Artifact\n * Task: AEG-104 - Implement AI-Driven Workload Balancing & Resource Allocation Matrix\n * Specialist: Nexus-7 (Solutions Architect & Tech Lead)\n * Generated: 2026-10-23T21:21:07.541Z\n */\n\nclass AEG_104_Service {\n  constructor(config = {}) {\n    this.taskId = 'AEG-104';\n    this.agent = 'agent-arch';\n    this.config = Object.assign({\n      retryLimit: 3,\n      timeoutMs: 5000,\n      telemetryEnabled: true\n    }, config);\n    this.state = 'INITIALIZED';\n    this.auditTrail = [];\n  }\n\n  /**\n   * Primary operational execution method\n   */\n  async exe...\n```\n",
+        "### Implementation Artifact: `AEG-104`\n**Specialist:** Nexus-7 (Solutions Architect & Tech Lead)\n**File Path:** `.dupond_artifacts/AEG-104/implementation.js` (3772 bytes)\n**SHA-256 Hash:** `c327d7d0b5d96640ecc58afb357dbaba24dc53784acbf3202067caa7fb40e8c2`\n**Test Suite:** `.dupond_artifacts/AEG-104/spec.test.js` (Unit assertions verified)\n\n```javascript\n/**\n * Task AEG-104: Workload Balancing & Resource Allocation Matrix\n * Specialist: Nexus-7 (Solutions Architect & Tech Lead)\n * Verified against acceptance criteria: st-10, st-11, st-12\n */\n\nfunction calculateAgentLoad(agent, tasks, maxCapacityHours = 40) {\n  const activeTasks = tasks.filter(\n    (t) => t.assignedAgentId === agent.id && t.status !== 'done'\n  );\n\n  const allocatedHours = activeTasks.reduce((sum, t) => sum + (t.estimatedHours || 6), 0);\n  const loadPercentage = Math.round((alloca...\n```\n"
       ],
       "lastAgentComment": "Nexus-7: Generated real code & tests (3772B, SHA: c327d7d0). Ready for Quality Gate.",
       "jiraSynced": true,
@@ -311,7 +311,7 @@
   "agents": [
     {
       "id": "agent-orch",
-      "name": "Aegis Prime",
+      "name": "Dupond Prime",
       "role": "Chief Orchestrator",
       "baseRole": "Chief Orchestrator",
       "avatar": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80",
@@ -500,8 +500,8 @@
     }
   ],
   "orchestratorConfig": {
-    "personaName": "Aegis Prime Core",
-    "systemPrompt": "You are Aegis Prime, Chief Autonomous Project Orchestrator. \nYour mandate is to organize complex product visions into high-velocity sprint pipelines, assign tasks dynamically based on specialist capabilities and communication history, enforce zero-defect quality gates, and maintain transparency with stakeholders via automated reporting and Jira/Slack telemetry.",
+    "personaName": "Dupond Prime Core",
+    "systemPrompt": "You are Dupond Prime, Chief Autonomous Project Orchestrator. \nYour mandate is to organize complex product visions into high-velocity sprint pipelines, assign tasks dynamically based on specialist capabilities and communication history, enforce zero-defect quality gates, and maintain transparency with stakeholders via automated reporting and Jira/Slack telemetry.",
     "autonomyMode": "semi_autonomous",
     "model": "gemini-3.8-flash",
     "temperature": 0.25,
@@ -561,7 +561,7 @@
       "senderName": "Nexus-7",
       "senderRole": "Solutions Architect & Tech Lead",
       "recipientId": "all",
-      "content": "Generated code deliverable for AEG-104 at .aegis_artifacts/AEG-104/implementation.js. Advanced to REVIEW stage.",
+      "content": "Generated code deliverable for AEG-104 at .dupond_artifacts/AEG-104/implementation.js. Advanced to REVIEW stage.",
       "messageType": "deliverable",
       "taskId": "AEG-104"
     },
@@ -572,7 +572,7 @@
       "senderName": "Nexus-7",
       "senderRole": "Solutions Architect & Tech Lead",
       "recipientId": "all",
-      "content": "Generated code deliverable for AEG-104 at .aegis_artifacts/AEG-104/implementation.js. Advanced to REVIEW stage.",
+      "content": "Generated code deliverable for AEG-104 at .dupond_artifacts/AEG-104/implementation.js. Advanced to REVIEW stage.",
       "messageType": "deliverable",
       "taskId": "AEG-104"
     },
@@ -591,7 +591,7 @@
       "id": "comm-1792729392570",
       "timestamp": "04:23 AM",
       "senderId": "agent-orch",
-      "senderName": "Aegis Prime Core",
+      "senderName": "Dupond Prime Core",
       "senderRole": "Chief Orchestrator",
       "recipientId": "all",
       "content": "Quality Gate PASSED for AEG-105. All checks verified. Task marked DONE.",
@@ -602,7 +602,7 @@
       "id": "comm-1792729385571",
       "timestamp": "04:23 AM",
       "senderId": "agent-orch",
-      "senderName": "Aegis Prime Core",
+      "senderName": "Dupond Prime Core",
       "senderRole": "Chief Orchestrator",
       "recipientId": "all",
       "content": "Quality Gate PASSED for AEG-103. All checks verified. Task marked DONE.",
@@ -613,7 +613,7 @@
       "id": "comm-1792729378569",
       "timestamp": "04:22 AM",
       "senderId": "agent-orch",
-      "senderName": "Aegis Prime Core",
+      "senderName": "Dupond Prime Core",
       "senderRole": "Chief Orchestrator",
       "recipientId": "all",
       "content": "Quality Gate PASSED for AEG-102. All checks verified. Task marked DONE.",
@@ -646,7 +646,7 @@
       "id": "comm-1",
       "timestamp": "10:02 AM",
       "senderId": "agent-orch",
-      "senderName": "Aegis Prime",
+      "senderName": "Dupond Prime",
       "senderRole": "Chief Orchestrator",
       "recipientId": "all",
       "content": "Sprint 1 Plan ingested. 7 tasks decomposed across 4 Epics. Critical path initiated with Architecture contracts.",
@@ -668,7 +668,7 @@
       "id": "comm-3",
       "timestamp": "10:45 AM",
       "senderId": "agent-orch",
-      "senderName": "Aegis Prime",
+      "senderName": "Dupond Prime",
       "senderRole": "Chief Orchestrator",
       "recipientId": "agent-fe",
       "content": "AEG-101 is Done. Delegating AEG-102 (Interactive Kanban) to Lyra UI. Prioritize visual agent status pulses.",
