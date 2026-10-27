@@ -1,4 +1,7 @@
-# Dupond Orchestrator 🛡️🤖
+<p align="center">
+  <img src="resources/dupond-banner.png" alt="Dupond — detective with a bowler hat and moustache" width="900">
+</p>
+# Dupond-Project Leader 🛡️🤖
 ### Autonomous AI Project Orchestration, Dynamic Role Allocation & Real-Time Telemetry Engine
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
