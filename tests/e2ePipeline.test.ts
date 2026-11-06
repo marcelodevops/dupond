@@ -35,6 +35,7 @@ async function runAcceptanceSuite() {
   const disposableRemote = path.resolve(process.cwd(), `.dupond_worktrees/e2e-disposable-remote-${Date.now()}.git`);
   fs.mkdirSync(disposableRemote, { recursive: true });
   execFileSync('git', ['init', '--bare'], { cwd: disposableRemote });
+  execFileSync('git', ['--git-dir', disposableRemote, 'config', 'receive.shallowUpdate', 'true']);
 
   try {
     // ------------------------------------------------------------------------
