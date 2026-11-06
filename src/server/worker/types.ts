@@ -21,6 +21,8 @@ export interface WorkerExecutionContext {
     unmetCriteria?: string[];
   };
   timeoutMs?: number;
+  runId?: string;
+  abortSignal?: AbortSignal;
 }
 
 export interface WorkerExecutionResult {

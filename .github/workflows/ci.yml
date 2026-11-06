@@ -8,8 +8,12 @@ on:
 
 jobs:
   validate:
-    name: Build, Lint & Automated Test Suite
-    runs-on: macos-latest
+    name: Build, Lint & Automated Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
 
     steps:
       - name: Check out repository

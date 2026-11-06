@@ -10,6 +10,8 @@ export interface SandboxOptions {
   timeoutMs?: number;
   env?: Record<string, string>;
   allowNetwork?: boolean;
+  runId?: string;
+  abortSignal?: AbortSignal;
 }
 
 export interface SandboxExecutionResult {
@@ -25,16 +27,20 @@ export interface SandboxExecutionResult {
 export class SandboxExecutor {
   private isDarwin: boolean;
   private hasSandboxExec: boolean;
+  private hasPodman: boolean;
+  private hasDocker: boolean;
+  private activeProcesses: Map<string, ChildProcess> = new Map();
 
   constructor() {
     this.isDarwin = os.platform() === 'darwin';
-    this.hasSandboxExec = this.checkSandboxExec();
+    this.hasSandboxExec = this.checkBinary('sandbox-exec');
+    this.hasPodman = this.checkBinary('podman');
+    this.hasDocker = this.checkBinary('docker');
   }
 
-  private checkSandboxExec(): boolean {
-    if (!this.isDarwin) return false;
+  private checkBinary(name: string): boolean {
     try {
-      const probe = spawnSync('which', ['sandbox-exec'], { encoding: 'utf-8' });
+      const probe = spawnSync('which', [name], { encoding: 'utf-8' });
       return probe.status === 0;
     } catch {
       return false;
@@ -49,43 +55,59 @@ export class SandboxExecutor {
       return { available: false, mechanism: 'macos-seatbelt', error: 'sandbox-exec binary not found on macOS' };
     }
 
-    // On Linux or other systems, check for container or namespace tools
-    const checkPodman = spawnSync('podman', ['--version'], { encoding: 'utf-8' });
-    if (checkPodman.status === 0) {
+    // On Linux, strictly require podman or docker for container isolation
+    if (this.hasPodman) {
       return { available: true, mechanism: 'podman-container' };
+    }
+    if (this.hasDocker) {
+      return { available: true, mechanism: 'docker-container' };
     }
 
     return {
       available: false,
       mechanism: 'none',
-      error: 'Restricted execution sandbox unavailable: Host lacks required isolation mechanism (sandbox-exec or podman). Refusing to run untrusted code on host.',
+      error: 'Restricted execution sandbox unavailable: Host lacks required container runtime (podman or docker) on Linux. Refusing to run untrusted code on host.',
     };
+  }
+
+  public killRun(runId: string): void {
+    const child = this.activeProcesses.get(runId);
+    if (child) {
+      this.killProcessTree(child);
+      this.activeProcesses.delete(runId);
+    }
   }
 
   /**
    * Generates a strict macOS Seatbelt profile:
-   * - Restricts write operations strictly to the worktree and private temp dir
-   * - Blocks reading user home credentials (.ssh, .aws, .config, .gemini, .env)
+   * - Restricts write operations strictly to the worktree, git worktree metadata, and private temp dir
+   * - Blocks reading any user home files outside the worktree, temp dir, and git repo objects
    */
-  private generateSeatbeltProfile(realWorktree: string, realTmp: string, allowNetwork: boolean): string {
+  private generateSeatbeltProfile(
+    realWorktree: string,
+    realTmp: string,
+    allowNetwork: boolean,
+    gitDir?: string,
+    gitCommonDir?: string
+  ): string {
     const home = os.homedir();
-    const sensitiveDirs = [
-      path.join(home, '.ssh'),
-      path.join(home, '.aws'),
-      path.join(home, '.config'),
-      path.join(home, '.gemini'),
-      path.join(home, '.gnupg'),
-    ].filter((p) => fs.existsSync(p));
-
-    const sensitiveDenials = sensitiveDirs
-      .map((dir) => `(deny file-read* (subpath "${dir}"))`)
-      .join('\n');
-
     const networkRule = allowNetwork ? '(allow network*)' : '(deny network*)';
+
+    let gitRules = '';
+    if (gitDir) {
+      gitRules += `\n(allow file-read-data (subpath "${gitDir}"))\n(allow file-write* (subpath "${gitDir}"))`;
+    }
+    if (gitCommonDir) {
+      gitRules += `\n(allow file-read-data (subpath "${gitCommonDir}"))`;
+    }
 
     return `(version 1)
 (allow default)
 (deny file-write*)
+(allow file-read-metadata)
+(deny file-read-data (subpath "${home}"))
+(allow file-read-data (subpath "${realWorktree}"))
+(allow file-read-data (subpath "${realTmp}"))${gitRules}
 (allow file-write* (subpath "${realWorktree}"))
 (allow file-write* (subpath "${realTmp}"))
 (allow file-write* (subpath "/dev/null"))
@@ -93,10 +115,42 @@ export class SandboxExecutor {
 (allow file-write* (subpath "/dev/stdout"))
 (allow file-write* (subpath "/dev/stderr"))
 (allow file-write* (subpath "/dev/tty"))
-${sensitiveDenials}
 (deny file-read* (regex #"/\\.env.*$"))
 ${networkRule}
 `;
+  }
+
+  private resolveGitDirs(realWorktree: string): { gitDir?: string; gitCommonDir?: string } {
+    const gitFilePath = path.join(realWorktree, '.git');
+    if (!fs.existsSync(gitFilePath)) return {};
+    try {
+      const stat = fs.statSync(gitFilePath);
+      if (stat.isFile()) {
+        const content = fs.readFileSync(gitFilePath, 'utf-8').trim();
+        const match = content.match(/^gitdir:\s*(.+)$/m);
+        if (match) {
+          const gitDirPath = path.resolve(realWorktree, match[1]);
+          if (fs.existsSync(gitDirPath)) {
+            const gitDir = fs.realpathSync(gitDirPath);
+            let gitCommonDir: string | undefined;
+            const commondirFile = path.join(gitDir, 'commondir');
+            if (fs.existsSync(commondirFile)) {
+              const commonRel = fs.readFileSync(commondirFile, 'utf-8').trim();
+              const commonPath = path.resolve(gitDir, commonRel);
+              if (fs.existsSync(commonPath)) {
+                gitCommonDir = fs.realpathSync(commonPath);
+              }
+            }
+            return { gitDir, gitCommonDir };
+          }
+        }
+      } else if (stat.isDirectory()) {
+        return { gitDir: fs.realpathSync(gitFilePath) };
+      }
+    } catch {
+      // ignore
+    }
+    return {};
   }
 
   /**
@@ -139,6 +193,18 @@ ${networkRule}
       throw new Error(`Execution blocked: ${availability.error}`);
     }
 
+    if (options.abortSignal?.aborted) {
+      return {
+        command: options.command,
+        exitCode: 130,
+        stdout: '',
+        stderr: 'Execution aborted prior to launch',
+        durationMs: 0,
+        timedOut: false,
+        killed: true,
+      };
+    }
+
     const startTime = Date.now();
     const realWorktree = fs.realpathSync(path.resolve(options.worktreePath));
     const sandboxTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dp_sandbox_'));
@@ -150,13 +216,37 @@ ${networkRule}
     let execCmd: string;
     let execArgs: string[];
 
-    if (this.isDarwin && this.hasSandboxExec) {
-      const profile = this.generateSeatbeltProfile(realWorktree, realTmp, options.allowNetwork ?? false);
+    const { gitDir, gitCommonDir } = this.resolveGitDirs(realWorktree);
+
+    if (this.isDarwin) {
+      const profile = this.generateSeatbeltProfile(realWorktree, realTmp, options.allowNetwork ?? false, gitDir, gitCommonDir);
       execCmd = 'sandbox-exec';
       execArgs = ['-p', profile, '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim()];
+    } else if (this.hasPodman || this.hasDocker) {
+      execCmd = this.hasPodman ? 'podman' : 'docker';
+      const containerMounts = [
+        '-v', `${realWorktree}:${realWorktree}:rw`,
+        '-v', `${realTmp}:${realTmp}:rw`,
+      ];
+      if (gitDir) {
+        containerMounts.push('-v', `${gitDir}:${gitDir}:rw`);
+      }
+      if (gitCommonDir) {
+        containerMounts.push('-v', `${gitCommonDir}:${gitCommonDir}:ro`);
+      }
+
+      execArgs = [
+        'run', '--rm',
+        '--network', options.allowNetwork ? 'bridge' : 'none',
+        ...containerMounts,
+        '-w', realWorktree,
+        '--env', 'NODE_ENV=test',
+        '--env', 'CI=true',
+        'node:22-alpine',
+        '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim(),
+      ];
     } else {
-      execCmd = '/bin/sh';
-      execArgs = ['-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim()];
+      throw new Error('Restricted execution sandbox unavailable: Host lacks required container runtime (podman or docker) on Linux. Refusing to run untrusted code on host.');
     }
 
     return new Promise<SandboxExecutionResult>((resolve) => {
@@ -173,6 +263,19 @@ ${networkRule}
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
+      if (options.runId) {
+        this.activeProcesses.set(options.runId, child);
+      }
+
+      const onAbort = () => {
+        killed = true;
+        this.killProcessTree(child);
+      };
+
+      if (options.abortSignal) {
+        options.abortSignal.addEventListener('abort', onAbort);
+      }
+
       child.stdout?.on('data', (data) => {
         stdout += data.toString('utf-8');
       });
@@ -183,11 +286,18 @@ ${networkRule}
 
       const timer = setTimeout(() => {
         timedOut = true;
+        killed = true;
         this.killProcessTree(child);
       }, timeoutMs);
 
       child.on('close', (code) => {
         clearTimeout(timer);
+        if (options.abortSignal) {
+          options.abortSignal.removeEventListener('abort', onAbort);
+        }
+        if (options.runId) {
+          this.activeProcesses.delete(options.runId);
+        }
         try {
           fs.rmSync(sandboxTmp, { recursive: true, force: true });
         } catch {
@@ -208,6 +318,12 @@ ${networkRule}
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        if (options.abortSignal) {
+          options.abortSignal.removeEventListener('abort', onAbort);
+        }
+        if (options.runId) {
+          this.activeProcesses.delete(options.runId);
+        }
         try {
           fs.rmSync(sandboxTmp, { recursive: true, force: true });
         } catch {

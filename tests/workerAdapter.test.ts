@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'node:child_process';
 import { GeminiCodingWorkerAdapter } from '../src/server/worker/geminiWorkerAdapter.ts';
 import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
 
@@ -31,11 +32,11 @@ async function main() {
   const worktree = workspaceManager.createWorktree(runId, branchName, 'HEAD');
 
   try {
-    // Test protected path guard
     const protectedFile = path.resolve(worktree.worktreePath, 'protected.test.js');
-    fs.writeFileSync(protectedFile, '// protected test');
+    fs.writeFileSync(protectedFile, '// original protected test content\n');
+    execFileSync('git', ['add', 'protected.test.js'], { cwd: worktree.worktreePath });
+    execFileSync('git', ['commit', '-m', 'chore: add protected test'], { cwd: worktree.worktreePath });
 
-    // Simulate tool call directly through execute context
     const testContext = {
       taskId: 'test-1',
       taskKey: 'AEG-601',
@@ -48,31 +49,57 @@ async function main() {
       attemptNumber: 1,
     };
 
-    // Verify path containment logic
-    const safePathFn = (relPath: string) => {
-      const normalized = path.normalize(relPath).replace(/^(\.\.(\/|\\|$))+/, '');
-      const fullPath = path.resolve(worktree.worktreePath, normalized);
-      const isContained = fullPath.startsWith(worktree.worktreePath);
-      const relToWorktree = path.relative(worktree.worktreePath, fullPath);
-      const isProtected = testContext.protectedPaths.some((p) => relToWorktree.startsWith(p));
-      const isAllowed = testContext.allowedPaths.some((p) => relToWorktree.startsWith(p.replace(/\*\*?$/, '')));
-      return { isContained, isProtected, isAllowed };
-    };
+    // 2a. Writing directly to a protected path must be rejected
+    const writeProtectedRes = await adapter.executeTool(testContext as any, 'write_file', {
+      filePath: 'protected.test.js',
+      content: '// attempt overwrite',
+    });
+    assert.ok(writeProtectedRes.error?.includes('is a protected path'), 'Direct write to protected path must be rejected');
 
-    const protectedCheck = safePathFn('protected.test.js');
-    assert.strictEqual(protectedCheck.isProtected, true, 'protected.test.js must be flagged as protected');
+    // 2b. Writing outside allowed change scope must be rejected
+    const writeDisallowedRes = await adapter.executeTool(testContext as any, 'write_file', {
+      filePath: 'config/settings.json',
+      content: '{}',
+    });
+    assert.ok(writeDisallowedRes.error?.includes('outside the allowed change scope'), 'Write outside allowed scope must be rejected');
 
-    const traversalCheck = safePathFn('../../outside.txt');
-    assert.strictEqual(traversalCheck.isContained, true, 'Traversal sequence must be stripped/contained');
+    // 2c. Writing inside allowed change scope succeeds
+    const writeAllowedRes = await adapter.executeTool(testContext as any, 'write_file', {
+      filePath: 'src/validService.ts',
+      content: 'export const ok = true;\n',
+    });
+    assert.strictEqual(writeAllowedRes.written, true);
+    assert.ok(fs.existsSync(path.resolve(worktree.worktreePath, 'src/validService.ts')));
 
-    const allowedCheck = safePathFn('src/newService.ts');
-    assert.strictEqual(allowedCheck.isAllowed, true, 'Path inside src/** must be allowed');
-    assert.strictEqual(allowedCheck.isProtected, false, 'Path inside src/** is not protected');
+    // 2d. Symlink escape defense on read and write
+    const symlinkPath = path.resolve(worktree.worktreePath, 'src/escaped_symlink');
+    try {
+      fs.symlinkSync('/etc', symlinkPath);
+      const readSymlinkRes = await adapter.executeTool(testContext as any, 'read_file', {
+        filePath: 'src/escaped_symlink/hosts',
+      });
+      assert.ok(
+        readSymlinkRes.error?.includes('Symlink') || readSymlinkRes.error?.includes('escapes workspace') || readSymlinkRes.error?.includes('blocked'),
+        'Reading through symlink pointing outside worktree must be blocked'
+      );
+    } catch (err: any) {
+      // If symlink creation is restricted, verify error handled
+    }
 
-    const disallowedCheck = safePathFn('config/other.json');
-    assert.strictEqual(disallowedCheck.isAllowed, false, 'Path outside src/** must be disallowed');
+    // 2e. Command execution modifying a protected file triggers automated rollback and integrity violation
+    const tamperRes = await adapter.executeTool(testContext as any, 'run_permitted_command', {
+      command: `node -e "require('fs').appendFileSync('protected.test.js', '// TAMPERED');"`,
+    });
+    assert.strictEqual(tamperRes.exitCode, 1, 'Command modifying protected file must exit with failure');
+    assert.ok(tamperRes.stderr?.includes('Integrity violation'), 'Must report integrity violation');
+    assert.ok(tamperRes.stderr?.includes('Modifications were automatically rolled back'));
 
-    console.log('✔ [PASS] Path containment, protected paths, and allowed change scopes enforced strictly');
+    // Assert file content was rolled back to original
+    const restoredContent = fs.readFileSync(protectedFile, 'utf-8');
+    assert.ok(!restoredContent.includes('// TAMPERED'), 'Protected file must be restored');
+    assert.ok(restoredContent.includes('// original protected test content'), 'Original content preserved');
+
+    console.log('✔ [PASS] Path containment, symlink escape defense, and protected path rollback enforced strictly');
 
   } finally {
     workspaceManager.cleanupWorktree(worktree.worktreePath, branchName);

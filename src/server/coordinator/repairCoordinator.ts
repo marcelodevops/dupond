@@ -7,6 +7,7 @@ import { WorkspaceManager, defaultWorkspaceManager } from '../workspace/workspac
 import { CodingWorkerAdapter, WorkerExecutionContext } from '../worker/types.js';
 import { defaultCodingWorker } from '../worker/geminiWorkerAdapter.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
+import { defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
 
 export interface ExecutionLoopOptions {
   task: TaskRecord;
@@ -14,6 +15,7 @@ export interface ExecutionLoopOptions {
   store?: TaskStore;
   workspaceManager?: WorkspaceManager;
   verifier?: AuthoritativeVerifier;
+  runId?: string;
   onAttemptComplete?: (attemptNum: number, passed: boolean) => void;
 }
 
@@ -22,6 +24,7 @@ export class RepairCoordinator {
   private workspaceManager: WorkspaceManager;
   private verifier: AuthoritativeVerifier;
   private activeCancellations: Set<string> = new Set();
+  private activeAbortControllers: Map<string, AbortController> = new Map();
 
   constructor(
     store: TaskStore = defaultTaskStore,
@@ -35,6 +38,12 @@ export class RepairCoordinator {
 
   public cancelRun(runId: string): void {
     this.activeCancellations.add(runId);
+    const controller = this.activeAbortControllers.get(runId);
+    if (controller) {
+      controller.abort();
+    }
+    this.verifier.getSandbox().killRun(runId);
+    defaultSandboxExecutor.killRun(runId);
   }
 
   public isCancelled(runId: string): boolean {
@@ -50,8 +59,10 @@ export class RepairCoordinator {
     const worker = options.worker || defaultCodingWorker;
     const startTime = Date.now();
 
-    const runId = `run-${task.key.toLowerCase()}-${Date.now()}`;
+    const runId = options.runId || `run-${task.key.toLowerCase()}-${Date.now()}`;
     const branchName = `dupond/${task.key}-feat-${Date.now()}`;
+    const abortController = new AbortController();
+    this.activeAbortControllers.set(runId, abortController);
 
     // 1. Prepare isolated worktree
     let worktreeInfo;
@@ -127,18 +138,26 @@ export class RepairCoordinator {
           attemptNumber: attemptNum,
           repairFeedback,
           timeoutMs: (task.timeoutSeconds || 300) * 1000,
+          runId,
+          abortSignal: abortController.signal,
         };
 
         let workerResult;
         try {
           workerResult = await worker.execute(workerContext);
         } catch (workerErr: any) {
+          const wasCancelled = this.isCancelled(runId) || abortController.signal.aborted;
           this.store.updateAttempt(attempt.id, {
             status: 'failed',
-            errorMessage: workerErr.message,
+            errorMessage: wasCancelled ? 'Cancelled by user' : workerErr.message,
             durationMs: Date.now() - attemptStartTime,
             completedAt: new Date().toISOString(),
           });
+          if (wasCancelled) {
+            lastFailureReason = 'Run cancelled by user';
+            lastFailureType = 'cancelled';
+            break;
+          }
           lastFailureReason = `Worker failed on attempt ${attemptNum}: ${workerErr.message}`;
           lastFailureType = 'implementation';
           repairFeedback = {
@@ -203,7 +222,15 @@ export class RepairCoordinator {
           verificationCommands: task.verificationCommands,
           protectedPaths: task.protectedPaths,
           acceptanceCriteria: task.acceptanceCriteria,
+          runId,
+          abortSignal: abortController.signal,
         });
+
+        if (this.isCancelled(runId) || abortController.signal.aborted) {
+          lastFailureReason = 'Run cancelled by user';
+          lastFailureType = 'cancelled';
+          break;
+        }
 
         // Record verification record
         this.store.recordVerification({
@@ -260,12 +287,12 @@ export class RepairCoordinator {
         // Transition task to review (ready for PR delivery)
         this.store.updateTaskStatus(task.id, 'review');
       } else {
-        const isCancelled = this.isCancelled(runId);
+        const isCancelled = this.isCancelled(runId) || abortController.signal.aborted;
         const finalStatus = isCancelled ? 'cancelled' : 'failed';
         this.store.updateRun(run.id, {
           status: finalStatus,
           durationMs: totalDuration,
-          failureType: lastFailureType,
+          failureType: isCancelled ? 'cancelled' : lastFailureType,
           failureReason: lastFailureReason,
         });
         // Unclaim and mark task blocked so other eligible tasks can run!
@@ -274,6 +301,7 @@ export class RepairCoordinator {
 
       return this.store.getRun(run.id)!;
     } finally {
+      this.activeAbortControllers.delete(runId);
       this.activeCancellations.delete(runId);
     }
   }
