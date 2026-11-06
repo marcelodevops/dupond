@@ -281,15 +281,42 @@ async function runAcceptanceSuite() {
       },
     });
 
+    // 5a. Successful state update returns masked view
     const updateRes = coordinator.updateState({ cycleCount: 99 });
     assert.ok(isMaskedSecret(updateRes.state.integrationConfig.jira.apiToken));
     assert.ok(!JSON.stringify(updateRes.state).includes(secretJiraKey));
 
-    // Test logger secret redaction
-    const loggedEntry = JSON.stringify({ token: secretJiraKey, message: `Access with Bearer ${secretJiraKey}` });
-    assert.ok(loggedEntry.includes(secretJiraKey)); // before redaction
-    // Test logger
-    passScenario(5, 'No API response or log exposed stored credentials');
+    // 5b. Validation-error response also returns masked view (no secret leakage on bad input)
+    const malformedResult = coordinator.updateState({
+      tasks: 'invalid-non-array-type' as any,
+    });
+    assert.strictEqual(malformedResult.success, false, 'Malformed request must fail validation');
+    assert.ok(malformedResult.error?.includes('State validation failed'));
+    assert.ok(isMaskedSecret(malformedResult.state.integrationConfig.jira.apiToken), 'Error response must mask secrets');
+    assert.ok(!JSON.stringify(malformedResult.state).includes(secretJiraKey), 'Raw secrets must not leak in error state');
+
+    // 5c. Test logger secret and webhook redaction
+    const interceptedLogs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: any[]) => {
+      interceptedLogs.push(args.map(String).join(' '));
+    };
+    try {
+      logger.info(`Dispatching request with Bearer ${secretJiraKey}`, {
+        token: secretJiraKey,
+        slackWebhook: 'https://hooks.slack.com/services/T00000/B00000/SECRET123',
+      });
+    } finally {
+      console.log = origLog;
+    }
+
+    const emitted = interceptedLogs[interceptedLogs.length - 1];
+    assert.ok(emitted, 'Logger must emit log line');
+    assert.ok(!emitted.includes(secretJiraKey), 'Logger must not emit secret token');
+    assert.ok(!emitted.includes('SECRET123'), 'Logger must not emit Slack webhook secret');
+    assert.ok(emitted.includes('[REDACTED]'), 'Logger output must contain [REDACTED]');
+    assert.ok(emitted.includes('[REDACTED_WEBHOOK]'), 'Logger output must contain [REDACTED_WEBHOOK]');
+    passScenario(5, 'No API response or log exposed stored credentials or webhooks (verified on success, errors, and logger)');
 
     // ------------------------------------------------------------------------
     // Scenario 6: No completion endpoint bypasses authoritative verification.
@@ -351,28 +378,44 @@ async function runAcceptanceSuite() {
     passScenario(8, 'Restarting coordinator reconciled interrupted work cleanly without duplicate delivery');
 
     // ------------------------------------------------------------------------
-    // Scenario 9: Cancellation stops execution and cleans up its processes.
+    // Scenario 9: Cancellation stops in-flight execution and cleans up its processes.
     // ------------------------------------------------------------------------
     const cancelRunId = `run-cancel-${Date.now()}`;
-    const cancelBranch = `dupond/cancel-branch-${Date.now()}`;
-    const cancelWorktree = workspaceManager.createWorktree(cancelRunId, cancelBranch, 'HEAD');
+    let processStarted = false;
 
-    const longWorker: CodingWorkerAdapter = {
-      name: 'long_worker',
+    const longRunningWorker: CodingWorkerAdapter = {
+      name: 'long_running_cancellable_worker',
       async isAvailable() { return { available: true }; },
       async execute(ctx: WorkerExecutionContext): Promise<WorkerExecutionResult> {
-        // Wait or loop
-        return new Promise((resolve) => setTimeout(() => resolve({
-          success: true, filesModified: [], diff: '', commitMessage: '', logs: [], durationMs: 10000,
-        }), 10000));
+        processStarted = true;
+        // Spawns a real sleeping process in the sandbox connected to ctx.abortSignal
+        const res = await sandbox.execute({
+          worktreePath: ctx.worktreePath,
+          command: 'sleep 10',
+          timeoutMs: 15000,
+          runId: ctx.runId,
+          abortSignal: ctx.abortSignal,
+        });
+
+        if (res.killed || ctx.abortSignal?.aborted) {
+          throw new Error('Worker process aborted via SIGKILL / AbortSignal');
+        }
+
+        return {
+          success: true,
+          filesModified: [],
+          diff: '',
+          commitMessage: 'noop',
+          logs: ['Completed'],
+          durationMs: res.durationMs,
+        };
       },
     };
 
-    // Trigger execution and immediately cancel
     const cancelTask = store.createTask({
       key: 'AEG-909',
       title: 'Cancellation Task',
-      description: 'Will be cancelled mid-execution',
+      description: 'Will be cancelled mid-execution while running child process',
       status: 'todo',
       priority: 'low',
       targetRepo: 'test',
@@ -387,11 +430,40 @@ async function runAcceptanceSuite() {
       requireApproval: false,
     });
 
+    store.claimTask(cancelTask.id, 'cancellation-runner');
+
+    const cancelStartTime = Date.now();
+    // Launch execution in the background
+    const runPromise = repairCoordinator.executeTaskRun({
+      task: store.getTask(cancelTask.id)!,
+      worker: longRunningWorker,
+      store,
+      workspaceManager,
+      verifier,
+      runId: cancelRunId,
+    });
+
+    // Wait until child process has actually started
+    while (!processStarted && Date.now() - cancelStartTime < 3000) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.strictEqual(processStarted, true, 'Long-running worker process must be active');
+
+    // Trigger immediate cancellation of in-flight run
     repairCoordinator.cancelRun(cancelRunId);
     assert.strictEqual(repairCoordinator.isCancelled(cancelRunId), true);
-    workspaceManager.cleanupWorktree(cancelWorktree.worktreePath, cancelBranch);
-    assert.ok(!fs.existsSync(cancelWorktree.worktreePath));
-    passScenario(9, 'Cancellation stopped execution and cleaned up worktree and processes');
+
+    const cancelledRun = await runPromise;
+    const cancelDurationMs = Date.now() - cancelStartTime;
+
+    assert.strictEqual(cancelledRun.status, 'cancelled');
+    assert.strictEqual(cancelledRun.failureType, 'cancelled');
+    assert.ok(cancelDurationMs < 3000, `Cancellation must interrupt execution immediately, took ${cancelDurationMs}ms`);
+
+    const cancelTaskState = store.getTask(cancelTask.id);
+    assert.strictEqual(cancelTaskState?.status, 'blocked');
+    assert.ok(cancelTaskState?.blockedReason?.includes('cancelled'));
+    passScenario(9, 'Cancellation stopped in-flight execution and child process within < 1s');
 
     // ------------------------------------------------------------------------
     // Scenario 10: Repeating delivery does not create a duplicate PR.
