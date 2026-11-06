@@ -10,7 +10,7 @@
 ![Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%202.5%20%2F%20Flash-4285F4.svg?logo=google)
 ![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8.svg?logo=tailwindcss)
 ![Express](https://img.shields.io/badge/Express-4.21-000000.svg?logo=express)
-![Security Tests](https://img.shields.io/badge/Security%20Tests-37%2F37%20Passing-success.svg)
+![Security Tests](https://img.shields.io/badge/Security%20Tests-38%2F38%20Passing-success.svg)
 
 ---
 
@@ -377,10 +377,10 @@ Dupond implements strict enterprise-grade security boundaries protecting against
 
 ## 🧪 Testing & Verification Suite
 
-Dupond includes a unified test suite with 37 automated tests covering security guardrails, sandbox isolation, SSRF prevention, and business logic:
+Dupond includes a unified test suite with 38 automated tests covering security guardrails, sandbox isolation, SSRF prevention, and business logic:
 
 ```bash
-# Run all 37 regression tests
+# Run all 38 regression tests
 npm test
 ```
 
@@ -390,7 +390,7 @@ npm test
    - Symlink traversal and dangling symlink protection.
    - Delivery mode authorization (git branch / remote PR fail-closed).
    - Quality gate enforcement and patch preservation.
-2. **Security & Isolation Suite (`tests/trackA.test.ts`)** (18 tests):
+2. **Security & Isolation Suite (`tests/trackA.test.ts`)** (19 tests):
    - Regex segment validator rejecting path traversal and dotfile keys.
    - Subprocess sandbox environment stripping & module allowlisting.
    - Timeout escalation (SIGTERM ➔ SIGKILL) on runaway scripts.
