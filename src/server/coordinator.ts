@@ -415,9 +415,11 @@ class CoordinatorEngine {
     let syntaxDetail = 'No code artifact available for syntax compilation';
     let testPassed = false;
     let testDetail = 'Automated unit test suite not found on disk';
+    let verifiedCriteria: string[] = [];
 
     if (artifact) {
       const run = await runArtifactVerification(artifact.code, artifact.testCode);
+      if (run.testsOk) verifiedCriteria = run.criteria;
 
       if (artifact.isLegacyMarkdown && !run.testsOk && !run.syntaxOk) {
         // Legacy deliverables are markdown; their embedded snippet was never a
@@ -441,6 +443,19 @@ class CoordinatorEngine {
         }
       }
     }
+
+    const missingCriteria = (task.subtasks || [])
+      .filter((subtask) => !verifiedCriteria.includes(subtask.id))
+      .map((subtask) => subtask.id);
+    checks.push({
+      rule: 'Acceptance Criteria Test Evidence',
+      passed: (task.subtasks || []).length > 0 && missingCriteria.length === 0,
+      detail: missingCriteria.length > 0
+        ? `Acceptance criteria missing passing test evidence: ${missingCriteria.join(', ')}`
+        : (task.subtasks || []).length > 0
+          ? 'Every acceptance criterion is covered by the passing test suite'
+          : 'No acceptance criteria defined for test evidence verification',
+    });
 
     checks.push({ rule: 'Real Compiler AST Syntax Verification', passed: syntaxPassed, detail: syntaxDetail });
     checks.push({ rule: 'Automated Test Suite & Cryptographic Hash', passed: testPassed, detail: testDetail });

@@ -43,6 +43,47 @@ async function main() {
     ? path.resolve(import.meta.dirname, '../.dupond_artifacts')
     : path.resolve(import.meta.dirname, '../.aegis_artifacts');
 
+  await runTest('final acceptance rejects completed criteria without passing test evidence', async () => {
+    const task = {
+      id: 'acceptance-evidence', key: 'AEG-104', title: 'Evidence coverage',
+      status: 'review', dependencies: [],
+      subtasks: [
+        { id: 'st-10', title: 'Load calculation', completed: true },
+        { id: 'st-11', title: 'Optimizer prompt', completed: true },
+        { id: 'st-12', title: 'Rebalancing', completed: true },
+      ],
+    } as any;
+    assert.strictEqual((await coordinator.verifyTaskQualityGates(task)).passed, true,
+      'fully covered acceptance criteria should pass');
+
+    task.subtasks.push({ id: 'uncovered', title: 'Additional requirement', completed: true });
+    const verdict = await coordinator.verifyTaskQualityGates(task);
+    assert.strictEqual(verdict.passed, false,
+      'checked boxes must not substitute for test evidence');
+    assert.ok(verdict.checks.some(c => !c.passed && c.detail.includes('uncovered')));
+
+    const tasks = coordinator.getState().tasks;
+    const originalTasks = [...tasks];
+    const destination = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-evidence-'));
+    try {
+      tasks.splice(0, tasks.length, task);
+      const transition = await coordinator.transitionTaskStatus(task.id, 'done');
+      assert.strictEqual(transition.success, false);
+      assert.strictEqual(coordinator.getState().tasks[0].status, 'review');
+      const delivery = await handleRepositoryDispatch({
+        action: 'deliver', task,
+        repoConfig: { type: 'local_directory', localPath: destination,
+          targetDirectory: '.', localWriteMode: 'direct_write' },
+      });
+      assert.strictEqual(delivery.status, 400);
+      assert.strictEqual(delivery.body.blocked, true);
+      assert.deepStrictEqual(fs.readdirSync(destination), []);
+    } finally {
+      coordinator.getState().tasks = originalTasks;
+      fs.rmSync(destination, { recursive: true, force: true });
+    }
+  });
+
   // --- 1. PATH CONTAINMENT ---
 
   await runTest('path-segment validator rejects traversal and dotfile-style keys', () => {
