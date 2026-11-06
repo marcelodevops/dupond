@@ -1,0 +1,55 @@
+name: Dupond Continuous Integration
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Build, Lint & Automated Test Suite
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check (TypeScript)
+        run: npm run lint
+
+      - name: Client build (Vite)
+        run: npm run build
+
+      - name: Run Guardrails & Delivery regression suite
+        run: npx tsx tests/guardrails.test.ts
+
+      - name: Run Isolation, Containment, SSRF & Security suite
+        run: npx tsx tests/trackA.test.ts
+
+      - name: Run Database & Transactional Store suite
+        run: npx tsx tests/db.test.ts
+
+      - name: Run Workspace & Sandbox Isolation suite
+        run: npx tsx tests/sandbox.test.ts
+
+      - name: Run Coding Worker Adapter suite
+        run: npx tsx tests/workerAdapter.test.ts
+
+      - name: Run Repair Loop & Authoritative Verification suite
+        run: npx tsx tests/repairLoop.test.ts
+
+      - name: Run GitHub Delivery & PR Reconciliation suite
+        run: npx tsx tests/delivery.test.ts
+
+      - name: Run End-to-End Acceptance Scenarios
+        run: npx tsx tests/e2ePipeline.test.ts
