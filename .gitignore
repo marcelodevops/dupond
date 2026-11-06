@@ -14,3 +14,10 @@ coverage/
 !.env*.example
 !.env*.sample
 !.env*.template
+
+# Temporary worktrees and local database
+.dupond_worktrees/
+data/*.db
+data/*.db-*
+data/.dupond_auth_token
+.qoder/
