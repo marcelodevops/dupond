@@ -271,16 +271,41 @@ class CoordinatorEngine {
       validatedPartial.tasks = validatedPartial.tasks.map((task) => {
         const existing = existingTasks.find((t) => t.id === task.id || t.key === task.key);
 
+        // Detect if acceptance criteria or description changed; invalidate previous evidence
+        if (existing) {
+          const subtasksChanged = JSON.stringify(existing.subtasks) !== JSON.stringify(task.subtasks);
+          const descChanged = existing.description !== task.description;
+          if ((subtasksChanged || descChanged) && task.status === 'done' && existing.status !== 'done') {
+            rejectedDoneTasks.push(task.key);
+            return {
+              ...task,
+              status: 'review' as TaskStatus,
+              lastAgentComment: 'Quality Gate REJECTED: Acceptance criteria or specification modified. Prior verification invalidated.',
+              lastUpdated: 'Just now',
+            };
+          }
+        }
+
         // Check if task is requested to be 'done'
         if (task.status === 'done') {
-          // Enforce everything verifiable without spawning a compiler/test run.
+          // Preflight gate check
           const verification = this.preflightQualityGates(task);
-          if (!verification.passed) {
+          // Authoritative verification required: bulk update cannot mark an unverified task done
+          const hasPassingEvidence = existing?.status === 'done' || (
+            task.deliverables && task.deliverables.length > 0 &&
+            (task.subtasks || []).length > 0 &&
+            task.subtasks.every((s) => s.completed) &&
+            task.lastAgentComment && !task.lastAgentComment.includes('REJECTED')
+          );
+
+          if (!verification.passed || !hasPassingEvidence) {
             rejectedDoneTasks.push(task.key);
-            const failingReasons = verification.checks
-              .filter((c) => !c.passed)
-              .map((c) => `${c.rule}: ${c.detail}`)
-              .join('; ');
+            const failingReasons = !verification.passed
+              ? verification.checks
+                  .filter((c) => !c.passed)
+                  .map((c) => `${c.rule}: ${c.detail}`)
+                  .join('; ')
+              : 'Bulk state update cannot mark task "Done" without verified quality gate evidence.';
 
             // Clamp back to review or existing status
             return {
@@ -318,7 +343,7 @@ class CoordinatorEngine {
     }
 
     this.saveStateToDisk();
-    return { success: true, state: this.state, rejectedDoneTasks };
+    return { success: true, state: this.getStateView(), rejectedDoneTasks };
   }
 
   // Centralized transition method
