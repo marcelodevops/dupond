@@ -30,7 +30,7 @@ async function main() {
   // Create disposable bare repository to safely test push operations without touching remote
   const disposableRemote = path.resolve(process.cwd(), `.dupond_worktrees/disposable-remote-${Date.now()}.git`);
   fs.mkdirSync(disposableRemote, { recursive: true });
-  execFileSync('git', ['init', '--bare'], { cwd: disposableRemote });
+  execFileSync('git', ['init', '--bare', 'main'], { cwd: disposableRemote });
 
   const task = store.createTask({
     key: 'AEG-801',
