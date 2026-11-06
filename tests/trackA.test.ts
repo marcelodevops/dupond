@@ -254,12 +254,24 @@ async function main() {
       () => safeRequest('https://attacker.example/x', { allowedHosts: ['.atlassian.net'] }),
       /not in the allowlist/,
     );
-    // Subdomain of an allowed pattern must be accepted by the allowlist stage
-    // (it then fails later at DNS/connect, which is a different error).
+    // An allowlisted host must pass the gate and fail in a later stage. The
+    // loopback literal keeps that proof offline: the address filter refuses it,
+    // and the allowlist must not be what stopped the request.
     await assert.rejects(
-      () => safeRequest('https://nonexistent-host-for-tracka.atlassian.net/x', { allowedHosts: ['.atlassian.net'] }),
-      (err: any) => !/not in the allowlist/.test(err.message),
+      () => safeRequest('http://127.0.0.1:1/x', { allowedHosts: ['127.0.0.1'] }),
+      (err: any) => err instanceof EgressBlockedError && !/not in the allowlist/.test(err.message),
     );
+    // Subdomain of an allowed pattern must be accepted by the allowlist stage.
+    // What happens after the gate depends on DNS and connectivity, so only the
+    // gate itself is asserted: a public wildcard A-record can even answer 200.
+    try {
+      await safeRequest('https://nonexistent-host-for-tracka.atlassian.net/x', {
+        allowedHosts: ['.atlassian.net'],
+        timeoutMs: 4000,
+      });
+    } catch (err: any) {
+      assert.ok(!/not in the allowlist/.test(err.message), `allowlist gate refused it: ${err.message}`);
+    }
   });
 
   await runTest('redirects are reported, never followed', async () => {
