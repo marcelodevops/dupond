@@ -349,12 +349,13 @@ Navigate to the **"Diagrams & Progress"** tab:
 
 ## 🔒 Security Architecture & Guardrails
 
-Dupond implements strict enterprise-grade security boundaries protecting against RCE, SSRF, directory traversal, credential leakage, and arbitrary state tampering:
+Dupond implements defense-in-depth security boundaries protecting against SSRF, directory traversal, credential leakage, and arbitrary state tampering:
 
-### 1. Child-Process Sandbox Execution (Zero RCE Risk)
-- **Isolated Runner**: Sub-agent code artifacts and deliverable verification scripts run in isolated child processes ([`src/server/artifactRunner.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/artifactRunner.ts)) rather than insecure in-process VM contexts.
-- **Environment Stripping**: Child processes run with an empty `process.env`—parent server credentials, API tokens, and paths are completely invisible.
-- **Module Allowlist & Limits**: Restricted strictly to standard runtime libraries; execution enforces a 128MB memory cap and a strict 5000ms timeout with SIGTERM ➔ SIGKILL escalation.
+### 1. Restricted Execution Sandbox & Workspace Isolation
+- **OS-Level Sandboxing**: Project execution and tests run in restricted environments. On macOS, Seatbelt (`sandbox-exec`) isolates process trees, restricting file writes strictly to the isolated worktree and private temp folders, while explicitly denying access to host credentials (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gemini`, `~/.gnupg`, and `.env` files).
+- **Environment Sanitization**: Worker and child processes run with sanitized environments—ambient host credentials, API tokens, and secrets are completely stripped.
+- **Process Group Termination**: Child processes run in separate process groups (`detached: true`) with hard execution timeouts; runaway processes are cleanly terminated with process-group `SIGKILL`.
+- **Note on Boundaries**: While OS-level sandboxing (Seatbelt/Podman) provides robust containment against accidental modifications and credential access, root-level containerization or microVMs (e.g. Firecracker) are planned for untrusted multi-tenant production hosting.
 
 ### 2. Lexical Path Containment & Traversal Defense
 - **Task Key Ingress Validation**: All incoming task keys are strictly validated against `/^AEG-\d+$/` across all endpoints before touching filesystem operations.
@@ -369,38 +370,51 @@ Dupond implements strict enterprise-grade security boundaries protecting against
 - **Egress Allowlisting**: Jira sync is restricted to `*.atlassian.net` and Slack dispatches require `https://hooks.slack.com/`.
 
 ### 4. Credential Redaction & Authoritative State Governance
-- **Wire Redaction**: Server state returned to clients (`getStateView()`) masks bearer secrets (Jira API tokens, Slack webhooks, repo tokens, custom provider auth headers) with `•` characters.
+- **Wire Redaction**: Server state returned to clients (`getStateView()`) masks bearer secrets (Jira API tokens, Slack webhooks, repo tokens, custom provider auth headers) with `•` characters across all endpoints (including `updateState`).
 - **Round-Trip Preservation**: Re-saving state via `updateState` detects masked placeholders and preserves real server-held secrets without overwriting them.
+- **Authoritative Verification Gate**: Tasks cannot be marked `Done` via bulk updates or client assertions; completion strictly requires passing operator-configured verification commands against the exact commit revision.
 - **Zod Runtime Schema Validation**: All state mutations are validated against strict Zod schemas ([`src/types/schemas.ts`](file:///Users/mac/ops/repos/dupond-agent/src/types/schemas.ts)), eliminating arbitrary object injection or state clobbering.
+
+---
+
+## 🚀 Task-to-PR Operational Pipeline
+
+Dupond provides an end-to-end autonomous flow taking user-defined tasks to verified Pull Requests:
+
+1. **Task & Execution Contracts**: Objective acceptance criteria, base commit, allowed/protected paths, operator-configured verification commands, and attempt budgets persisted in transactional SQLite (`src/server/db/`).
+2. **Pinned Workspace Isolation**: Each run prepares an isolated Git worktree pinned to the recorded base commit (`src/server/workspace/`).
+3. **Real Coding Worker Adapter**: Tool-calling agent (`GeminiCodingWorkerAdapter`) inspects repository files, applies code modifications, and tests changes inside the sandbox (`src/server/worker/`).
+4. **Authoritative Verification**: Runs operator-configured test suites; verifies protected test files were not tampered with (`src/server/verification/`).
+5. **Bounded Repair Loop**: Failed checks capture exact exit codes, stdout, and stderr, feeding actionable evidence back to the worker for up to `maxAttempts` before failing closed.
+6. **GitHub Delivery & Reconciliation**: Enforces operator approval policies, pushes branches, and creates/reconciles GitHub pull requests idempotently without duplicate PRs (`src/server/delivery/`). Never merges automatically.
+7. **Crash-Safe Reconciliation**: On boot, interrupted runs are reconciled honestly and orphaned task locks are reset.
+
+### Implemented Features vs. Planned Work
+- **Implemented**: Transactional SQLite store (`node:sqlite`), Git worktree manager, macOS Seatbelt sandbox executor, Gemini tool-calling coding worker, authoritative verification, bounded repair loop, GitHub delivery with duplicate PR prevention, and 13/13 verified acceptance scenarios.
+- **Planned Work**: MicroVM (Firecracker) isolation for remote Linux workers, multi-tenant RBAC, and automated post-merge deployment tracking.
 
 ---
 
 ## 🧪 Testing & Verification Suite
 
-Dupond includes a unified test suite with 38 automated tests covering security guardrails, sandbox isolation, SSRF prevention, and business logic:
+Dupond includes a comprehensive automated test suite covering security guardrails, sandbox isolation, SSRF prevention, database transactions, worker tool dispatch, repair loops, and end-to-end acceptance scenarios:
 
 ```bash
-# Run all 38 regression tests
+# Run the complete test suite
 npm test
 ```
 
 ### Test Coverage Breakdown:
-1. **Guardrails & Delivery Suite (`tests/guardrails.test.ts`)** (15 tests):
-   - Path containment & prefix traversal rejection.
-   - Symlink traversal and dangling symlink protection.
-   - Delivery mode authorization (git branch / remote PR fail-closed).
-   - Quality gate enforcement and patch preservation.
-2. **Security & Isolation Suite (`tests/trackA.test.ts`)** (19 tests):
-   - Regex segment validator rejecting path traversal and dotfile keys.
-   - Subprocess sandbox environment stripping & module allowlisting.
-   - Timeout escalation (SIGTERM ➔ SIGKILL) on runaway scripts.
-   - SSRF egress validation across IPv4/IPv6 loopback, private IP, and AWS/GCP metadata.
-   - Host allowlists & redirect prevention.
-   - Wire credential masking and round-trip preservation.
-3. **Workload Balancer Suite (`workspace/AEG-104/workloadBalancer.test.ts`)** (4 tests):
-   - Overloaded (>85%) and underloaded (<40%) threshold calculations.
-   - Telemetry prompt formatting for resource optimization.
-   - Redistribution logic verification.
+1. **Guardrails & Delivery Suite (`tests/guardrails.test.ts`)** (15 tests)
+2. **Security & Isolation Suite (`tests/trackA.test.ts`)** (19 tests)
+3. **Security Fixes & State Redaction Suite (`tests/securityFixes.test.ts`)** (4 tests)
+4. **Transactional SQLite TaskStore Suite (`tests/db.test.ts`)** (7 tests)
+5. **Workspace & Sandbox Isolation Suite (`tests/sandbox.test.ts`)** (8 tests)
+6. **Coding Worker Adapter Suite (`tests/workerAdapter.test.ts`)** (3 tests)
+7. **Repair Loop & Authoritative Verification Suite (`tests/repairLoop.test.ts`)** (4 tests)
+8. **GitHub Delivery & PR Reconciliation Suite (`tests/delivery.test.ts`)** (4 tests)
+9. **Full Acceptance Scenario Suite (`tests/e2ePipeline.test.ts`)** (13 tests)
+10. **Workload Balancer Suite (`workspace/AEG-104/workloadBalancer.test.ts`)** (4 tests)
 
 ---
 
