@@ -155,6 +155,25 @@ async function main() {
 
   // --- 2. EXECUTION ISOLATION ---
 
+  await runTest('artifact syntax checks accept piped source and reject malformed implementations', async () => {
+    const valid = await runArtifactVerification(
+      'function answer() { return 42; }\n',
+      "require('assert').strictEqual(answer(), 42);\npassCriterion('piped-source');\n",
+    );
+    assert.strictEqual(valid.syntaxOk, true, valid.detail);
+    assert.strictEqual(valid.testsOk, true, valid.detail);
+    assert.deepStrictEqual(valid.criteria, ['piped-source']);
+
+    const invalid = await runArtifactVerification(
+      'function answer( {\n',
+      "passCriterion('piped-source');\n",
+    );
+    assert.strictEqual(invalid.syntaxOk, false);
+    assert.strictEqual(invalid.testsOk, false);
+    assert.deepStrictEqual(invalid.criteria, []);
+    assert.ok(invalid.detail.startsWith('implementation:'), invalid.detail);
+  });
+
   await runTest('artifact child process inherits no parent environment secrets', async () => {
     process.env.DUPOND_TRACKA_SECRET = 'do-not-leak';
     const run = await runArtifactVerification(
