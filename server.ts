@@ -37,17 +37,12 @@ import { coordinator, isMaskedSecret } from './src/server/coordinator.js';
 import { balanceWorkload, calculateAgentLoad, buildGeminiOptimizerPrompt } from './src/services/workloadBalancer.js';
 import { handleRepositoryDispatch } from './src/server/deliveryHandler.js';
 import { safeRequest, EgressBlockedError } from './src/server/egress.js';
-import { requireAuth, getExpectedToken } from './src/server/auth.js';
+import { requireAuth } from './src/server/auth.js';
 import { taskStore } from './src/server/db/database.js';
 import { defaultGitHubDelivery } from './src/server/delivery/githubDelivery.js';
 import { defaultRepairCoordinator } from './src/server/coordinator/repairCoordinator.js';
 
 app.use(requireAuth);
-
-// Endpoint: Token retrieval for authorized clients
-app.get('/api/auth/token', (_req: Request, res: Response) => {
-  res.json({ token: getExpectedToken() });
-});
 
 /** Jira Cloud only: keeps this endpoint from becoming a token-forwarding proxy. */
 const JIRA_ALLOWED_HOSTS = ['.atlassian.net'];
@@ -739,7 +734,7 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
 // Endpoint: Destination Repository & Delivery Dispatcher
 app.post('/api/integrations/repository/dispatch', async (req: Request, res: Response) => {
   try {
-    const { action = 'verify', repoConfig, task, allowOverwrite = false, runId, isApproved = true } = req.body || {};
+    const { action = 'verify', repoConfig, task, allowOverwrite = false, runId, isApproved = false, approvedBy } = req.body || {};
 
     if (action === 'create_pr' || action === 'deliver') {
       const targetRun = runId
@@ -751,8 +746,8 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
       if (targetRun) {
         const deliveryResult = await defaultGitHubDelivery.dispatchDelivery({
           runId: targetRun.id,
-          isApproved,
-          approvedBy: 'operator',
+          isApproved: isApproved === true,
+          approvedBy: isApproved === true ? (approvedBy || 'operator') : undefined,
           repoUrl: repoConfig?.repoUrl,
           targetBaseBranch: repoConfig?.defaultBranch || 'main',
         });
@@ -770,12 +765,12 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
 // Endpoint: Explicit Pull Request Delivery Dispatcher
 app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
   try {
-    const { runId, isApproved = true, approvedBy = 'operator', repoUrl, targetBaseBranch } = req.body || {};
+    const { runId, isApproved = false, approvedBy, repoUrl, targetBaseBranch } = req.body || {};
     if (!runId) return res.status(400).json({ error: 'runId is required' });
     const result = await defaultGitHubDelivery.dispatchDelivery({
       runId,
-      isApproved,
-      approvedBy,
+      isApproved: isApproved === true,
+      approvedBy: isApproved === true ? (approvedBy || 'operator') : undefined,
       repoUrl,
       targetBaseBranch,
     });

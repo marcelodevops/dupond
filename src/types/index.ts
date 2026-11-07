@@ -12,6 +12,7 @@ export interface SubTask {
   id: string;
   title: string;
   completed: boolean;
+  checkCommand?: string;
 }
 
 export interface Task {
@@ -35,6 +36,16 @@ export interface Task {
   targetBranch?: string;
   pullRequestUrl?: string;
   lastUpdated?: string;
+  targetRepo?: string;
+  baseCommit?: string;
+  allowedPaths?: string[];
+  protectedPaths?: string[];
+  verificationCommands?: any[];
+  acceptanceCriteria?: Array<{ id: string; title: string; completed?: boolean; checkCommand?: string }>;
+  requireApproval?: boolean;
+  workerConfig?: { provider: string; model: string };
+  maxAttempts?: number;
+  timeoutSeconds?: number;
 }
 
 export interface Epic {

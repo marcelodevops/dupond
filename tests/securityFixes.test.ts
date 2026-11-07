@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { coordinator, isMaskedSecret } from '../src/server/coordinator.ts';
-import { validateAuthToken, getExpectedToken } from '../src/server/auth.ts';
+import { validateAuthToken, getExpectedToken, requireAuth } from '../src/server/auth.ts';
 
 async function main() {
   console.log('=== RUNNING SECURITY & CORRECTNESS REGRESSION TESTS ===\n');
@@ -90,6 +90,33 @@ async function main() {
   assert.strictEqual(validateAuthToken(''), false, 'Empty token rejected');
   assert.strictEqual(validateAuthToken(undefined), false, 'Undefined token rejected');
   console.log('✔ [PASS] Application authentication token validation enforced correctly');
+
+  // Test 5: requireAuth blocks unauthenticated requests to API endpoints with 401
+  let authDenied = false;
+  const mockReq: any = {
+    method: 'GET',
+    path: '/api/orchestrate/state',
+    header: () => undefined,
+  };
+  const mockRes: any = {
+    status: (code: number) => {
+      if (code === 401) authDenied = true;
+      return { json: () => {} };
+    },
+  };
+  requireAuth(mockReq, mockRes, () => {});
+  assert.strictEqual(authDenied, true, 'requireAuth must deny unauthenticated API requests with 401');
+
+  // Test 6: Authenticated request with Bearer token is accepted
+  let nextCalled = false;
+  const authedReq: any = {
+    method: 'GET',
+    path: '/api/orchestrate/state',
+    header: (name: string) => (name.toLowerCase() === 'authorization' ? `Bearer ${token}` : undefined),
+  };
+  requireAuth(authedReq, mockRes, () => { nextCalled = true; });
+  assert.strictEqual(nextCalled, true, 'requireAuth must allow valid Bearer token');
+  console.log('✔ [PASS] requireAuth middleware enforces 401 on unauthorized API requests');
 
   // Clean up test task
   coordinator.updateState({

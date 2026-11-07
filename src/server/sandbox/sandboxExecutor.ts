@@ -30,6 +30,7 @@ export class SandboxExecutor {
   private hasPodman: boolean;
   private hasDocker: boolean;
   private activeProcesses: Map<string, ChildProcess> = new Map();
+  private activeContainers: Map<string, { containerName: string; runtime: string }> = new Map();
 
   constructor() {
     this.isDarwin = os.platform() === 'darwin';
@@ -70,7 +71,31 @@ export class SandboxExecutor {
     };
   }
 
+  public stopAndConfirmContainerRemoval(runtime: string, containerName: string): boolean {
+    try {
+      // 1. Explicitly stop running container
+      spawnSync(runtime, ['stop', '-t', '1', containerName], { stdio: 'pipe', encoding: 'utf-8' });
+      // 2. Force-remove container
+      spawnSync(runtime, ['rm', '-f', containerName], { stdio: 'pipe', encoding: 'utf-8' });
+      // 3. Confirm removal via inspect
+      const inspectRes = spawnSync(runtime, ['inspect', containerName], { stdio: 'pipe', encoding: 'utf-8' });
+      return inspectRes.status !== 0;
+    } catch {
+      return false;
+    }
+  }
+
+  public getActiveContainer(runId: string): { containerName: string; runtime: string } | undefined {
+    return this.activeContainers.get(runId);
+  }
+
   public killRun(runId: string): void {
+    const container = this.activeContainers.get(runId);
+    if (container) {
+      this.stopAndConfirmContainerRemoval(container.runtime, container.containerName);
+      this.activeContainers.delete(runId);
+    }
+
     const child = this.activeProcesses.get(runId);
     if (child) {
       this.killProcessTree(child);
@@ -218,12 +243,22 @@ ${networkRule}
 
     const { gitDir, gitCommonDir } = this.resolveGitDirs(realWorktree);
 
+    let containerName: string | undefined;
+
     if (this.isDarwin) {
       const profile = this.generateSeatbeltProfile(realWorktree, realTmp, options.allowNetwork ?? false, gitDir, gitCommonDir);
       execCmd = 'sandbox-exec';
       execArgs = ['-p', profile, '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim()];
     } else if (this.hasPodman || this.hasDocker) {
       execCmd = this.hasPodman ? 'podman' : 'docker';
+      containerName = `dupond-${options.runId ? options.runId.replace(/[^a-zA-Z0-9_.-]/g, '-') : Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      if (options.runId) {
+        this.activeContainers.set(options.runId, {
+          containerName,
+          runtime: execCmd,
+        });
+      }
+
       const containerMounts = [
         '-v', `${realWorktree}:${realWorktree}:rw`,
         '-v', `${realTmp}:${realTmp}:rw`,
@@ -237,6 +272,7 @@ ${networkRule}
 
       execArgs = [
         'run', '--rm',
+        '--name', containerName,
         '--network', options.allowNetwork ? 'bridge' : 'none',
         ...containerMounts,
         '-w', realWorktree,
@@ -269,6 +305,10 @@ ${networkRule}
 
       const onAbort = () => {
         killed = true;
+        if (containerName && (this.hasPodman || this.hasDocker)) {
+          this.stopAndConfirmContainerRemoval(execCmd, containerName);
+          if (options.runId) this.activeContainers.delete(options.runId);
+        }
         this.killProcessTree(child);
       };
 
@@ -287,6 +327,10 @@ ${networkRule}
       const timer = setTimeout(() => {
         timedOut = true;
         killed = true;
+        if (containerName && (this.hasPodman || this.hasDocker)) {
+          this.stopAndConfirmContainerRemoval(execCmd, containerName);
+          if (options.runId) this.activeContainers.delete(options.runId);
+        }
         this.killProcessTree(child);
       }, timeoutMs);
 
@@ -297,6 +341,9 @@ ${networkRule}
         }
         if (options.runId) {
           this.activeProcesses.delete(options.runId);
+          if (containerName) {
+            this.activeContainers.delete(options.runId);
+          }
         }
         try {
           fs.rmSync(sandboxTmp, { recursive: true, force: true });
@@ -323,6 +370,9 @@ ${networkRule}
         }
         if (options.runId) {
           this.activeProcesses.delete(options.runId);
+          if (containerName) {
+            this.activeContainers.delete(options.runId);
+          }
         }
         try {
           fs.rmSync(sandboxTmp, { recursive: true, force: true });

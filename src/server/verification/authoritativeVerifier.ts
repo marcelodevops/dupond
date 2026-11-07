@@ -39,9 +39,9 @@ export class AuthoritativeVerifier {
   public async verify(params: {
     worktreePath: string;
     baseCommit: string;
-    verificationCommands: string[];
+    verificationCommands: Array<string | { command: string; criteriaIds?: string[] }>;
     protectedPaths?: string[];
-    acceptanceCriteria?: Array<{ id: string; title: string }>;
+    acceptanceCriteria?: Array<{ id: string; title: string; checkCommand?: string }>;
     runId?: string;
     abortSignal?: AbortSignal;
   }): Promise<AuthoritativeVerificationResult> {
@@ -180,6 +180,8 @@ export class AuthoritativeVerifier {
             worktreePath: realWorktree,
             command: criterion.checkCommand,
             timeoutMs: 60000,
+            runId: params.runId,
+            abortSignal: params.abortSignal,
           });
           const passed = res.exitCode === 0;
           checks.push({
@@ -198,20 +200,19 @@ export class AuthoritativeVerifier {
               firstFailingReason = `Acceptance criterion "${criterion.title}" check failed with exit code ${res.exitCode}`;
             }
           }
-        } else if (allPassed) {
-          // If all commands in the suite passed, map general suite criteria
-          criteriaVerifiedSet.add(criterion.id);
         }
       }
     }
 
     const criteriaVerified = Array.from(criteriaVerifiedSet);
     const requiredCriteria = (params.acceptanceCriteria || []).map((c) => c.id);
-    const hasUnmetCriteria = requiredCriteria.some((id) => !criteriaVerifiedSet.has(id));
+    const unmetCriteria = requiredCriteria.filter((id) => !criteriaVerifiedSet.has(id));
 
-    if (hasUnmetCriteria && allPassed) {
+    if (unmetCriteria.length > 0) {
       allPassed = false;
-      firstFailingReason = `Verification incomplete: Not all acceptance criteria were verified by passing checks.`;
+      if (!firstFailingReason) {
+        firstFailingReason = `Verification incomplete: Acceptance criteria [${unmetCriteria.join(', ')}] have no passing check evidence.`;
+      }
     }
 
     return {
