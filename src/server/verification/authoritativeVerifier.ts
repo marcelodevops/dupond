@@ -28,6 +28,10 @@ export class AuthoritativeVerifier {
     this.sandbox = sandbox;
   }
 
+  public getSandbox(): SandboxExecutor {
+    return this.sandbox;
+  }
+
   /**
    * Authoritatively verifies changes in a worktree against operator-configured checks.
    * Does NOT rely on worker declarations or passCriterion calls.
@@ -38,6 +42,8 @@ export class AuthoritativeVerifier {
     verificationCommands: string[];
     protectedPaths?: string[];
     acceptanceCriteria?: Array<{ id: string; title: string }>;
+    runId?: string;
+    abortSignal?: AbortSignal;
   }): Promise<AuthoritativeVerificationResult> {
     const startTime = Date.now();
     const realWorktree = fs.realpathSync(params.worktreePath);
@@ -97,7 +103,7 @@ export class AuthoritativeVerifier {
       }
     }
 
-    // 3. Run Operator-Configured Verification Commands
+    // 3. Run Operator-Configured Verification Commands & Map to Criteria
     const commands = params.verificationCommands.length > 0
       ? params.verificationCommands
       : ['npm test'];
@@ -105,17 +111,48 @@ export class AuthoritativeVerifier {
     const checks: AuthoritativeCheckResult[] = [];
     let allPassed = true;
     let firstFailingReason: string | undefined;
+    const criteriaVerifiedSet = new Set<string>();
 
-    for (const cmd of commands) {
+    for (const cmdItem of commands) {
+      let cmdString = typeof cmdItem === 'string' ? cmdItem : (cmdItem as any).command;
+      let mappedCriteria: string[] = [];
+
+      try {
+        if (typeof cmdItem === 'string' && cmdItem.startsWith('{')) {
+          const parsed = JSON.parse(cmdItem);
+          cmdString = parsed.command;
+          mappedCriteria = parsed.criteriaIds || [];
+        } else if (typeof cmdItem === 'object' && (cmdItem as any).command) {
+          cmdString = (cmdItem as any).command;
+          mappedCriteria = (cmdItem as any).criteriaIds || [];
+        }
+      } catch {
+        // use plain string
+      }
+
+      if (params.abortSignal?.aborted) {
+        checks.push({
+          command: cmdString,
+          exitCode: 130,
+          stdout: '',
+          stderr: 'Verification aborted by user',
+          passed: false,
+          durationMs: 0,
+        });
+        break;
+      }
+
       const res = await this.sandbox.execute({
         worktreePath: realWorktree,
-        command: cmd,
+        command: cmdString,
         timeoutMs: 60000,
+        runId: params.runId,
+        abortSignal: params.abortSignal,
       });
 
       const passed = res.exitCode === 0;
       checks.push({
-        command: cmd,
+        command: cmdString,
         exitCode: res.exitCode,
         stdout: res.stdout,
         stderr: res.stderr,
@@ -123,18 +160,59 @@ export class AuthoritativeVerifier {
         durationMs: res.durationMs,
       });
 
-      if (!passed) {
+      if (passed) {
+        if (mappedCriteria.length > 0) {
+          mappedCriteria.forEach((cid) => criteriaVerifiedSet.add(cid));
+        }
+      } else {
         allPassed = false;
         if (!firstFailingReason) {
-          firstFailingReason = `Command "${cmd}" exited with code ${res.exitCode}: ${res.stderr || res.stdout || 'Check failed'}`;
+          firstFailingReason = `Command "${cmdString}" exited with code ${res.exitCode}: ${res.stderr || res.stdout || 'Check failed'}`;
         }
       }
     }
 
-    // 4. Map verified criteria strictly upon passing all checks
-    const criteriaVerified = allPassed && params.acceptanceCriteria
-      ? params.acceptanceCriteria.map((c) => c.id)
-      : [];
+    // Also check criteria with individual checkCommand definitions
+    if (params.acceptanceCriteria) {
+      for (const criterion of params.acceptanceCriteria as any[]) {
+        if (criterion.checkCommand) {
+          const res = await this.sandbox.execute({
+            worktreePath: realWorktree,
+            command: criterion.checkCommand,
+            timeoutMs: 60000,
+          });
+          const passed = res.exitCode === 0;
+          checks.push({
+            command: criterion.checkCommand,
+            exitCode: res.exitCode,
+            stdout: res.stdout,
+            stderr: res.stderr,
+            passed,
+            durationMs: res.durationMs,
+          });
+          if (passed) {
+            criteriaVerifiedSet.add(criterion.id);
+          } else {
+            allPassed = false;
+            if (!firstFailingReason) {
+              firstFailingReason = `Acceptance criterion "${criterion.title}" check failed with exit code ${res.exitCode}`;
+            }
+          }
+        } else if (allPassed) {
+          // If all commands in the suite passed, map general suite criteria
+          criteriaVerifiedSet.add(criterion.id);
+        }
+      }
+    }
+
+    const criteriaVerified = Array.from(criteriaVerifiedSet);
+    const requiredCriteria = (params.acceptanceCriteria || []).map((c) => c.id);
+    const hasUnmetCriteria = requiredCriteria.some((id) => !criteriaVerifiedSet.has(id));
+
+    if (hasUnmetCriteria && allPassed) {
+      allPassed = false;
+      firstFailingReason = `Verification incomplete: Not all acceptance criteria were verified by passing checks.`;
+    }
 
     return {
       passed: allPassed,

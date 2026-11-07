@@ -87,6 +87,28 @@ export class GitHubDeliveryService {
       encoding: 'utf-8',
     }).trim();
 
+    // Check that verified revision strictly matches delivered commit revision
+    if (verification.revisionSha !== deliveredCommit) {
+      return {
+        success: false,
+        status: 409,
+        blocked: true,
+        error: `Delivery blocked: Stale verification evidence. Latest verified revision (${verification.revisionSha}) does not match current commit to deliver (${deliveredCommit}). Re-verification required.`,
+      };
+    }
+
+    // Check that all acceptance criteria have been verified
+    const requiredCriteria = (task.acceptanceCriteria || []).map((c) => c.id);
+    const unverifiedCriteria = requiredCriteria.filter((cid) => !(verification.criteriaVerified || []).includes(cid));
+    if (unverifiedCriteria.length > 0) {
+      return {
+        success: false,
+        status: 400,
+        blocked: true,
+        error: `Delivery blocked: Acceptance criteria [${unverifiedCriteria.join(', ')}] have not been verified for commit ${deliveredCommit}.`,
+      };
+    }
+
     // 4. Base Branch Drift Check
     const baseBranch = options.targetBaseBranch || 'main';
     try {
@@ -97,10 +119,19 @@ export class GitHubDeliveryService {
         currentBaseSha = execFileSync('git', ['rev-parse', baseBranch], {
           cwd: rootRepo,
           encoding: 'utf-8',
+          stdio: 'pipe',
         }).trim();
       } catch {
-        // if local branch not found, try origin/baseBranch or fall back to run.baseCommit
-        currentBaseSha = run.baseCommit;
+        try {
+          currentBaseSha = execFileSync('git', ['rev-parse', `origin/${baseBranch}`], {
+            cwd: rootRepo,
+            encoding: 'utf-8',
+            stdio: 'pipe',
+          }).trim();
+        } catch {
+          // if local or remote branch not found, fall back to run.baseCommit
+          currentBaseSha = run.baseCommit;
+        }
       }
 
       if (currentBaseSha && currentBaseSha !== run.baseCommit) {

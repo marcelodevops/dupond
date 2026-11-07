@@ -35,6 +35,209 @@ export class GeminiCodingWorkerAdapter implements CodingWorkerAdapter {
     return { available: true };
   }
 
+  public resolveSafePath(
+    realWorktree: string,
+    relPath: string,
+    context: { allowedPaths?: string[]; protectedPaths?: string[] }
+  ): { fullPath: string; isSafe: boolean; isProtected: boolean; isAllowed: boolean; error?: string } {
+    const normalized = path.normalize(relPath).replace(/^(\.\.(\/|\\|$))+/, '');
+    const fullPath = path.resolve(realWorktree, normalized);
+    
+    // Lexical check
+    if (!fullPath.startsWith(realWorktree + path.sep) && fullPath !== realWorktree) {
+      return { fullPath, isSafe: false, isProtected: false, isAllowed: false, error: 'Path traversal: lexical escape' };
+    }
+
+    // Realpath ancestor verification: ensure no intermediate symlink escapes worktree
+    let currentCheck = fullPath;
+    while (!fs.existsSync(currentCheck) && currentCheck !== path.dirname(currentCheck)) {
+      currentCheck = path.dirname(currentCheck);
+    }
+
+    if (fs.existsSync(currentCheck)) {
+      try {
+        const realAncestor = fs.realpathSync(currentCheck);
+        if (!realAncestor.startsWith(realWorktree + path.sep) && realAncestor !== realWorktree) {
+          return { fullPath, isSafe: false, isProtected: false, isAllowed: false, error: 'Symlink traversal: intermediate directory escapes workspace' };
+        }
+      } catch (e: any) {
+        return { fullPath, isSafe: false, isProtected: false, isAllowed: false, error: `Realpath resolution failed: ${e.message}` };
+      }
+    }
+
+    // If target file itself exists, check realpath
+    if (fs.existsSync(fullPath)) {
+      try {
+        const realTarget = fs.realpathSync(fullPath);
+        if (!realTarget.startsWith(realWorktree + path.sep) && realTarget !== realWorktree) {
+          return { fullPath, isSafe: false, isProtected: false, isAllowed: false, error: 'Symlink escape: target file points outside workspace' };
+        }
+      } catch (e: any) {
+        return { fullPath, isSafe: false, isProtected: false, isAllowed: false, error: `Realpath failed: ${e.message}` };
+      }
+    }
+
+    // Check protected paths
+    const relToWorktree = path.relative(realWorktree, fullPath);
+    const isProtected = (context.protectedPaths || []).some((pattern) => {
+      const clean = pattern.replace(/\*\*?$/, '');
+      return relToWorktree.startsWith(clean) || relToWorktree === clean;
+    }) || relToWorktree.startsWith('.git') || relToWorktree === '.git';
+
+    // Check allowed paths
+    const isAllowed = (!context.allowedPaths || context.allowedPaths.length === 0) ||
+      context.allowedPaths.some((pattern) => {
+        if (pattern === '*' || pattern === '**') return true;
+        const clean = pattern.replace(/\*\*?$/, '');
+        return relToWorktree.startsWith(clean) || relToWorktree === clean;
+      });
+
+    return {
+      fullPath,
+      isSafe: true,
+      isProtected,
+      isAllowed,
+    };
+  }
+
+  public async executeTool(
+    context: WorkerExecutionContext,
+    name: string,
+    args: Record<string, any>,
+    log: (msg: string) => void = () => {}
+  ): Promise<any> {
+    const realWorktree = fs.realpathSync(context.worktreePath);
+    log(`Tool call invoked: ${name}(${JSON.stringify(args)})`);
+
+    if (name === 'list_files') {
+      const targetDir = args.directory ? this.resolveSafePath(realWorktree, args.directory, context).fullPath : realWorktree;
+      if (!targetDir.startsWith(realWorktree) || !fs.existsSync(targetDir)) {
+        return { error: `Directory not found or escapes workspace: ${args.directory}` };
+      }
+      const entries = fs.readdirSync(targetDir, { withFileTypes: true })
+        .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
+        .map((e) => ({ name: e.name, isDirectory: e.isDirectory() }));
+      return { directory: path.relative(realWorktree, targetDir) || '.', entries };
+    }
+
+    if (name === 'read_file') {
+      const check = this.resolveSafePath(realWorktree, args.filePath, context);
+      if (!check.isSafe) {
+        return { error: check.error || `File access blocked: ${args.filePath}` };
+      }
+      if (!fs.existsSync(check.fullPath)) {
+        return { error: `File not found: ${args.filePath}` };
+      }
+      try {
+        const content = fs.readFileSync(check.fullPath, 'utf-8');
+        return { filePath: args.filePath, content };
+      } catch (err: any) {
+        return { error: `Failed to read file: ${err.message}` };
+      }
+    }
+
+    if (name === 'write_file') {
+      const check = this.resolveSafePath(realWorktree, args.filePath, context);
+      if (!check.isSafe) {
+        return { error: check.error || `Path traversal rejected: ${args.filePath}` };
+      }
+      if (check.isProtected) {
+        return { error: `Write rejected: ${args.filePath} is a protected path (e.g. test criteria or git metadata) and cannot be modified by the worker.` };
+      }
+      if (!check.isAllowed) {
+        return { error: `Write rejected: ${args.filePath} is outside the allowed change scope for this task.` };
+      }
+      try {
+        fs.mkdirSync(path.dirname(check.fullPath), { recursive: true });
+        // Use O_NOFOLLOW to prevent following any symlink during file writing
+        let fd: number;
+        try {
+          fd = fs.openSync(
+            check.fullPath,
+            fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW
+          );
+        } catch (openErr: any) {
+          if (openErr.code === 'ELOOP' || openErr.code === 'SYMLINK_LOOP') {
+            return { error: `Write blocked: ${args.filePath} is a symlink. Writing to symlinks is forbidden.` };
+          }
+          throw openErr;
+        }
+        fs.writeFileSync(fd, args.content, 'utf-8');
+        fs.closeSync(fd);
+        log(`File written successfully: ${args.filePath} (${Buffer.byteLength(args.content, 'utf-8')} bytes)`);
+        return { filePath: args.filePath, written: true, bytes: Buffer.byteLength(args.content, 'utf-8') };
+      } catch (err: any) {
+        return { error: `Failed to write file: ${err.message}` };
+      }
+    }
+
+    if (name === 'run_permitted_command') {
+      const cmd = args.command;
+      // Permitted commands: testing, compilation, linting, git diff
+      const allowedBinaries = ['npm', 'npx', 'git', 'node', 'tsc', 'echo', 'ls', 'cat'];
+      const firstToken = cmd.trim().split(/\s+/)[0];
+      if (!allowedBinaries.includes(firstToken)) {
+        return { error: `Command "${firstToken}" is not in the permitted sandbox command allowlist (${allowedBinaries.join(', ')}).` };
+      }
+
+      const res = await this.sandbox.execute({
+        worktreePath: realWorktree,
+        command: cmd,
+        timeoutMs: args.timeoutMs || 30000,
+        runId: context.runId,
+        abortSignal: context.abortSignal,
+      });
+
+      // Independent protected paths enforcement: verify command did not tamper with protected paths
+      try {
+        const changedFiles = execFileSync('git', ['status', '--porcelain'], {
+          cwd: realWorktree,
+          encoding: 'utf-8',
+        })
+          .split('\n')
+          .map((line) => line.slice(3).trim())
+          .filter(Boolean);
+
+        for (const changed of changedFiles) {
+          const isProtected = (context.protectedPaths || []).some((p) => {
+            const clean = p.replace(/\*\*?$/, '');
+            return changed.startsWith(clean) || changed === clean;
+          }) || changed.startsWith('.git');
+
+          if (isProtected) {
+            // Rollback the protected file modification
+            try {
+              execFileSync('git', ['checkout', 'HEAD', '--', changed], { cwd: realWorktree, stdio: 'pipe' });
+            } catch {
+              // if untracked, remove
+              fs.rmSync(path.resolve(realWorktree, changed), { force: true, recursive: true });
+            }
+            return {
+              command: cmd,
+              exitCode: 1,
+              stdout: res.stdout,
+              stderr: `Integrity violation: Command modified protected path "${changed}". Modifications were automatically rolled back.`,
+              durationMs: res.durationMs,
+            };
+          }
+        }
+      } catch (gitErr: any) {
+        // ignore status probe error
+      }
+
+      log(`Command "${cmd}" finished with exit code ${res.exitCode}`);
+      return {
+        command: cmd,
+        exitCode: res.exitCode,
+        stdout: res.stdout.slice(0, 4000), // bounded size
+        stderr: res.stderr.slice(0, 4000),
+        durationMs: res.durationMs,
+      };
+    }
+
+    return { error: `Unknown tool: ${name}` };
+  }
+
   public async execute(context: WorkerExecutionContext): Promise<WorkerExecutionResult> {
     const avail = await this.isAvailable();
     if (!avail.available) {
@@ -59,111 +262,8 @@ export class GeminiCodingWorkerAdapter implements CodingWorkerAdapter {
     });
 
     const realWorktree = fs.realpathSync(context.worktreePath);
-
-    // Helper: validate and resolve safe paths
-    const resolveSafePath = (relPath: string): { fullPath: string; isSafe: boolean; isProtected: boolean; isAllowed: boolean } => {
-      const normalized = path.normalize(relPath).replace(/^(\.\.(\/|\\|$))+/, '');
-      const fullPath = path.resolve(realWorktree, normalized);
-      const isContained = fullPath.startsWith(realWorktree);
-
-      // Check protected paths
-      const relToWorktree = path.relative(realWorktree, fullPath);
-      const isProtected = (context.protectedPaths || []).some((pattern) => {
-        const clean = pattern.replace(/\*\*?$/, '');
-        return relToWorktree.startsWith(clean) || relToWorktree === clean;
-      }) || relToWorktree.startsWith('.git') || relToWorktree === '.git';
-
-      // Check allowed paths
-      const isAllowed = (!context.allowedPaths || context.allowedPaths.length === 0) ||
-        context.allowedPaths.some((pattern) => {
-          if (pattern === '*' || pattern === '**') return true;
-          const clean = pattern.replace(/\*\*?$/, '');
-          return relToWorktree.startsWith(clean) || relToWorktree === clean;
-        });
-
-      return {
-        fullPath,
-        isSafe: isContained,
-        isProtected,
-        isAllowed,
-      };
-    };
-
-    // Tool Implementations
-    const handleToolCall = async (name: string, args: Record<string, any>): Promise<any> => {
-      log(`Tool call invoked: ${name}(${JSON.stringify(args)})`);
-
-      if (name === 'list_files') {
-        const targetDir = args.directory ? resolveSafePath(args.directory).fullPath : realWorktree;
-        if (!targetDir.startsWith(realWorktree) || !fs.existsSync(targetDir)) {
-          return { error: `Directory not found or escapes workspace: ${args.directory}` };
-        }
-        const entries = fs.readdirSync(targetDir, { withFileTypes: true })
-          .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
-          .map((e) => ({ name: e.name, isDirectory: e.isDirectory() }));
-        return { directory: path.relative(realWorktree, targetDir) || '.', entries };
-      }
-
-      if (name === 'read_file') {
-        const { fullPath, isSafe } = resolveSafePath(args.filePath);
-        if (!isSafe || !fs.existsSync(fullPath)) {
-          return { error: `File not found or outside workspace: ${args.filePath}` };
-        }
-        try {
-          const content = fs.readFileSync(fullPath, 'utf-8');
-          return { filePath: args.filePath, content };
-        } catch (err: any) {
-          return { error: `Failed to read file: ${err.message}` };
-        }
-      }
-
-      if (name === 'write_file') {
-        const { fullPath, isSafe, isProtected, isAllowed } = resolveSafePath(args.filePath);
-        if (!isSafe) {
-          return { error: `Path traversal rejected: ${args.filePath}` };
-        }
-        if (isProtected) {
-          return { error: `Write rejected: ${args.filePath} is a protected path (e.g. test criteria or git metadata) and cannot be modified by the worker.` };
-        }
-        if (!isAllowed) {
-          return { error: `Write rejected: ${args.filePath} is outside the allowed change scope for this task.` };
-        }
-        try {
-          fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-          fs.writeFileSync(fullPath, args.content, 'utf-8');
-          log(`File written successfully: ${args.filePath} (${Buffer.byteLength(args.content, 'utf-8')} bytes)`);
-          return { filePath: args.filePath, written: true, bytes: Buffer.byteLength(args.content, 'utf-8') };
-        } catch (err: any) {
-          return { error: `Failed to write file: ${err.message}` };
-        }
-      }
-
-      if (name === 'run_permitted_command') {
-        const cmd = args.command;
-        // Permitted commands: testing, compilation, linting, git diff
-        const allowedBinaries = ['npm', 'npx', 'git', 'node', 'tsc', 'echo', 'ls', 'cat'];
-        const firstToken = cmd.trim().split(/\s+/)[0];
-        if (!allowedBinaries.includes(firstToken)) {
-          return { error: `Command "${firstToken}" is not in the permitted sandbox command allowlist (${allowedBinaries.join(', ')}).` };
-        }
-
-        const res = await this.sandbox.execute({
-          worktreePath: realWorktree,
-          command: cmd,
-          timeoutMs: args.timeoutMs || 30000,
-        });
-
-        log(`Command "${cmd}" finished with exit code ${res.exitCode}`);
-        return {
-          command: cmd,
-          exitCode: res.exitCode,
-          stdout: res.stdout.slice(0, 4000), // bounded size
-          stderr: res.stderr.slice(0, 4000),
-          durationMs: res.durationMs,
-        };
-      }
-
-      return { error: `Unknown tool: ${name}` };
+    const handleToolCall = async (name: string, args: Record<string, any>) => {
+      return this.executeTool(context, name, args, log);
     };
 
     // Tool declarations for Gemini
