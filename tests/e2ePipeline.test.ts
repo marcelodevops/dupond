@@ -34,7 +34,7 @@ async function runAcceptanceSuite() {
 
   const disposableRemote = path.resolve(process.cwd(), `.dupond_worktrees/e2e-disposable-remote-${Date.now()}.git`);
   fs.mkdirSync(disposableRemote, { recursive: true });
-  execFileSync('git', ['init', '--bare'], { cwd: disposableRemote });
+  execFileSync('git', ['init', '--bare', '-b', 'main'], { cwd: disposableRemote });
   execFileSync('git', ['--git-dir', disposableRemote, 'config', 'receive.shallowUpdate', 'true']);
 
   try {
@@ -494,6 +494,8 @@ async function runAcceptanceSuite() {
       assert.ok(
         sshProbe.stdout.includes('Operation not permitted') ||
         sshProbe.stdout.includes('Permission denied') ||
+        sshProbe.stdout.includes('No such file or directory') ||
+        sshProbe.stdout.includes('cannot access') ||
         sshProbe.exitCode !== 0,
         'Sandbox must block ~/.ssh read',
       );

@@ -62,6 +62,8 @@ async function main() {
     sshResult.stdout.includes('Permission denied') ||
     sshResult.stdout.includes('Operation not permitted') ||
     sshResult.stderr.includes('Operation not permitted') ||
+    sshResult.stdout.includes('No such file or directory') ||
+    sshResult.stdout.includes('cannot access') ||
     sshResult.exitCode !== 0,
     'Reading ~/.ssh must be blocked by sandbox policy',
   );

@@ -119,10 +119,19 @@ export class GitHubDeliveryService {
         currentBaseSha = execFileSync('git', ['rev-parse', baseBranch], {
           cwd: rootRepo,
           encoding: 'utf-8',
+          stdio: 'pipe',
         }).trim();
       } catch {
-        // if local branch not found, try origin/baseBranch or fall back to run.baseCommit
-        currentBaseSha = run.baseCommit;
+        try {
+          currentBaseSha = execFileSync('git', ['rev-parse', `origin/${baseBranch}`], {
+            cwd: rootRepo,
+            encoding: 'utf-8',
+            stdio: 'pipe',
+          }).trim();
+        } catch {
+          // if local or remote branch not found, fall back to run.baseCommit
+          currentBaseSha = run.baseCommit;
+        }
       }
 
       if (currentBaseSha && currentBaseSha !== run.baseCommit) {
