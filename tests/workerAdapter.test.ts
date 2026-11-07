@@ -35,7 +35,11 @@ async function main() {
     const protectedFile = path.resolve(worktree.worktreePath, 'protected.test.js');
     fs.writeFileSync(protectedFile, '// original protected test content\n');
     execFileSync('git', ['add', 'protected.test.js'], { cwd: worktree.worktreePath });
-    execFileSync('git', ['commit', '-m', 'chore: add protected test'], { cwd: worktree.worktreePath });
+    execFileSync('git', [
+      '-c', 'user.name=Dupond Test',
+      '-c', 'user.email=test@example.com',
+      'commit', '-m', 'chore: add protected test',
+    ], { cwd: worktree.worktreePath });
 
     const testContext = {
       taskId: 'test-1',
