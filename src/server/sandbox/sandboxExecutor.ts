@@ -242,7 +242,7 @@ ${networkRule}
         '-w', realWorktree,
         '--env', 'NODE_ENV=test',
         '--env', 'CI=true',
-        'node:22-alpine',
+        'node:22-bookworm',
         '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim(),
       ];
     } else {
