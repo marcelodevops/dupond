@@ -8,7 +8,6 @@ import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
 import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
 import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.ts';
 import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.ts';
-import { Coordinator } from '../src/server/coordinator.ts';
 import { CodingWorkerAdapter } from '../src/server/worker/types.ts';
 
 async function main() {
