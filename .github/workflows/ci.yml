@@ -39,6 +39,12 @@ jobs:
       - name: Client build (Vite)
         run: npm run build
 
+      - name: Configure Git identity for test commits
+        run: |
+          git config --global user.name "Dupond Test"
+          git config --global user.email "test@example.com"
+          git config --global commit.gpgsign false
+
       - name: Run Guardrails & Delivery regression suite
         run: npx tsx tests/guardrails.test.ts
 
