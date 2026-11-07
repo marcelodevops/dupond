@@ -70,7 +70,12 @@ async function main() {
     verificationCommands: [
       `node -e "const { add } = require('./mathModule.cjs'); if (add(2, 3) !== 5) process.exit(1); console.log('Assertion verified: 2+3=5');"`,
     ],
-    acceptanceCriteria: [{ id: 'c-add', title: '2+3=5', completed: false }],
+    acceptanceCriteria: [{
+      id: 'c-add',
+      title: '2+3=5',
+      completed: false,
+      checkCommand: `node -e "const { add } = require('./mathModule.cjs'); if (add(2, 3) !== 5) process.exit(1); console.log('Assertion verified: 2+3=5');"`,
+    }],
     workerConfig: { provider: 'test', model: 'test' },
     maxAttempts: 3,
     timeoutSeconds: 60,
@@ -131,7 +136,12 @@ async function main() {
     verificationCommands: [
       `node -e "const { add } = require('./mathModule.cjs'); if (add(2, 3) !== 5) process.exit(1);"`
     ],
-    acceptanceCriteria: [{ id: 'c-add', title: '2+3=5', completed: false }],
+    acceptanceCriteria: [{
+      id: 'c-add',
+      title: '2+3=5',
+      completed: false,
+      checkCommand: `node -e "const { add } = require('./mathModule.cjs'); if (add(2, 3) !== 5) process.exit(1);"`
+    }],
     workerConfig: { provider: 'test', model: 'test' },
     maxAttempts: 2, // 2 retries
     timeoutSeconds: 30,
@@ -171,7 +181,7 @@ async function main() {
     allowedPaths: ['src/**'],
     protectedPaths: [],
     verificationCommands: ['echo "independent check passed"'],
-    acceptanceCriteria: [{ id: 'c3', title: 'Pass', completed: false }],
+    acceptanceCriteria: [{ id: 'c3', title: 'Pass', completed: false, checkCommand: 'echo "independent check passed"' }],
     workerConfig: { provider: 'test', model: 'test' },
     maxAttempts: 1,
     timeoutSeconds: 30,
@@ -217,7 +227,7 @@ async function main() {
     allowedPaths: ['tests/**'],
     protectedPaths: ['tests/acceptance/**'],
     verificationCommands: ['echo "check"'],
-    acceptanceCriteria: [{ id: 'c4', title: 'Integrity', completed: false }],
+    acceptanceCriteria: [{ id: 'c4', title: 'Integrity', completed: false, checkCommand: 'echo "check"' }],
     workerConfig: { provider: 'test', model: 'test' },
     maxAttempts: 1,
     timeoutSeconds: 30,
@@ -236,6 +246,18 @@ async function main() {
   assert.strictEqual(run4.status, 'failed');
   assert.ok(run4.failureReason?.includes('Integrity check failed: Worker modified protected file'), 'Cheating detected and failed');
   console.log('✔ [PASS] Modifying protected acceptance checks fails authoritative integrity verification');
+
+  // Test 5: Criteria lacking explicit checkCommand are not automatically credited when general checks pass
+  const fallbackCheck = await verifier.verify({
+    worktreePath: process.cwd(),
+    baseCommit: 'HEAD',
+    verificationCommands: ['echo "general build check passed"'],
+    acceptanceCriteria: [{ id: 'unmapped-crit', title: 'Unmapped Acceptance Criterion' }],
+  });
+  assert.strictEqual(fallbackCheck.passed, false, 'Verification must fail when criteria lack explicit check evidence');
+  assert.strictEqual(fallbackCheck.criteriaVerified.includes('unmapped-crit'), false, 'Unchecked criterion must not be credited');
+  assert.ok(fallbackCheck.failureReason?.includes('unmapped-crit'), 'Failure reason must mention unmet criterion');
+  console.log('✔ [PASS] Acceptance criteria without checkCommand rejected fail-closed without automatic crediting');
 
   console.log('\n=== ALL REPAIR LOOP TESTS PASSED CLEANLY ===');
 }

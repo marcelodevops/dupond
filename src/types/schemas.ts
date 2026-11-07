@@ -12,6 +12,7 @@ export const SubTaskSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
   completed: z.boolean(),
+  checkCommand: z.string().optional(),
 });
 
 export const TaskSchema = z.object({
@@ -35,6 +36,24 @@ export const TaskSchema = z.object({
   targetBranch: z.string().optional(),
   pullRequestUrl: z.string().optional(),
   lastUpdated: z.string().optional(),
+  targetRepo: z.string().optional(),
+  baseCommit: z.string().optional(),
+  allowedPaths: z.array(z.string()).optional(),
+  protectedPaths: z.array(z.string()).optional(),
+  verificationCommands: z.array(z.union([z.string(), z.record(z.string(), z.any())])).optional(),
+  acceptanceCriteria: z.array(z.object({
+    id: z.string(),
+    title: z.string(),
+    completed: z.boolean().optional(),
+    checkCommand: z.string().optional(),
+  })).optional(),
+  requireApproval: z.boolean().optional(),
+  workerConfig: z.object({
+    provider: z.string(),
+    model: z.string(),
+  }).optional(),
+  maxAttempts: z.number().int().positive().optional(),
+  timeoutSeconds: z.number().int().positive().optional(),
 });
 
 export const AgentSchema = z.object({

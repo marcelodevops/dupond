@@ -12,6 +12,7 @@ import os from 'os';
 import { coordinator } from '../src/server/coordinator.js';
 import { handleRepositoryDispatch, isPathContained } from '../src/server/deliveryHandler.js';
 import { calculateAgentLoad } from '../src/services/workloadBalancer.js';
+import { taskStore } from '../src/server/db/database.js';
 
 console.log('=== RUNNING DUPOND GUARDRAILS & LIVE DELIVERY REGRESSION SUITE ===\n');
 
@@ -360,6 +361,48 @@ async function executeSuite() {
       repoConfig: { localPath: dir, targetDirectory: '.', localWriteMode: 'direct_write' } });
     assert.strictEqual(res.status, 409);
     assert.strictEqual(fs.existsSync(outside), false);
+  });
+
+  await runTest('Coordinator execution contract derives target repository, protected paths, and criteria checks', async () => {
+    const uniqueNum = Math.floor(100 + Math.random() * 800);
+    const uniqueKey = `AEG-${uniqueNum}`;
+    const uniqueId = `task-contract-${Date.now()}-${uniqueNum}`;
+    const customTask = {
+      id: uniqueId,
+      key: uniqueKey,
+      title: 'Custom Execution Contract Task',
+      description: 'Verifies dynamic execution contract',
+      epicId: 'epic-1',
+      status: 'in_progress' as const,
+      priority: 'high' as const,
+      assignedAgentId: 'agent-1',
+      estimatedHours: 4,
+      spentHours: 0,
+      dependencies: [],
+      targetRepo: 'custom-org/custom-repo',
+      baseCommit: 'develop',
+      allowedPaths: ['lib/**'],
+      protectedPaths: ['lib/protected/**', 'config.json'],
+      subtasks: [{ id: 'c1', title: 'Criteria 1', completed: false, checkCommand: 'npm run test:c1' }],
+      tags: [],
+    };
+
+    coordinator.getState().tasks.push(customTask as any);
+    try {
+      await coordinator.executeWorkerStep(customTask as any, { id: 'a1', name: 'Dev', role: 'Engineer' } as any);
+    } catch {
+      // Expected if no worker connected, but task record is populated
+    }
+
+    const createdRecord = taskStore.getTask(customTask.id);
+    assert.ok(createdRecord, 'Task record must be created in store');
+    assert.strictEqual(createdRecord?.targetRepo, 'custom-org/custom-repo');
+    assert.strictEqual(createdRecord?.baseCommit, 'develop');
+    assert.ok(createdRecord?.protectedPaths.includes('lib/protected/**'));
+    assert.ok(createdRecord?.protectedPaths.includes('config.json'));
+    assert.ok(createdRecord?.protectedPaths.includes('.github/**'));
+    assert.strictEqual(createdRecord?.acceptanceCriteria[0].id, 'c1');
+    assert.strictEqual(createdRecord?.acceptanceCriteria[0].checkCommand, 'npm run test:c1');
   });
 
   // Clean up fixture

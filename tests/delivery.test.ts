@@ -104,7 +104,26 @@ async function main() {
     assert.strictEqual(unapprovedResult.status, 403);
     assert.strictEqual(unapprovedResult.approvalRequired, true);
     assert.ok(unapprovedResult.error?.includes('requires explicit operator approval'));
-    console.log('✔ [PASS] Backend approval policy prevents unauthorized PR delivery');
+
+    // Test 2b: Delivery blocked by approval policy when isApproved or approvedBy are omitted
+    const omittedApprovalResult = await deliveryService.dispatchDelivery({
+      runId: run.id,
+      disposableRemoteDir: disposableRemote,
+    });
+    assert.strictEqual(omittedApprovalResult.success, false);
+    assert.strictEqual(omittedApprovalResult.status, 403);
+    assert.strictEqual(omittedApprovalResult.approvalRequired, true);
+
+    const missingApproverResult = await deliveryService.dispatchDelivery({
+      runId: run.id,
+      isApproved: true,
+      // approvedBy omitted
+      disposableRemoteDir: disposableRemote,
+    });
+    assert.strictEqual(missingApproverResult.success, false);
+    assert.strictEqual(missingApproverResult.status, 403);
+    assert.strictEqual(missingApproverResult.approvalRequired, true);
+    console.log('✔ [PASS] Backend approval policy prevents unauthorized PR delivery (defaults to denied)');
 
     // Test 3: Approved delivery succeeds against disposable remote
     const deliveryResult = await deliveryService.dispatchDelivery({

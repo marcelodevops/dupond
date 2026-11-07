@@ -9,8 +9,8 @@ export interface TaskRecord {
   baseCommit: string;
   allowedPaths: string[]; // JSON array
   protectedPaths: string[]; // JSON array
-  verificationCommands: string[]; // JSON array
-  acceptanceCriteria: Array<{ id: string; title: string; completed: boolean }>;
+  verificationCommands: Array<string | { command: string; criteriaIds?: string[] }>; // JSON array
+  acceptanceCriteria: Array<{ id: string; title: string; completed: boolean; checkCommand?: string }>;
   workerConfig: {
     provider: string;
     model: string;
