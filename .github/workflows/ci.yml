@@ -2,7 +2,7 @@ name: Dupond Continuous Integration
 
 on:
   push:
-    branches: [main, 'feat/**']
+    branches: [main, 'feat/**', 'fix/**']
   pull_request:
     branches: [main]
 
@@ -48,6 +48,9 @@ jobs:
           git config --global user.email "test@example.com"
           git config --global commit.gpgsign false
 
+      - name: Pre-pull sandbox container image
+        run: npm run prepare:sandbox
+
       - name: Run Guardrails & Delivery regression suite
         run: npx tsx tests/guardrails.test.ts
 
@@ -68,6 +71,9 @@ jobs:
 
       - name: Run GitHub Delivery & PR Reconciliation suite
         run: npx tsx tests/delivery.test.ts
+
+      - name: Run Disposable Repository & Base Drift Suite
+        run: npx tsx tests/disposableRepo.test.ts
 
       - name: Run End-to-End Acceptance Scenarios
         run: npx tsx tests/e2ePipeline.test.ts

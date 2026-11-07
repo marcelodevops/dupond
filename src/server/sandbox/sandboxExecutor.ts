@@ -31,12 +31,84 @@ export class SandboxExecutor {
   private hasDocker: boolean;
   private activeProcesses: Map<string, ChildProcess> = new Map();
   private activeContainers: Map<string, { containerName: string; runtime: string }> = new Map();
+  private static imagePrepared: boolean = false;
 
   constructor() {
     this.isDarwin = os.platform() === 'darwin';
     this.hasSandboxExec = this.checkBinary('sandbox-exec');
     this.hasPodman = this.checkBinary('podman');
     this.hasDocker = this.checkBinary('docker');
+  }
+
+  public getContainerRuntime(): 'podman' | 'docker' | null {
+    if (this.hasPodman) return 'podman';
+    if (this.hasDocker) return 'docker';
+    return null;
+  }
+
+  /**
+   * Pre-pulls the container image with a dedicated preparation timeout
+   * so command execution timeout is never consumed by image downloads.
+   */
+  public async ensureImage(image: string = 'node:22-bookworm', timeoutMs: number = 300000): Promise<boolean> {
+    if (this.isDarwin) {
+      return true;
+    }
+    const runtime = this.getContainerRuntime();
+    if (!runtime) {
+      return false;
+    }
+
+    if (SandboxExecutor.imagePrepared) {
+      return true;
+    }
+
+    // Check if the image exists locally
+    try {
+      const inspectArgs = runtime === 'podman'
+        ? ['image', 'exists', image]
+        : ['image', 'inspect', image];
+      const checkRes = spawnSync(runtime, inspectArgs, { stdio: 'pipe' });
+      if (checkRes.status === 0) {
+        SandboxExecutor.imagePrepared = true;
+        return true;
+      }
+    } catch {
+      // Proceed to pull
+    }
+
+    console.log(`[SandboxExecutor] Pre-pulling container image ${image} using ${runtime} (timeout: ${timeoutMs}ms)...`);
+    return new Promise<boolean>((resolve) => {
+      let timedOut = false;
+      const child = spawn(runtime, ['pull', image], {
+        stdio: 'inherit',
+      });
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill('SIGKILL');
+        } catch {}
+        console.warn(`[SandboxExecutor] Pulling image ${image} timed out after ${timeoutMs}ms`);
+        resolve(false);
+      }, timeoutMs);
+
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0 && !timedOut) {
+          SandboxExecutor.imagePrepared = true;
+          resolve(true);
+        } else {
+          resolve(false);
+        }
+      });
+
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        console.warn(`[SandboxExecutor] Error pulling image ${image}:`, err.message);
+        resolve(false);
+      });
+    });
   }
 
   private checkBinary(name: string): boolean {
@@ -250,6 +322,14 @@ ${networkRule}
       execCmd = 'sandbox-exec';
       execArgs = ['-p', profile, '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim()];
     } else if (this.hasPodman || this.hasDocker) {
+      // Ensure image is ready before command launch so pull time is decoupled from command timeout
+      if (!SandboxExecutor.imagePrepared) {
+        const imageOk = await this.ensureImage('node:22-bookworm', 300000);
+        if (!imageOk) {
+          throw new Error('Sandbox container preparation failed: could not pull node:22-bookworm within preparation timeout');
+        }
+      }
+
       execCmd = this.hasPodman ? 'podman' : 'docker';
       containerName = `dupond-${options.runId ? options.runId.replace(/[^a-zA-Z0-9_.-]/g, '-') : Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       if (options.runId) {

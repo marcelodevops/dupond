@@ -37,6 +37,7 @@ export const TaskSchema = z.object({
   pullRequestUrl: z.string().optional(),
   lastUpdated: z.string().optional(),
   targetRepo: z.string().optional(),
+  targetRepoPath: z.string().optional(),
   baseCommit: z.string().optional(),
   allowedPaths: z.array(z.string()).optional(),
   protectedPaths: z.array(z.string()).optional(),

@@ -65,9 +65,16 @@ export class RepairCoordinator {
     this.activeAbortControllers.set(runId, abortController);
 
     // 1. Prepare isolated worktree
+    const wsManager = options.workspaceManager ||
+      ((task.targetRepoPath && fs.existsSync(task.targetRepoPath))
+        ? new WorkspaceManager(task.targetRepoPath)
+        : (task.targetRepo && fs.existsSync(task.targetRepo) && (fs.existsSync(path.join(task.targetRepo, '.git')) || fs.existsSync(path.join(task.targetRepo, 'HEAD'))))
+        ? new WorkspaceManager(task.targetRepo)
+        : this.workspaceManager);
+
     let worktreeInfo;
     try {
-      worktreeInfo = this.workspaceManager.createWorktree(runId, branchName, task.baseCommit);
+      worktreeInfo = wsManager.createWorktree(runId, branchName, task.baseCommit);
     } catch (err: any) {
       this.store.unclaimTask(task.id, 'blocked', `Failed to prepare isolated workspace: ${err.message}`);
       const failedRun = this.store.createRun({
@@ -89,7 +96,7 @@ export class RepairCoordinator {
       id: runId,
       taskId: task.id,
       status: 'running',
-      baseCommit: task.baseCommit,
+      baseCommit: worktreeInfo.baseCommit,
       targetBranch: branchName,
       worktreePath: worktreeInfo.worktreePath,
       currentAttempt: 0,
