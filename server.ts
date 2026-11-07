@@ -37,6 +37,17 @@ import { coordinator, isMaskedSecret } from './src/server/coordinator.js';
 import { balanceWorkload, calculateAgentLoad, buildGeminiOptimizerPrompt } from './src/services/workloadBalancer.js';
 import { handleRepositoryDispatch } from './src/server/deliveryHandler.js';
 import { safeRequest, EgressBlockedError } from './src/server/egress.js';
+import { requireAuth, getExpectedToken } from './src/server/auth.js';
+import { taskStore } from './src/server/db/database.js';
+import { defaultGitHubDelivery } from './src/server/delivery/githubDelivery.js';
+import { defaultRepairCoordinator } from './src/server/coordinator/repairCoordinator.js';
+
+app.use(requireAuth);
+
+// Endpoint: Token retrieval for authorized clients
+app.get('/api/auth/token', (_req: Request, res: Response) => {
+  res.json({ token: getExpectedToken() });
+});
 
 /** Jira Cloud only: keeps this endpoint from becoming a token-forwarding proxy. */
 const JIRA_ALLOWED_HOSTS = ['.atlassian.net'];
@@ -81,6 +92,14 @@ app.get('/api/orchestrate/state', (_req: Request, res: Response) => {
 
 app.post('/api/orchestrate/state', (req: Request, res: Response) => {
   const result = coordinator.updateState(req.body);
+  if (!result.success) {
+    return res.status(422).json({
+      success: false,
+      state: coordinator.getStateView(),
+      rejectedDoneTasks: result.rejectedDoneTasks,
+      error: result.error,
+    });
+  }
   res.json(result);
 });
 
@@ -720,11 +739,49 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
 // Endpoint: Destination Repository & Delivery Dispatcher
 app.post('/api/integrations/repository/dispatch', async (req: Request, res: Response) => {
   try {
-    const { action = 'verify', repoConfig, task, allowOverwrite = false } = req.body || {};
+    const { action = 'verify', repoConfig, task, allowOverwrite = false, runId, isApproved = true } = req.body || {};
+
+    if (action === 'create_pr' || action === 'deliver') {
+      const targetRun = runId
+        ? taskStore.getRun(runId)
+        : task
+        ? (taskStore.getLatestRunForTask(task.id) || taskStore.getRun(task.id))
+        : null;
+
+      if (targetRun) {
+        const deliveryResult = await defaultGitHubDelivery.dispatchDelivery({
+          runId: targetRun.id,
+          isApproved,
+          approvedBy: 'operator',
+          repoUrl: repoConfig?.repoUrl,
+          targetBaseBranch: repoConfig?.defaultBranch || 'main',
+        });
+        return res.status(deliveryResult.status).json(deliveryResult);
+      }
+    }
+
     const result = await handleRepositoryDispatch({ action, repoConfig, task, allowOverwrite });
     return res.status(result.status).json(result.body);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Repository dispatch failed' });
+  }
+});
+
+// Endpoint: Explicit Pull Request Delivery Dispatcher
+app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
+  try {
+    const { runId, isApproved = true, approvedBy = 'operator', repoUrl, targetBaseBranch } = req.body || {};
+    if (!runId) return res.status(400).json({ error: 'runId is required' });
+    const result = await defaultGitHubDelivery.dispatchDelivery({
+      runId,
+      isApproved,
+      approvedBy,
+      repoUrl,
+      targetBaseBranch,
+    });
+    return res.status(result.status).json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Delivery dispatch failed' });
   }
 });
 

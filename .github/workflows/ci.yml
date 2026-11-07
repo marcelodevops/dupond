@@ -6,10 +6,22 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   validate:
-    name: Build, Lint & Automated Test Suite
-    runs-on: macos-latest
+    name: Build, Lint & Automated Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    env:
+      GIT_AUTHOR_NAME: Dupond Test
+      GIT_AUTHOR_EMAIL: test@example.com
+      GIT_COMMITTER_NAME: Dupond Test
+      GIT_COMMITTER_EMAIL: test@example.com
 
     steps:
       - name: Check out repository
@@ -29,6 +41,12 @@ jobs:
 
       - name: Client build (Vite)
         run: npm run build
+
+      - name: Configure Git identity for test commits
+        run: |
+          git config --global user.name "Dupond Test"
+          git config --global user.email "test@example.com"
+          git config --global commit.gpgsign false
 
       - name: Run Guardrails & Delivery regression suite
         run: npx tsx tests/guardrails.test.ts
