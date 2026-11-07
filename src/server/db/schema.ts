@@ -6,6 +6,7 @@ export interface TaskRecord {
   status: 'backlog' | 'todo' | 'in_progress' | 'review' | 'done' | 'blocked';
   priority: 'critical' | 'high' | 'medium' | 'low';
   targetRepo: string;
+  targetRepoPath?: string;
   baseCommit: string;
   allowedPaths: string[]; // JSON array
   protectedPaths: string[]; // JSON array
@@ -117,6 +118,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   status TEXT NOT NULL,
   priority TEXT NOT NULL,
   target_repo TEXT NOT NULL,
+  target_repo_path TEXT,
   base_commit TEXT NOT NULL,
   allowed_paths TEXT NOT NULL,
   protected_paths TEXT NOT NULL,

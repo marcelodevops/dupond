@@ -33,6 +33,11 @@ export class TaskStore {
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(DDL_SCHEMA);
+    try {
+      this.db.exec('ALTER TABLE tasks ADD COLUMN target_repo_path TEXT;');
+    } catch {
+      // Column already exists
+    }
   }
 
   public getRawDb(): DatabaseSync {
@@ -65,11 +70,11 @@ export class TaskStore {
 
     const stmt = this.db.prepare(`
       INSERT INTO tasks (
-        id, key, title, description, status, priority, target_repo, base_commit,
+        id, key, title, description, status, priority, target_repo, target_repo_path, base_commit,
         allowed_paths, protected_paths, verification_commands, acceptance_criteria,
         worker_config, max_attempts, timeout_seconds, require_approval,
         blocked_reason, claimed_by, claimed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -80,6 +85,7 @@ export class TaskStore {
       record.status || 'todo',
       record.priority || 'medium',
       record.targetRepo || '',
+      record.targetRepoPath || null,
       record.baseCommit || 'HEAD',
       JSON.stringify(record.allowedPaths || []),
       JSON.stringify(record.protectedPaths || []),
@@ -510,6 +516,7 @@ export class TaskStore {
       status: row.status,
       priority: row.priority,
       targetRepo: row.target_repo,
+      targetRepoPath: row.target_repo_path || undefined,
       baseCommit: row.base_commit,
       allowedPaths: JSON.parse(row.allowed_paths || '[]'),
       protectedPaths: JSON.parse(row.protected_paths || '[]'),

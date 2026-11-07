@@ -20,6 +20,7 @@ import {
 import { StateMutationSchema } from '../types/schemas.js';
 import { taskStore } from './db/database.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
+import { WorkspaceManager } from './workspace/workspaceManager.js';
 import { defaultCodingWorker } from './worker/geminiWorkerAdapter.js';
 import { 
   DEFAULT_TASKS, 
@@ -666,6 +667,11 @@ ${implementationCode.slice(0, 500)}...
         this.state.integrationConfig?.repository?.repoUrl ||
         process.env.DUPOND_TARGET_REPO ||
         'marcelodevops/dupond-project-leader';
+      const configuredRepoPath = task.targetRepoPath ||
+        (task.targetRepo && fs.existsSync(task.targetRepo) ? task.targetRepo : undefined) ||
+        (this.state.integrationConfig?.repository?.localPath && fs.existsSync(this.state.integrationConfig.repository.localPath)
+          ? this.state.integrationConfig.repository.localPath
+          : undefined);
       const baseCommit = task.baseCommit ||
         this.state.integrationConfig?.repository?.defaultBranch ||
         'HEAD';
@@ -716,6 +722,7 @@ ${implementationCode.slice(0, 500)}...
         status: 'in_progress',
         priority: task.priority || 'high',
         targetRepo: configuredRepo,
+        targetRepoPath: configuredRepoPath,
         baseCommit: baseCommit,
         allowedPaths: allowedPaths,
         protectedPaths: protectedPaths,
@@ -733,9 +740,19 @@ ${implementationCode.slice(0, 500)}...
       throw blocked();
     }
 
+    const targetRepoDir = storeTask.targetRepoPath ||
+      (storeTask.targetRepo && fs.existsSync(storeTask.targetRepo) ? storeTask.targetRepo : undefined) ||
+      (this.state.integrationConfig?.repository?.localPath && fs.existsSync(this.state.integrationConfig.repository.localPath)
+        ? this.state.integrationConfig.repository.localPath
+        : undefined) ||
+      process.cwd();
+
+    const workspaceManager = new WorkspaceManager(targetRepoDir);
+
     const workerRun = await defaultRepairCoordinator.executeTaskRun({
       task: storeTask,
       worker: defaultCodingWorker,
+      workspaceManager,
     });
 
     if (workerRun.status !== 'completed') {
