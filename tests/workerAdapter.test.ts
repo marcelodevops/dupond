@@ -38,6 +38,7 @@ async function main() {
     execFileSync('git', [
       '-c', 'user.name=Dupond Test',
       '-c', 'user.email=test@example.com',
+      '-c', 'commit.gpgsign=false',
       'commit', '-m', 'chore: add protected test',
     ], { cwd: worktree.worktreePath });
 
