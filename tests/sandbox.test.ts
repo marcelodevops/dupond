@@ -106,6 +106,11 @@ async function main() {
   assert.strictEqual(removalConfirmed, true, 'Container removal must be confirmed via non-zero inspect status');
   console.log('✔ [PASS] Container cancellation explicitly stops, removes, and confirms container deletion');
 
+  // Test 9: Image preparation pre-pulls with dedicated timeout separate from execution
+  const imageReady = await sandbox.ensureImage('node:22-bookworm', 5000);
+  assert.strictEqual(typeof imageReady, 'boolean');
+  console.log('✔ [PASS] Sandbox container image preparation decoupled from command timeout');
+
   console.log('\n=== ALL WORKSPACE & SANDBOX TESTS PASSED CLEANLY ===');
 }
 

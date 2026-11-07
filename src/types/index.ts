@@ -37,6 +37,7 @@ export interface Task {
   pullRequestUrl?: string;
   lastUpdated?: string;
   targetRepo?: string;
+  targetRepoPath?: string;
   baseCommit?: string;
   allowedPaths?: string[];
   protectedPaths?: string[];
