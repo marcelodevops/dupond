@@ -53,8 +53,8 @@ export function validateAuthToken(token: string | undefined | null): boolean {
  * Requires Authorization: Bearer <token> or X-Dupond-Token: <token>.
  */
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  // Allow read-only public endpoints (health check, static client bundle)
-  if (req.method === 'GET' && !req.path.startsWith('/api/orchestrate/state') && !req.path.startsWith('/api/admin')) {
+  // Static assets and public health check do not require authentication
+  if (!req.path.startsWith('/api') || req.path === '/api/health') {
     return next();
   }
 
@@ -66,7 +66,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   const header = req.header('Authorization') || req.header('X-Dupond-Token');
   if (!header || !validateAuthToken(header)) {
     res.status(401).json({
-      error: 'Unauthorized: Valid authentication token required for mutation and execution endpoints.',
+      error: 'Unauthorized: Valid authentication token required for API access.',
       code: 'AUTH_REQUIRED',
     });
     return;

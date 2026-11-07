@@ -75,7 +75,12 @@ async function runAcceptanceSuite() {
       verificationCommands: [
         `node -e "const { multiply } = require('./src/calculator.cjs'); if (multiply(4, 5) !== 20) process.exit(1); console.log('Multiply test OK');"`,
       ],
-      acceptanceCriteria: [{ id: 'crit-mult', title: '4 * 5 = 20', completed: false }],
+      acceptanceCriteria: [{
+        id: 'crit-mult',
+        title: '4 * 5 = 20',
+        completed: false,
+        checkCommand: `node -e "const { multiply } = require('./src/calculator.cjs'); if (multiply(4, 5) !== 20) process.exit(1); console.log('Multiply test OK');"`,
+      }],
       workerConfig: { provider: 'gemini', model: 'gemini-3.8-flash' },
       maxAttempts: 2,
       timeoutSeconds: 60,
@@ -163,7 +168,12 @@ async function runAcceptanceSuite() {
       verificationCommands: [
         `node -e "const { subtract } = require('./src/subtractor.cjs'); if (subtract(10, 3) !== 7) process.exit(1);"`
       ],
-      acceptanceCriteria: [{ id: 'crit-sub', title: '10 - 3 = 7', completed: false }],
+      acceptanceCriteria: [{
+        id: 'crit-sub',
+        title: '10 - 3 = 7',
+        completed: false,
+        checkCommand: `node -e "const { subtract } = require('./src/subtractor.cjs'); if (subtract(10, 3) !== 7) process.exit(1);"`,
+      }],
       workerConfig: { provider: 'test', model: 'test' },
       maxAttempts: 3,
       timeoutSeconds: 60,
@@ -218,7 +228,12 @@ async function runAcceptanceSuite() {
       verificationCommands: [
         `node -e "const { value } = require('./src/broken.cjs'); if (value !== 42) process.exit(1);"`
       ],
-      acceptanceCriteria: [{ id: 'crit-val', title: 'value is 42', completed: false }],
+      acceptanceCriteria: [{
+        id: 'crit-val',
+        title: 'value is 42',
+        completed: false,
+        checkCommand: `node -e "const { value } = require('./src/broken.cjs'); if (value !== 42) process.exit(1);"`,
+      }],
       workerConfig: { provider: 'test', model: 'test' },
       maxAttempts: 2,
       timeoutSeconds: 30,
@@ -255,7 +270,7 @@ async function runAcceptanceSuite() {
       allowedPaths: ['src/**'],
       protectedPaths: [],
       verificationCommands: ['echo "ok"'],
-      acceptanceCriteria: [{ id: 'c4', title: 'Success', completed: false }],
+      acceptanceCriteria: [{ id: 'c4', title: 'Success', completed: false, checkCommand: 'echo "ok"' }],
       workerConfig: { provider: 'test', model: 'test' },
       maxAttempts: 1,
       timeoutSeconds: 30,
@@ -471,11 +486,13 @@ async function runAcceptanceSuite() {
     const repeatDelivery1 = await deliveryService.dispatchDelivery({
       runId: run1.id,
       isApproved: true,
+      approvedBy: 'lead-engineer',
       disposableRemoteDir: disposableRemote,
     });
     const repeatDelivery2 = await deliveryService.dispatchDelivery({
       runId: run1.id,
       isApproved: true,
+      approvedBy: 'lead-engineer',
       disposableRemoteDir: disposableRemote,
     });
     assert.strictEqual(repeatDelivery1.prUrl, repeatDelivery2.prUrl);

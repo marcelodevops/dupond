@@ -61,7 +61,7 @@ export class GitHubDeliveryService {
     }
 
     // 2. Approval Policy Enforcement
-    if (task.requireApproval && !options.isApproved) {
+    if (task.requireApproval && (!options.isApproved || !options.approvedBy)) {
       return {
         success: false,
         status: 403,

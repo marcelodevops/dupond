@@ -660,13 +660,54 @@ ${implementationCode.slice(0, 500)}...
     }
 
     // Real Coding Worker Execution via isolated worktree and sandbox!
-    const workerAvail = await defaultCodingWorker.isAvailable();
-    if (!workerAvail.available) {
-      throw blocked();
-    }
-
     let storeTask = taskStore.getTask(task.key) || taskStore.getTask(task.id);
     if (!storeTask) {
+      const configuredRepo = task.targetRepo ||
+        this.state.integrationConfig?.repository?.repoUrl ||
+        process.env.DUPOND_TARGET_REPO ||
+        'marcelodevops/dupond-project-leader';
+      const baseCommit = task.baseCommit ||
+        this.state.integrationConfig?.repository?.defaultBranch ||
+        'HEAD';
+      const allowedPaths = task.allowedPaths && task.allowedPaths.length > 0
+        ? task.allowedPaths
+        : ['src/**', 'workspace/**'];
+      const defaultProtectedPaths = [
+        '.github/**',
+        'package.json',
+        'package-lock.json',
+        'tsconfig.json',
+        'tests/**',
+        '.env*',
+      ];
+      const protectedPaths = Array.from(new Set([
+        ...defaultProtectedPaths,
+        ...(task.protectedPaths || []),
+      ]));
+
+      // Acceptance criteria and mapped verification commands
+      const rawCriteria = task.acceptanceCriteria && task.acceptanceCriteria.length > 0
+        ? task.acceptanceCriteria
+        : (task.subtasks || []).map((s) => ({
+            id: s.id,
+            title: s.title,
+            completed: Boolean(s.completed),
+            checkCommand: s.checkCommand,
+          }));
+
+      const criteria = rawCriteria.map((c) => ({
+        id: c.id,
+        title: c.title,
+        completed: Boolean(c.completed),
+        checkCommand: c.checkCommand,
+      }));
+
+      const verificationCommands = task.verificationCommands && task.verificationCommands.length > 0
+        ? task.verificationCommands
+        : criteria
+            .filter((c) => c.checkCommand)
+            .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
+
       storeTask = taskStore.createTask({
         id: task.id,
         key: task.key,
@@ -674,17 +715,22 @@ ${implementationCode.slice(0, 500)}...
         description: task.description,
         status: 'in_progress',
         priority: task.priority || 'high',
-        targetRepo: 'marcelodevops/dupond-project-leader',
-        baseCommit: 'HEAD',
-        allowedPaths: ['src/**'],
-        protectedPaths: [],
-        verificationCommands: ['npm test'],
-        acceptanceCriteria: (task.subtasks || []).map((s) => ({ id: s.id, title: s.title, completed: s.completed })),
-        workerConfig: { provider: 'gemini', model: 'gemini-3.8-flash' },
-        maxAttempts: 3,
-        timeoutSeconds: 300,
-        requireApproval: true,
+        targetRepo: configuredRepo,
+        baseCommit: baseCommit,
+        allowedPaths: allowedPaths,
+        protectedPaths: protectedPaths,
+        verificationCommands: verificationCommands.length > 0 ? verificationCommands : ['npm test'],
+        acceptanceCriteria: criteria,
+        workerConfig: task.workerConfig || { provider: 'gemini', model: 'gemini-3.8-flash' },
+        maxAttempts: task.maxAttempts || 3,
+        timeoutSeconds: task.timeoutSeconds || 300,
+        requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
       });
+    }
+
+    const workerAvail = await defaultCodingWorker.isAvailable();
+    if (!workerAvail.available) {
+      throw blocked();
     }
 
     const workerRun = await defaultRepairCoordinator.executeTaskRun({

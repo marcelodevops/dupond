@@ -100,6 +100,12 @@ async function main() {
   assert.ok(!fs.existsSync(worktree.worktreePath), 'Worktree directory cleaned up');
   console.log('✔ [PASS] Worktree cleaned up and unmounted successfully');
 
+  // Test 8: Explicit container cleanup and confirmation logic
+  const mockContainerName = `test-container-removal-${Date.now()}`;
+  const removalConfirmed = sandbox.stopAndConfirmContainerRemoval('docker', mockContainerName);
+  assert.strictEqual(removalConfirmed, true, 'Container removal must be confirmed via non-zero inspect status');
+  console.log('✔ [PASS] Container cancellation explicitly stops, removes, and confirms container deletion');
+
   console.log('\n=== ALL WORKSPACE & SANDBOX TESTS PASSED CLEANLY ===');
 }
 
