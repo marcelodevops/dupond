@@ -41,7 +41,7 @@ function describe(err) {
 }
 
 function checkSyntax(label, code) {
-  const probe = spawnSync(process.execPath, ['--check', '/dev/stdin'], {
+  const probe = spawnSync(process.execPath, ['--check'], {
     input: code,
     encoding: 'utf8',
     timeout: 5000,
