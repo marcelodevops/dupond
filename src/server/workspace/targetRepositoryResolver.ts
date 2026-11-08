@@ -70,6 +70,41 @@ export function normalizeRepoSlug(urlOrSlug: string): string {
 }
 
 /**
+ * True when a remote points at a local filesystem repository rather than a
+ * network one, which is the only remote shape a test may use as a stand-in for
+ * a real origin. Decided by transport, never by the repository's name: a GitHub
+ * repository called "disposable-payments" is a network remote and must still be
+ * identity-checked.
+ */
+export function isLocalRemoteOrigin(originUrl?: string): boolean {
+  if (!originUrl) return false;
+  const cleaned = originUrl.trim();
+  return (
+    cleaned.startsWith('/') ||
+    cleaned.startsWith('file:') ||
+    cleaned.startsWith('./') ||
+    cleaned.startsWith('../')
+  );
+}
+
+/** Slug of the repository this orchestrator process is checked out in, if any. */
+export function orchestratorRepoSlug(): string {
+  const origin = getOriginUrl(fs.realpathSync(path.resolve(process.cwd())));
+  return origin ? normalizeRepoSlug(origin) : '';
+}
+
+/**
+ * Whether a target names the orchestrator's own repository, judged against the
+ * real origin of this checkout instead of a hardcoded literal, so a task cannot
+ * claim the exemption by naming an alias.
+ */
+export function isOrchestratorSelfTarget(nameOrUrl?: string): boolean {
+  if (!nameOrUrl) return false;
+  const own = orchestratorRepoSlug();
+  return !!own && normalizeRepoSlug(nameOrUrl) === own;
+}
+
+/**
  * Authoritatively resolves and validates the target workspace repository.
  * Never silently defaults to the orchestrator workspace.
  * Fails closed on missing, invalid, or mismatched repository configurations.
@@ -165,10 +200,11 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
     }
   }
 
-  // 5. Validate that workspace repository origin matches the configured target repo
-  if (expectedSlug && targetOriginSlug && !targetOriginSlug.includes('disposable')) {
-    // If targetOrigin is a GitHub/Git remote URL and not a generic local bare test remote
-    if (targetOriginSlug !== expectedSlug && !targetOrigin?.startsWith('/') && !targetOrigin?.startsWith('file:')) {
+  // 5. Validate that workspace repository origin matches the configured target
+  // repo. A local filesystem remote stands in for a real origin in tests and has
+  // no network identity to compare, so it is exempted by transport.
+  if (expectedSlug && targetOriginSlug && !isLocalRemoteOrigin(targetOrigin)) {
+    if (targetOriginSlug !== expectedSlug) {
       throw new Error(
         `Target repository mismatch: Workspace repository origin "${targetOriginSlug}" does not match configured target "${expectedSlug}". Refusing to execute on mismatched repository.`
       );

@@ -4,7 +4,7 @@ import path from 'path';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
 import { DeliveryRecord } from '../db/schema.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
-import { normalizeRepoSlug } from '../workspace/targetRepositoryResolver.js';
+import { normalizeRepoSlug, isLocalRemoteOrigin } from '../workspace/targetRepositoryResolver.js';
 
 export interface DispatchDeliveryOptions {
   runId: string;
@@ -48,6 +48,27 @@ export class GitHubDeliveryService {
     const task = this.store.getTask(run.taskId);
     if (!task) {
       return { success: false, status: 404, error: `Task for run ${options.runId} not found` };
+    }
+
+    // 0. Repository authority. The identity this delivery is checked against is
+    // the one persisted for the run, not whatever the request claims. A caller
+    // that could name its own expectation could make any origin match it.
+    const persistedTargetRepo = run.targetRepo || task.targetRepo;
+    if (!persistedTargetRepo) {
+      return {
+        success: false,
+        status: 400,
+        blocked: true,
+        error: `Delivery blocked: Run ${run.id} has no persisted target repository. Refusing to deliver against an unrecorded identity.`,
+      };
+    }
+    if (options.repoUrl && normalizeRepoSlug(options.repoUrl) !== normalizeRepoSlug(persistedTargetRepo)) {
+      return {
+        success: false,
+        status: 400,
+        blocked: true,
+        error: `Delivery blocked: Request repository "${normalizeRepoSlug(options.repoUrl)}" conflicts with the target recorded for run ${run.id} ("${normalizeRepoSlug(persistedTargetRepo)}"). Request overrides are not accepted.`,
+      };
     }
 
     // 1. Quality Gate Check: Delivery requires passing authoritative verification
@@ -137,13 +158,13 @@ export class GitHubDeliveryService {
       };
     }
 
-    // Validate that the workspace repository and delivery remote match the configured target
-    const expectedRepo = options.repoUrl || task.targetRepo;
+    // Validate that the workspace repository and delivery remote match the target
+    // recorded for the run.
+    const expectedRepo = persistedTargetRepo;
     if (expectedRepo && originUrl) {
       const expectedSlug = normalizeRepoSlug(expectedRepo);
       const originSlug = normalizeRepoSlug(originUrl);
-      const isLocalPath = originUrl.startsWith('/') || originUrl.startsWith('file:') || originUrl.includes('disposable');
-      if (!isLocalPath && expectedSlug && originSlug && expectedSlug !== originSlug) {
+      if (!isLocalRemoteOrigin(originUrl) && expectedSlug && originSlug && expectedSlug !== originSlug) {
         return {
           success: false,
           status: 400,
@@ -328,7 +349,7 @@ export class GitHubDeliveryService {
       };
     }
 
-    const repoTarget = options.repoUrl || task.targetRepo || 'marcelodevops/dupond-project-leader';
+    const repoTarget = persistedTargetRepo;
 
     // Support disposable bare git repository for isolated testing
     if (options.disposableRemoteDir && fs.existsSync(options.disposableRemoteDir)) {
@@ -355,7 +376,7 @@ export class GitHubDeliveryService {
           encoding: 'utf-8',
           stdio: 'pipe',
         }).trim();
-        if (originUrl && (originUrl.startsWith('/') || originUrl.startsWith('file://') || originUrl.startsWith('.'))) {
+        if (isLocalRemoteOrigin(originUrl)) {
           isLocalBareOrigin = true;
         }
       } catch {
