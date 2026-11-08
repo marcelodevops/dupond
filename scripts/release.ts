@@ -40,6 +40,7 @@ export interface ReleasePolicy {
   prerelease?: boolean;
   prereleaseType?: string;
   includeVInTag?: boolean;
+  includeComponentInTag?: boolean;
   changelogPath?: string;
   bootstrapSha?: string;
 }
@@ -183,6 +184,7 @@ export function readReleasePolicy(repoRoot: string): ReleasePolicy {
     prerelease: pick('prerelease'),
     prereleaseType: pick('prerelease-type'),
     includeVInTag: pick('include-v-in-tag'),
+    includeComponentInTag: pick('include-component-in-tag'),
     changelogPath: pick('changelog-path'),
     bootstrapSha: config['bootstrap-sha'],
   };
@@ -228,6 +230,9 @@ export function findPolicyProblems(policy: ReleasePolicy): string[] {
   if (policy.bumpPatchForMinorPreMajor === true) problems.push('bump-patch-for-minor-pre-major must not be true: minor bumps would be downgraded to patches');
   if (policy.prerelease !== true) problems.push('prerelease must be true while the product is experimental (major version 0)');
   if (policy.includeVInTag === false) problems.push('include-v-in-tag must stay true so tags are v0.1.0, not 0.1.0');
+  // Unset is not safe: strategies/base.ts defaults this to true, so Release Please
+  // would tag dupond-orchestrator-v0.2.0 while the manifest and finder use v0.1.0.
+  if (policy.includeComponentInTag !== false) problems.push('include-component-in-tag must be set false, otherwise Release Please tags <component>-vX.Y.Z instead of vX.Y.Z');
   if (policy.changelogPath && policy.changelogPath !== 'CHANGELOG.md') problems.push(`changelog-path must be CHANGELOG.md, got "${policy.changelogPath}"`);
   // Before the first tag exists, Release Please would otherwise scan the entire
   // repository history and claim every past commit for the next release.

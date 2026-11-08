@@ -5,6 +5,7 @@
   "bump-patch-for-minor-pre-major": false,
   "prerelease": true,
   "include-v-in-tag": true,
+  "include-component-in-tag": false,
   "changelog-path": "CHANGELOG.md",
   "bootstrap-sha": "bd3726ade06a4f60e9964d087f83e9bf25bfa572",
   "packages": {
