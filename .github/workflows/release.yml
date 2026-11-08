@@ -1,0 +1,84 @@
+name: Dupond Release Automation
+
+# Release Please is the only version/changelog/tag/release tool in this repository.
+# It is invoked twice with different roles: "prepare" may only open or update the
+# release pull request, "publish" may only create the tag and GitHub release, and
+# publish is gated on verified CI for the exact commit being tagged.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Overlapping release automation runs race on the same release PR, tag, and
+# release. Never cancel a run that may already have created a tag.
+concurrency:
+  group: dupond-release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare release pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Open or update the release pull request (no tags, no releases)
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ github.token }}
+          skip-github-release: true
+
+  ci-gate:
+    name: Require green CI on the exact release commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for required CI on the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          case "$RELEASE_SHA" in
+            *[!0-9a-f]*) echo "REFUSES: commit SHA is not hexadecimal"; exit 1 ;;
+          esac
+          if [ "${#RELEASE_SHA}" -lt 40 ]; then echo "REFUSES: short commit SHA"; exit 1; fi
+          npx tsx scripts/release.ts gate --sha "$RELEASE_SHA" --wait --timeout 2700 --interval 30
+
+  publish:
+    name: Tag and publish GitHub release
+    needs: [prepare, ci-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Create the pending release (no pull request changes)
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ github.token }}
+          skip-github-pull-request: true
+          skip-labeling: true
