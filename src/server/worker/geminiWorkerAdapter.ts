@@ -362,14 +362,34 @@ Address the failure directly and verify your fix.
         log(`Worker iteration ${iterations}/${maxIterations}`);
 
         const selectedModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
-        const response: any = await ai.models.generateContent({
-          model: selectedModel,
-          contents: conversationContents,
-          config: {
-            tools: [{ functionDeclarations: toolDeclarations as any }],
-            temperature: 0.2,
-          },
-        });
+        let response: any;
+        let callAttempts = 0;
+        const maxCallAttempts = 4;
+        while (callAttempts < maxCallAttempts) {
+          try {
+            callAttempts++;
+            response = await ai.models.generateContent({
+              model: selectedModel,
+              contents: conversationContents,
+              config: {
+                tools: [{ functionDeclarations: toolDeclarations as any }],
+                temperature: 0.2,
+              },
+            });
+            break;
+          } catch (callErr: any) {
+            const errStr = callErr.message || JSON.stringify(callErr);
+            const isRateLimit = errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED');
+            if (isRateLimit && callAttempts < maxCallAttempts) {
+              const retryMatch = errStr.match(/retry in ([0-9.]+)s/i) || errStr.match(/"retryDelay":\s*"(\d+)s"/);
+              const waitSec = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) + 2 : 15 * callAttempts;
+              log(`Rate limit encountered (429/RESOURCE_EXHAUSTED). Waiting ${waitSec}s before retry ${callAttempts}/${maxCallAttempts}...`);
+              await new Promise((r) => setTimeout(r, waitSec * 1000));
+            } else {
+              throw callErr;
+            }
+          }
+        }
 
         if (response.usageMetadata) {
           totalPromptTokens += response.usageMetadata.promptTokenCount || 0;
