@@ -79,3 +79,9 @@ jobs:
 
       - name: Run End-to-End Acceptance Scenarios
         run: npx tsx tests/e2ePipeline.test.ts
+
+      - name: Run Release Policy & Version Consistency suite
+        run: npx tsx tests/release.test.ts
+
+      - name: Check release version metadata and policy
+        run: npm run release:check
