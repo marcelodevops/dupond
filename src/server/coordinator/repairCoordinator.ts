@@ -4,7 +4,7 @@ import path from 'path';
 import { TaskRecord, TaskRunRecord } from '../db/schema.js';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
 import { WorkspaceManager, defaultWorkspaceManager } from '../workspace/workspaceManager.js';
-import { resolveTargetRepository } from '../workspace/targetRepositoryResolver.js';
+import { resolveTargetRepository, isOrchestratorSelfTarget } from '../workspace/targetRepositoryResolver.js';
 import { CodingWorkerAdapter, WorkerExecutionContext } from '../worker/types.js';
 import { defaultCodingWorker } from '../worker/geminiWorkerAdapter.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
@@ -73,7 +73,7 @@ export class RepairCoordinator {
       const resolved = resolveTargetRepository({
         targetRepo: task.targetRepo,
         targetRepoPath: task.targetRepoPath,
-        allowOrchestratorRepo: task.targetRepo === 'marcelodevops/dupond-project-leader' || task.targetRepo === 'dupond',
+        allowOrchestratorRepo: isOrchestratorSelfTarget(task.targetRepo),
       });
       resolvedIdentity = resolved.repoIdentity;
       if (!wsManager || path.resolve(wsManager.getBaseRepoDir()) !== path.resolve(resolved.repoPath)) {
