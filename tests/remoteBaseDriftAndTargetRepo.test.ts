@@ -361,11 +361,182 @@ async function main() {
     assert.ok(unavailableResult.error?.includes('Failed to fetch remote base branch'));
     console.log('✔ [PASS] Unavailable remote reference blocked fail-closed with HTTP 502');
 
+    // ------------------------------------------------------------------------
+    // Part 3: Repository Identity Guards Are Not Name-Shaped
+    // ------------------------------------------------------------------------
+    console.log('\n--- Part 3: Target Identity Guards (Name Bypass & Request Override) ---');
+
+    // A repository whose *name* contains the word used by test fixtures must not
+    // be mistaken for a test stand-in. The exemption is transport, not vocabulary.
+    const mirrorDir = path.join(tmpBase, 'mirror-with-remote-name');
+    fs.mkdirSync(mirrorDir, { recursive: true });
+    execFileSync('git', ['init'], { cwd: mirrorDir });
+    execFileSync('git', ['config', 'user.name', 'Mirror Repo'], { cwd: mirrorDir });
+    execFileSync('git', ['config', 'user.email', 'mirror@example.com'], { cwd: mirrorDir });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: mirrorDir });
+    fs.writeFileSync(path.join(mirrorDir, 'package.json'), JSON.stringify({ name: 'mirror-app', version: '1.0.0' }));
+    execFileSync('git', ['add', '-A'], { cwd: mirrorDir });
+    execFileSync('git', ['commit', '-m', 'mirror initial'], { cwd: mirrorDir });
+    execFileSync('git', ['branch', '-M', 'main'], { cwd: mirrorDir });
+    // Non-resolving host (RFC 6761) with a repository name shaped like a fixture.
+    execFileSync('git', ['remote', 'add', 'origin', 'https://identity-guards.invalid/acme/disposable-mirror.git'], { cwd: mirrorDir });
+
+    assert.throws(() => {
+      resolveTargetRepository({ targetRepo: 'acme/real-service', targetRepoPath: mirrorDir });
+    }, (err: any) => {
+      assert.ok(err.message.includes('Target repository mismatch'), `Expected mismatch refusal, got: ${err.message}`);
+      return true;
+    }, 'A network remote must be identity-checked even when its name contains a fixture word');
+    console.log('✔ [PASS] Fixture-shaped remote name no longer skips the identity check');
+
+    const matchedTarget = resolveTargetRepository({ targetRepo: 'acme/disposable-mirror', targetRepoPath: mirrorDir });
+    assert.strictEqual(matchedTarget.repoPath, fs.realpathSync(mirrorDir), 'Exact remote match must still resolve');
+    console.log('✔ [PASS] Matching configured target still resolves normally');
+
+    // The sanctioned fixture shape is a local filesystem remote, which carries no
+    // network identity to compare.
+    const localRemoteExempt = resolveTargetRepository({ targetRepo: 'acme/real-service', targetRepoPath: clone1Dir });
+    assert.strictEqual(localRemoteExempt.repoPath, fs.realpathSync(clone1Dir), 'Local bare remote must remain exempt');
+    console.log('✔ [PASS] Local filesystem remote remains exempt by transport');
+
+    // A request must not be able to rename the identity the remote is compared to.
+    const overrideAttempt = await deliveryService.dispatchDelivery({
+      runId: runA.id,
+      isApproved: true,
+      approvedBy: 'operator-override',
+      repoUrl: 'evil-org/attacker-repo',
+      targetBaseBranch: 'main',
+    });
+    assert.strictEqual(overrideAttempt.success, false, 'Conflicting request repoUrl must be refused');
+    assert.strictEqual(overrideAttempt.status, 400);
+    assert.strictEqual(overrideAttempt.blocked, true);
+    assert.ok(overrideAttempt.error?.includes('conflicts with the target recorded for run'), `Got: ${overrideAttempt.error}`);
+    console.log('✔ [PASS] Request repoUrl conflicting with the persisted run target is rejected');
+
+    const agreeingAttempt = await deliveryService.dispatchDelivery({
+      runId: runA.id,
+      isApproved: true,
+      approvedBy: 'operator-agree',
+      repoUrl: 'example/dual-clone-app',
+      targetBaseBranch: 'main',
+    });
+    assert.ok(!agreeingAttempt.error?.includes('conflicts with the target recorded'), 'Agreeing repoUrl must not be refused as an override');
+    console.log('✔ [PASS] Request repoUrl agreeing with the persisted target is still accepted');
+
+    // Delivery must refuse a workspace whose delivery remote mismatches the run's
+    // recorded target, before any push is attempted.
+    const mirrorWorktree = new WorkspaceManager(mirrorDir).createWorktree(
+      `identity-guard-run-${Date.now()}`,
+      `dupond/identity-guard-${Date.now()}`,
+      'main',
+    );
+    const guardTask = store.createTask({
+      key: 'AEG-GUARD-1',
+      title: 'Identity Guard Delivery Task',
+      description: 'Delivery must bind to the recorded target repository',
+      status: 'review',
+      priority: 'high',
+      targetRepo: 'acme/real-service',
+      targetRepoPath: mirrorDir,
+      baseCommit: mirrorWorktree.baseCommit,
+      allowedPaths: ['*'],
+      protectedPaths: [],
+      verificationCommands: ['echo ok'],
+      acceptanceCriteria: [{ id: 'crit-guard', title: 'Guarded', completed: true }],
+      workerConfig: { provider: 'test', model: 'test' },
+      maxAttempts: 1,
+      timeoutSeconds: 30,
+      requireApproval: true,
+    });
+    const guardRun = store.createRun({
+      id: `identity-guard-run-${Date.now()}`,
+      taskId: guardTask.id,
+      status: 'completed',
+      targetRepo: 'acme/real-service',
+      baseCommit: mirrorWorktree.baseCommit,
+      targetBranch: mirrorWorktree.branch,
+      worktreePath: mirrorWorktree.worktreePath,
+      currentAttempt: 1,
+      durationMs: 100,
+    });
+    const guardAttempt = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: mirrorWorktree.worktreePath, encoding: 'utf-8' }).trim();
+    store.recordVerification({
+      runId: guardRun.id,
+      attemptId: store.createAttempt({
+        runId: guardRun.id,
+        attemptNumber: 1,
+        status: 'succeeded',
+        workerType: 'test',
+        filesModified: [],
+        durationMs: 10,
+        startedAt: new Date().toISOString(),
+      }).id,
+      revisionSha: guardAttempt,
+      passed: true,
+      checks: [{ command: 'echo ok', exitCode: 0, stdout: 'ok', stderr: '', passed: true, durationMs: 5 }],
+      criteriaVerified: ['crit-guard'],
+    });
+
+    const guardDelivery = await deliveryService.dispatchDelivery({
+      runId: guardRun.id,
+      isApproved: true,
+      approvedBy: 'operator-guard',
+      targetBaseBranch: 'main',
+    });
+    assert.strictEqual(guardDelivery.success, false, 'Mismatched delivery remote must be refused');
+    assert.strictEqual(guardDelivery.status, 400);
+    assert.strictEqual(guardDelivery.blocked, true);
+    assert.ok(guardDelivery.error?.includes('does not match configured target repository'), `Got: ${guardDelivery.error}`);
+    console.log('✔ [PASS] Delivery blocked on remote/target mismatch before any push');
+
+    // A run with no recorded target has nothing to validate against and must not
+    // fall back to whatever the caller supplies.
+    const unrecordedTask = store.createTask({
+      key: 'AEG-GUARD-2',
+      title: 'Unrecorded Target Task',
+      description: 'No repository identity was ever recorded for this work',
+      status: 'review',
+      priority: 'high',
+      targetRepo: '',
+      baseCommit: runA.baseCommit,
+      allowedPaths: ['*'],
+      protectedPaths: [],
+      verificationCommands: ['echo ok'],
+      acceptanceCriteria: [{ id: 'crit-unrecorded', title: 'Guarded', completed: true }],
+      workerConfig: { provider: 'test', model: 'test' },
+      maxAttempts: 1,
+      timeoutSeconds: 30,
+      requireApproval: true,
+    });
+    const unrecordedRun = store.createRun({
+      id: `unrecorded-target-run-${Date.now()}`,
+      taskId: unrecordedTask.id,
+      status: 'completed',
+      targetRepo: '',
+      baseCommit: runA.baseCommit,
+      targetBranch: runA.targetBranch,
+      worktreePath: runA.worktreePath,
+      currentAttempt: 1,
+      durationMs: 100,
+    });
+    const unrecordedDelivery = await deliveryService.dispatchDelivery({
+      runId: unrecordedRun.id,
+      isApproved: true,
+      approvedBy: 'operator-unrecorded',
+      repoUrl: 'example/dual-clone-app',
+      targetBaseBranch: 'main',
+    });
+    assert.strictEqual(unrecordedDelivery.success, false, 'Run without a persisted target must fail closed');
+    assert.strictEqual(unrecordedDelivery.blocked, true);
+    assert.ok(unrecordedDelivery.error?.includes('no persisted target repository'), `Got: ${unrecordedDelivery.error}`);
+    console.log('✔ [PASS] Run without a persisted target repository fails closed');
+
   } finally {
     if (fs.existsSync(tmpBase)) {
       fs.rmSync(tmpBase, { recursive: true, force: true });
     }
   }
+
 
   console.log('\n===============================================================');
   console.log('=== ALL TARGET SELECTION & REMOTE BASE TESTS PASSED CLEANLY ===');
