@@ -27,27 +27,42 @@ schema file is published. `release-please-config.json` does accept `$schema`.
 
 ## Version policy
 
-* `fix:`, `perf:` → patch bump.
-* `feat:` → minor bump.
-* Breaking change (`feat!:` / `fix!:` / `BREAKING CHANGE:` footer) → **minor**
-  bump while major is `0`, because `bump-minor-pre-major: true`. Major stays `0`
-  until the product is declared production-ready; the maintainer who flips it
-  records the decision in the release PR.
-* `docs:`, `test:`, `build:`, `ci:`, `chore:` → no bump, no changelog entry.
+The rules below are what release-please 17 actually does, verified against its
+source (`strategies/node.ts`, `versioning-strategies/default.ts`,
+`util/filter-commits.ts`) rather than assumed from its documentation.
+
+* `feat:` → minor bump, listed under *Features*.
+* `fix:`, `perf:`, `revert:` → patch bump, listed under their own sections.
+* Breaking change (`feat!:` / `fix!:` / a `BREAKING CHANGE:` footer) → **minor**
+  bump while major is `0`, because `bump-minor-pre-major: true`; at 1.0.0 and above
+  the same commit becomes a major bump. Flipping major to `1` is the maintainer's
+  declaration that Dupond is no longer experimental, and it is recorded in the
+  release PR that does it.
+* `chore:`, `ci:`, `docs:`, `style:`, `refactor:`, `test:`, `build:` are *hidden*:
+  they never appear in the changelog, **but they still produce a patch bump** if no
+  breaking or feature commit is in range. Release Please only skips a release when
+  there are zero commits after the last tag. So a chore-only merge still opens a
+  `0.1.1`-style release PR; if that is not wanted yet, leave the PR open (it keeps
+  being updated and folds in the next change) or add the `autorelease: snooze`
+  label to postpone it.
+* A hidden type that carries a `BREAKING CHANGE:` footer is still counted, so
+  never use `docs!:` casually.
+* To force an exact version for one cycle, add a `RELEASE AS: 1.0.0` note to the
+  commit that should decide it, or set/pass `release-as`. The chosen version is
+  written back to `.release-please-manifest.json`.
 * Every release is published as a GitHub **prerelease** while major is `0`, via
   `prerelease: true`. `prerelease-type` is deliberately unset so versions remain
   `0.2.0` rather than `0.2.0-beta.1`.
 * `bump-patch-for-minor-pre-major` stays `false`: a `feat:` must not be downgraded
   to a patch.
-* To force a specific version (hotfix, or "this is the 1.0.0 moment"), set
-  `release-as` in `release-please-config.json` for one cycle, or pass
-  `release-as` to the action, then remove it. Release Please records the result in
-  the manifest.
+* `bootstrap-sha` is pinned to `bd3726a`, the commit that first carried `0.1.0`.
+  Without it, the first run would find no tag, walk up to 250 commits of repository
+  history, and offer to release all of it as one version with a rewritten changelog.
 
 Because Dupond squash-merges, **the PR title becomes the commit message on main
 and therefore decides the version**. The `Dupond Pull Request Title` check refuses
-titles that are not Conventional Commits so they cannot silently disappear from a
-release. Release Please's own titles (`chore: release 0.2.0`, or
+titles that are not Conventional Commits so they cannot silently disappear from the
+changelog. Release Please's own titles (`chore: release 0.2.0`, or
 `chore(main): release 0.2.0`) pass the same check.
 
 ## Release flow
@@ -65,6 +80,14 @@ release. Release Please's own titles (`chore: release 0.2.0`, or
    Only a `push` run against `main` for that SHA counts; a green `pull_request` run
    on the same commit, or green CI on a neighbouring commit, does not authorize a
    publish.
+5. The release PR then gains the `autorelease: tagged` label. That label, the tag,
+   and the manifest entry are the three things to compare when deciding whether a
+   run reconciled or stalled.
+
+Expect the first release PR after this automation lands to be a patch bump (`0.1.1`)
+caused by the automation commits themselves: they are typed `ci:`, which is hidden
+from the changelog but still counts as a commit after the `v0.1.0` tag. Merge it when
+there is something real to ship with it, or snooze it until then.
 
 ## Duplicates, races, and retries
 
@@ -115,6 +138,13 @@ npx tsx scripts/release.ts gate --sha "$(git rev-parse origin/main)"   # exits 0
 npx tsx scripts/release.ts notes --version 0.1.0                        # the truthful notes body, straight from CHANGELOG.md
 gh release view v0.1.0
 ```
+
+Those commands are read-only; `gate` exits `0` only when main-branch push CI passed
+for the exact SHA. Running `npx release-please release-pr --dry-run` against this
+repository is not a substitute: the CLI reads releases over GraphQL, and the
+fine-grained `GITHUB_TOKEN` used for delivery is rejected there with `401`, even
+though the same credential works for the REST calls above. The action does not have
+that limitation because it authenticates as the workflow run.
 
 The release notes body must be the `0.1.0` section of `CHANGELOG.md`: it states the
 demonstrated capability (one live task produced a real PR in `dupond-live-demo` with

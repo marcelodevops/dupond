@@ -41,6 +41,7 @@ export interface ReleasePolicy {
   prereleaseType?: string;
   includeVInTag?: boolean;
   changelogPath?: string;
+  bootstrapSha?: string;
 }
 
 export const REQUIRED_WORKFLOWS = ['Dupond Continuous Integration'];
@@ -183,6 +184,7 @@ export function readReleasePolicy(repoRoot: string): ReleasePolicy {
     prereleaseType: pick('prerelease-type'),
     includeVInTag: pick('include-v-in-tag'),
     changelogPath: pick('changelog-path'),
+    bootstrapSha: config['bootstrap-sha'],
   };
 }
 
@@ -227,6 +229,9 @@ export function findPolicyProblems(policy: ReleasePolicy): string[] {
   if (policy.prerelease !== true) problems.push('prerelease must be true while the product is experimental (major version 0)');
   if (policy.includeVInTag === false) problems.push('include-v-in-tag must stay true so tags are v0.1.0, not 0.1.0');
   if (policy.changelogPath && policy.changelogPath !== 'CHANGELOG.md') problems.push(`changelog-path must be CHANGELOG.md, got "${policy.changelogPath}"`);
+  // Before the first tag exists, Release Please would otherwise scan the entire
+  // repository history and claim every past commit for the next release.
+  if (!/^[0-9a-f]{40}$/.test(policy.bootstrapSha ?? '')) problems.push('bootstrap-sha must pin the full 40-character baseline commit');
   return problems;
 }
 
