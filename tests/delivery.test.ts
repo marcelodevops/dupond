@@ -32,6 +32,7 @@ async function main() {
   fs.mkdirSync(disposableRemote, { recursive: true });
   execFileSync('git', ['init', '--bare'], { cwd: disposableRemote });
   execFileSync('git', ['--git-dir', disposableRemote, 'config', 'receive.shallowUpdate', 'true']);
+  execFileSync('git', ['push', disposableRemote, `${worktree.baseCommit}:refs/heads/main`], { cwd: process.cwd() });
 
   const task = store.createTask({
     key: 'AEG-801',

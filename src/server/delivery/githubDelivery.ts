@@ -4,6 +4,7 @@ import path from 'path';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
 import { DeliveryRecord } from '../db/schema.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
+import { normalizeRepoSlug } from '../workspace/targetRepositoryResolver.js';
 
 export interface DispatchDeliveryOptions {
   runId: string;
@@ -71,7 +72,7 @@ export class GitHubDeliveryService {
       };
     }
 
-    // 3. Worktree inspection
+    // 3. Worktree inspection and remote target validation
     if (!run.worktreePath || !fs.existsSync(run.worktreePath)) {
       return {
         success: false,
@@ -109,139 +110,223 @@ export class GitHubDeliveryService {
       };
     }
 
-    // 4. Base Branch Drift Check
-    const baseBranch = options.targetBaseBranch || 'main';
+    // Determine target remote
+    const remoteTarget = options.disposableRemoteDir && fs.existsSync(options.disposableRemoteDir)
+      ? options.disposableRemoteDir
+      : 'origin';
+
+    let originUrl: string | undefined;
     try {
-      // Check current base branch revision in root repo
-      let rootRepo = process.cwd();
+      originUrl = execFileSync('git', ['remote', 'get-url', remoteTarget], {
+        cwd: realWorktree,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+    } catch {
+      if (remoteTarget !== 'origin') {
+        originUrl = remoteTarget;
+      }
+    }
+
+    if (!originUrl && remoteTarget === 'origin') {
+      return {
+        success: false,
+        status: 400,
+        blocked: true,
+        error: `Delivery blocked: Workspace repository at ${realWorktree} has no '${remoteTarget}' remote configured for delivery.`,
+      };
+    }
+
+    // Validate that the workspace repository and delivery remote match the configured target
+    const expectedRepo = options.repoUrl || task.targetRepo;
+    if (expectedRepo && originUrl) {
+      const expectedSlug = normalizeRepoSlug(expectedRepo);
+      const originSlug = normalizeRepoSlug(originUrl);
+      const isLocalPath = originUrl.startsWith('/') || originUrl.startsWith('file:') || originUrl.includes('disposable');
+      if (!isLocalPath && expectedSlug && originSlug && expectedSlug !== originSlug) {
+        return {
+          success: false,
+          status: 400,
+          blocked: true,
+          error: `Delivery blocked: Workspace repository delivery remote '${originSlug}' does not match configured target repository '${expectedSlug}'.`,
+        };
+      }
+    }
+
+    // 4. Remote Base Branch Fetch and Drift Verification
+    const baseBranch = options.targetBaseBranch || 'main';
+    let latestRemoteBaseSha = '';
+
+    try {
+      execFileSync('git', ['fetch', remoteTarget, baseBranch], {
+        cwd: realWorktree,
+        stdio: 'pipe',
+      });
+    } catch (fetchErr: any) {
+      return {
+        success: false,
+        status: 502,
+        blocked: true,
+        error: `Delivery blocked: Failed to fetch remote base branch '${baseBranch}' from '${remoteTarget}': ${fetchErr.stderr?.toString() || fetchErr.message}`,
+      };
+    }
+
+    try {
+      latestRemoteBaseSha = execFileSync('git', ['rev-parse', 'FETCH_HEAD'], {
+        cwd: realWorktree,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+    } catch (revErr: any) {
+      return {
+        success: false,
+        status: 502,
+        blocked: true,
+        error: `Delivery blocked: Failed to resolve FETCH_HEAD for remote base branch '${baseBranch}': ${revErr.message}`,
+      };
+    }
+
+    if (!latestRemoteBaseSha) {
+      return {
+        success: false,
+        status: 502,
+        blocked: true,
+        error: `Delivery blocked: Remote base branch '${baseBranch}' resolved to empty commit SHA.`,
+      };
+    }
+
+    if (latestRemoteBaseSha !== run.baseCommit) {
+      console.log(`[Delivery] Remote base branch '${baseBranch}' advanced from ${run.baseCommit} to ${latestRemoteBaseSha}. Merging and re-verifying combined result...`);
+
       try {
-        const commonDir = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+        execFileSync('git', ['merge', '--no-edit', latestRemoteBaseSha], {
           cwd: realWorktree,
-          encoding: 'utf-8',
           stdio: 'pipe',
-        }).trim();
-        const absCommon = path.resolve(realWorktree, commonDir);
-        rootRepo = path.basename(absCommon) === '.git' ? path.dirname(absCommon) : absCommon;
-      } catch {
-        if (task.targetRepoPath && fs.existsSync(task.targetRepoPath)) {
-          rootRepo = path.resolve(task.targetRepoPath);
-        } else if (task.targetRepo && fs.existsSync(task.targetRepo)) {
-          rootRepo = path.resolve(task.targetRepo);
-        }
-      }
-
-      let currentBaseSha = '';
-      try {
-        currentBaseSha = execFileSync('git', ['rev-parse', baseBranch], {
-          cwd: rootRepo,
-          encoding: 'utf-8',
-          stdio: 'pipe',
-        }).trim();
-      } catch {
-        try {
-          currentBaseSha = execFileSync('git', ['rev-parse', `origin/${baseBranch}`], {
-            cwd: rootRepo,
-            encoding: 'utf-8',
-            stdio: 'pipe',
-          }).trim();
-        } catch {
-          // if local or remote branch not found, fall back to run.baseCommit
-          currentBaseSha = run.baseCommit;
-        }
-      }
-
-      if (currentBaseSha && currentBaseSha !== run.baseCommit) {
-        // Base branch moved! Merge and re-validate combined changes against new base
-        console.log(`[Delivery] Base branch ${baseBranch} moved from ${run.baseCommit} to ${currentBaseSha}. Merging and re-verifying combined result...`);
-
-        try {
-          execFileSync('git', ['merge', '--no-edit', currentBaseSha], {
-            cwd: realWorktree,
-            stdio: 'pipe',
-            env: {
-              ...process.env,
-              GIT_COMMITTER_NAME: 'Dupond Orchestrator',
-              GIT_COMMITTER_EMAIL: 'dupond@example.com',
-              GIT_AUTHOR_NAME: 'Dupond Orchestrator',
-              GIT_AUTHOR_EMAIL: 'dupond@example.com',
-            },
-          });
-        } catch (mergeErr: any) {
-          return {
-            success: false,
-            status: 409,
-            blocked: true,
-            error: `Delivery blocked: Base branch ${baseBranch} has advanced to ${currentBaseSha} and could not be merged cleanly into ${run.targetBranch}: ${mergeErr.stderr?.toString() || mergeErr.message}`,
-          };
-        }
-
-        const mergedSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-          cwd: realWorktree,
-          encoding: 'utf-8',
-        }).trim();
-
-        const recheck = await this.verifier.verify({
-          worktreePath: realWorktree,
-          baseCommit: currentBaseSha,
-          verificationCommands: task.verificationCommands,
-          protectedPaths: task.protectedPaths,
-          acceptanceCriteria: task.acceptanceCriteria,
+          env: {
+            ...process.env,
+            GIT_COMMITTER_NAME: 'Dupond Orchestrator',
+            GIT_COMMITTER_EMAIL: 'dupond@example.com',
+            GIT_AUTHOR_NAME: 'Dupond Orchestrator',
+            GIT_AUTHOR_EMAIL: 'dupond@example.com',
+          },
         });
-
-        if (!recheck.passed) {
-          return {
-            success: false,
-            status: 409,
-            blocked: true,
-            error: `Delivery blocked: Base branch ${baseBranch} has advanced and combined changes failed re-validation: ${recheck.failureReason}`,
-          };
-        }
-
-        // Record updated passing verification tied to merged SHA
-        this.store.recordVerification({
-          id: `ver-drift-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          runId: run.id,
-          attemptId: verification.attemptId || `drift-merge-${Date.now()}`,
-          revisionSha: mergedSha,
-          passed: true,
-          checks: recheck.checks,
-          criteriaVerified: recheck.criteriaVerified,
-          failureReason: null,
-        });
-
-        deliveredCommit = mergedSha;
+      } catch (mergeErr: any) {
+        try {
+          execFileSync('git', ['merge', '--abort'], { cwd: realWorktree, stdio: 'pipe' });
+        } catch {}
+        return {
+          success: false,
+          status: 409,
+          blocked: true,
+          error: `Delivery blocked: Base branch ${baseBranch} has advanced to ${latestRemoteBaseSha} and could not be merged cleanly into ${run.targetBranch}: ${mergeErr.stderr?.toString() || mergeErr.message}`,
+        };
       }
-    } catch (err: any) {
-      // Drift verification errors must NOT be ignored to continue delivery
+
+      const mergedSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: realWorktree,
+        encoding: 'utf-8',
+      }).trim();
+
+      const recheck = await this.verifier.verify({
+        worktreePath: realWorktree,
+        baseCommit: latestRemoteBaseSha,
+        verificationCommands: task.verificationCommands,
+        protectedPaths: task.protectedPaths,
+        acceptanceCriteria: task.acceptanceCriteria,
+      });
+
+      if (!recheck.passed) {
+        return {
+          success: false,
+          status: 409,
+          blocked: true,
+          error: `Delivery blocked: Base branch ${baseBranch} has advanced and combined changes failed re-validation: ${recheck.failureReason}`,
+        };
+      }
+
+      // Record fresh passing verification tied to merged SHA
+      this.store.recordVerification({
+        id: `ver-drift-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        runId: run.id,
+        attemptId: verification.attemptId || `drift-merge-${Date.now()}`,
+        revisionSha: mergedSha,
+        passed: true,
+        checks: recheck.checks,
+        criteriaVerified: recheck.criteriaVerified,
+        failureReason: null,
+      });
+
+      // Update run's baseCommit
+      this.store.updateRun(run.id, { baseCommit: latestRemoteBaseSha });
+      run.baseCommit = latestRemoteBaseSha;
+
+      // If integration changes the approved revision, invalidate its approval and require approval for the new revision
+      if (mergedSha !== deliveredCommit) {
+        return {
+          success: false,
+          status: 403,
+          blocked: true,
+          approvalRequired: true,
+          deliveredCommit: mergedSha,
+          baseCommit: latestRemoteBaseSha,
+          error: `Delivery blocked: Base branch ${baseBranch} advanced to ${latestRemoteBaseSha} and integration produced a new commit ${mergedSha}. Prior approval for ${deliveredCommit} is invalidated; operator approval is required for ${mergedSha}.`,
+        };
+      }
+
+      deliveredCommit = mergedSha;
+    }
+
+    // 5. Idempotent Delivery Reconciliation: Check for existing delivery on this branch/run
+    let prNumber: number | null = null;
+    let prUrl: string = '';
+    let ciStatus: DeliveryRecord['ciStatus'] = 'pending';
+
+    const existingDelivery = this.store.getDeliveryForRun(run.id) || this.store.getDeliveryByBranch(run.targetBranch);
+    if (existingDelivery && existingDelivery.prUrl) {
+      if (existingDelivery.deliveredCommit === deliveredCommit) {
+        console.log(`[Delivery] Existing PR found for branch ${run.targetBranch}: ${existingDelivery.prUrl} matching delivered commit ${deliveredCommit}. Reconciling...`);
+        return {
+          success: true,
+          status: 200,
+          deliveryRecord: existingDelivery,
+          prUrl: existingDelivery.prUrl,
+          branch: existingDelivery.branch,
+          deliveredCommit: existingDelivery.deliveredCommit,
+          baseCommit: existingDelivery.baseCommit,
+          ciStatus: existingDelivery.ciStatus,
+          message: `Idempotent delivery: Existing pull request reconciled at ${existingDelivery.prUrl}`,
+        };
+      } else {
+        console.log(`[Delivery] Existing PR found at ${existingDelivery.prUrl} for older revision ${existingDelivery.deliveredCommit}. Advancing PR to new verified commit ${deliveredCommit}...`);
+        prUrl = existingDelivery.prUrl;
+        prNumber = existingDelivery.prNumber ?? null;
+      }
+    }
+
+    // 6. Ensure the pushed commit is the verified commit
+    const headBeforePush = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: realWorktree,
+      encoding: 'utf-8',
+    }).trim();
+
+    if (headBeforePush !== deliveredCommit) {
       return {
         success: false,
         status: 409,
         blocked: true,
-        error: `Delivery blocked during base-drift verification: ${err.message}`,
+        error: `Delivery blocked: Repository HEAD (${headBeforePush}) does not match delivery commit (${deliveredCommit}).`,
       };
     }
 
-    // 5. Idempotent Delivery Reconciliation: Check for existing delivery on this branch/run
-    const existingDelivery = this.store.getDeliveryForRun(run.id) || this.store.getDeliveryByBranch(run.targetBranch);
-    if (existingDelivery && existingDelivery.prUrl) {
-      console.log(`[Delivery] Existing PR found for branch ${run.targetBranch}: ${existingDelivery.prUrl}. Reconciling...`);
+    const currentVerification = this.store.getLatestVerification(run.id);
+    if (!currentVerification || !currentVerification.passed || currentVerification.revisionSha !== deliveredCommit) {
       return {
-        success: true,
-        status: 200,
-        deliveryRecord: existingDelivery,
-        prUrl: existingDelivery.prUrl,
-        branch: existingDelivery.branch,
-        deliveredCommit: existingDelivery.deliveredCommit,
-        baseCommit: existingDelivery.baseCommit,
-        ciStatus: existingDelivery.ciStatus,
-        message: `Idempotent delivery: Existing pull request reconciled at ${existingDelivery.prUrl}`,
+        success: false,
+        status: 409,
+        blocked: true,
+        error: `Delivery blocked: Pushed commit (${deliveredCommit}) must have passing authoritative verification evidence for its exact revision.`,
       };
     }
-
-    // 6. Perform Git Push & Pull Request Creation
-    let prNumber: number | null = null;
-    let prUrl: string = '';
-    let ciStatus: DeliveryRecord['ciStatus'] = 'pending';
 
     const repoTarget = options.repoUrl || task.targetRepo || 'marcelodevops/dupond-project-leader';
 

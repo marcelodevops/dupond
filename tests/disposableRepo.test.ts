@@ -13,7 +13,7 @@ import { CodingWorkerAdapter } from '../src/server/worker/types.ts';
 async function main() {
   console.log('=== PROVING SEPARATE DISPOSABLE REPOSITORY WORKSPACE SELECTION & PR DELIVERY ===\n');
 
-  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'dp_disposable_test_'));
+  const tmpBase = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dp_disposable_test_')));
   const bareRemoteDir = path.join(tmpBase, 'disposable-remote.git');
   const disposableRepoDir = path.join(tmpBase, 'disposable-repo');
 
@@ -238,8 +238,9 @@ async function main() {
     const advancedBaseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: disposableRepoDir, encoding: 'utf-8' }).trim();
     assert.notStrictEqual(advancedBaseSha, initialBaseSha, 'Base branch must have advanced');
 
-    // Deliver task 2 - GitHubDeliveryService must detect drift, merge advancedBaseSha into worktree, re-verify combined result, and deliver
-    const driftDelivery = await deliveryService.dispatchDelivery({
+    // Deliver task 2 - GitHubDeliveryService must detect drift, merge advancedBaseSha into worktree, re-verify combined result,
+    // and invalidate prior approval since integration produced a new revision
+    const initialDriftDelivery = await deliveryService.dispatchDelivery({
       runId: run2.id,
       isApproved: true,
       approvedBy: 'qa-lead',
@@ -247,9 +248,25 @@ async function main() {
       targetBaseBranch: 'main',
     });
 
-    assert.strictEqual(driftDelivery.success, true, 'Delivery with clean base drift must succeed');
+    assert.strictEqual(initialDriftDelivery.success, false, 'Delivery must block when integration changes the approved revision');
+    assert.strictEqual(initialDriftDelivery.status, 403);
+    assert.strictEqual(initialDriftDelivery.approvalRequired, true);
+    assert.notStrictEqual(initialDriftDelivery.deliveredCommit, preDriftCommit, 'Integration commit must differ from pre-drift commit');
+    assert.ok(initialDriftDelivery.error?.includes('Prior approval for') && initialDriftDelivery.error?.includes('is invalidated'));
+    console.log('✔ [PASS] Base drift integration invalidated prior approval and required operator re-approval for new revision');
+
+    // Operator inspects combined result and grants re-approval for the new merged revision
+    const driftDelivery = await deliveryService.dispatchDelivery({
+      runId: run2.id,
+      isApproved: true,
+      approvedBy: 'qa-lead-reapproved',
+      repoUrl: 'disposable-org/disposable-repo',
+      targetBaseBranch: 'main',
+    });
+
+    assert.strictEqual(driftDelivery.success, true, 'Delivery with re-approved combined result must succeed');
     assert.strictEqual(driftDelivery.status, 200);
-    assert.notStrictEqual(driftDelivery.deliveredCommit, preDriftCommit, 'Delivered commit must be the new merged commit');
+    assert.strictEqual(driftDelivery.deliveredCommit, initialDriftDelivery.deliveredCommit, 'Delivered commit must be the re-approved merged commit');
 
     // Verify the combined worktree in remote bare origin has BOTH the worker changes AND the README from the updated base!
     const readmeInDelivered = execFileSync('git', ['--git-dir', bareRemoteDir, 'show', `${run2.targetBranch}:README.md`], { encoding: 'utf-8' });
@@ -257,7 +274,7 @@ async function main() {
 
     const calcInDelivered = execFileSync('git', ['--git-dir', bareRemoteDir, 'show', `${run2.targetBranch}:src/calculator.cjs`], { encoding: 'utf-8' });
     assert.ok(calcInDelivered.includes('function divide(a, b)'), 'Combined delivered commit must include worker divide function');
-    console.log('✔ [PASS] Base-drift detected, clean merge performed, and combined result attested & delivered');
+    console.log('✔ [PASS] Base-drift detected, clean merge performed, approval invalidated & re-approved, and combined result delivered');
 
     // ------------------------------------------------------------------------
     // Part 5: Base-Drift Merge Conflict Fails Closed

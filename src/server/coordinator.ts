@@ -21,6 +21,7 @@ import { StateMutationSchema } from '../types/schemas.js';
 import { taskStore } from './db/database.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
 import { WorkspaceManager } from './workspace/workspaceManager.js';
+import { resolveTargetRepository } from './workspace/targetRepositoryResolver.js';
 import { defaultCodingWorker } from './worker/geminiWorkerAdapter.js';
 import { 
   DEFAULT_TASKS, 
@@ -660,15 +661,12 @@ ${implementationCode.slice(0, 500)}...
       };
     }
 
-    // Real Coding Worker Execution via isolated worktree and sandbox!
     let storeTask = taskStore.getTask(task.key) || taskStore.getTask(task.id);
     if (!storeTask) {
       const configuredRepo = task.targetRepo ||
         this.state.integrationConfig?.repository?.repoUrl ||
-        process.env.DUPOND_TARGET_REPO ||
-        'marcelodevops/dupond-project-leader';
+        process.env.DUPOND_TARGET_REPO;
       const configuredRepoPath = task.targetRepoPath ||
-        (task.targetRepo && fs.existsSync(task.targetRepo) ? task.targetRepo : undefined) ||
         (this.state.integrationConfig?.repository?.localPath && fs.existsSync(this.state.integrationConfig.repository.localPath)
           ? this.state.integrationConfig.repository.localPath
           : undefined);
@@ -721,7 +719,7 @@ ${implementationCode.slice(0, 500)}...
         description: task.description,
         status: 'in_progress',
         priority: task.priority || 'high',
-        targetRepo: configuredRepo,
+        targetRepo: configuredRepo || 'marcelodevops/dupond-project-leader',
         targetRepoPath: configuredRepoPath,
         baseCommit: baseCommit,
         allowedPaths: allowedPaths,
@@ -735,19 +733,21 @@ ${implementationCode.slice(0, 500)}...
       });
     }
 
-    const workerAvail = await defaultCodingWorker.isAvailable();
-    if (!workerAvail.available) {
+    // If coding worker is not available or disabled, fail-closed
+    const workerAvailable = await defaultCodingWorker.isAvailable();
+    if (!workerAvailable.available) {
       throw blocked();
     }
 
-    const targetRepoDir = storeTask.targetRepoPath ||
-      (storeTask.targetRepo && fs.existsSync(storeTask.targetRepo) ? storeTask.targetRepo : undefined) ||
-      (this.state.integrationConfig?.repository?.localPath && fs.existsSync(this.state.integrationConfig.repository.localPath)
-        ? this.state.integrationConfig.repository.localPath
-        : undefined) ||
-      process.cwd();
+    // Real Coding Worker Execution via isolated worktree and sandbox!
+    const resolvedRepo = resolveTargetRepository({
+      targetRepo: task.targetRepo || this.state.integrationConfig?.repository?.repoUrl,
+      targetRepoPath: task.targetRepoPath || this.state.integrationConfig?.repository?.localPath,
+      integrationConfig: this.state.integrationConfig,
+      allowOrchestratorRepo: task.targetRepo === 'marcelodevops/dupond-project-leader' || task.targetRepo === 'dupond',
+    });
 
-    const workspaceManager = new WorkspaceManager(targetRepoDir);
+    const workspaceManager = new WorkspaceManager(resolvedRepo.repoPath);
 
     const workerRun = await defaultRepairCoordinator.executeTaskRun({
       task: storeTask,

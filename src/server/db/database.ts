@@ -38,6 +38,11 @@ export class TaskStore {
     } catch {
       // Column already exists
     }
+    try {
+      this.db.exec('ALTER TABLE task_runs ADD COLUMN target_repo TEXT;');
+    } catch {
+      // Column already exists
+    }
   }
 
   public getRawDb(): DatabaseSync {
@@ -200,16 +205,17 @@ export class TaskStore {
 
     const stmt = this.db.prepare(`
       INSERT INTO task_runs (
-        id, task_id, status, base_commit, target_branch, worktree_path,
+        id, task_id, status, target_repo, base_commit, target_branch, worktree_path,
         current_attempt, duration_ms, failure_type, failure_reason,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
       record.id,
       record.taskId,
       record.status,
+      record.targetRepo || null,
       record.baseCommit,
       record.targetBranch,
       record.worktreePath || null,
@@ -259,13 +265,15 @@ export class TaskStore {
 
     const stmt = this.db.prepare(`
       UPDATE task_runs
-      SET status = ?, worktree_path = ?, current_attempt = ?, duration_ms = ?,
+      SET status = ?, base_commit = ?, target_repo = ?, worktree_path = ?, current_attempt = ?, duration_ms = ?,
           failure_type = ?, failure_reason = ?, updated_at = ?
       WHERE id = ?
     `);
 
     stmt.run(
       updated.status,
+      updated.baseCommit,
+      updated.targetRepo || null,
       updated.worktreePath || null,
       updated.currentAttempt,
       updated.durationMs,
@@ -539,6 +547,7 @@ export class TaskStore {
       id: row.id,
       taskId: row.task_id,
       status: row.status,
+      targetRepo: row.target_repo || undefined,
       baseCommit: row.base_commit,
       targetBranch: row.target_branch,
       worktreePath: row.worktree_path,

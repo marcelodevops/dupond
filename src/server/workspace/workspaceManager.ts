@@ -17,6 +17,10 @@ export class WorkspaceManager {
     this.worktreesRoot = worktreesRoot || path.resolve(this.baseRepoDir, '.dupond_worktrees');
   }
 
+  public getBaseRepoDir(): string {
+    return this.baseRepoDir;
+  }
+
   public ensureWorktreesRoot(): void {
     if (!fs.existsSync(this.worktreesRoot)) {
       fs.mkdirSync(this.worktreesRoot, { recursive: true });
