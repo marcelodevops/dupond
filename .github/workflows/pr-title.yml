@@ -1,0 +1,39 @@
+name: Dupond Pull Request Title
+
+# Squash-merged PR titles become the commit message on main, and Release Please
+# classifies releases from those messages. A non-Conventional title is invisible
+# to release automation: no version bump, no changelog entry.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-title:
+    name: Conventional Commits title
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The title arrives from the event payload, so it is passed as an
+      # environment variable and never interpolated into the command line.
+      - name: Validate pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: npx tsx scripts/release.ts pr-title
