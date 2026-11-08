@@ -21,7 +21,7 @@ import { StateMutationSchema } from '../types/schemas.js';
 import { taskStore } from './db/database.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
 import { WorkspaceManager } from './workspace/workspaceManager.js';
-import { resolveTargetRepository } from './workspace/targetRepositoryResolver.js';
+import { resolveTargetRepository, orchestratorRepoSlug, isOrchestratorSelfTarget } from './workspace/targetRepositoryResolver.js';
 import { defaultCodingWorker } from './worker/geminiWorkerAdapter.js';
 import { 
   DEFAULT_TASKS, 
@@ -719,7 +719,7 @@ ${implementationCode.slice(0, 500)}...
         description: task.description,
         status: 'in_progress',
         priority: task.priority || 'high',
-        targetRepo: configuredRepo || 'marcelodevops/dupond-project-leader',
+        targetRepo: configuredRepo || orchestratorRepoSlug(),
         targetRepoPath: configuredRepoPath,
         baseCommit: baseCommit,
         allowedPaths: allowedPaths,
@@ -744,7 +744,7 @@ ${implementationCode.slice(0, 500)}...
       targetRepo: task.targetRepo || this.state.integrationConfig?.repository?.repoUrl,
       targetRepoPath: task.targetRepoPath || this.state.integrationConfig?.repository?.localPath,
       integrationConfig: this.state.integrationConfig,
-      allowOrchestratorRepo: task.targetRepo === 'marcelodevops/dupond-project-leader' || task.targetRepo === 'dupond',
+      allowOrchestratorRepo: isOrchestratorSelfTarget(task.targetRepo || this.state.integrationConfig?.repository?.repoUrl),
     });
 
     const workspaceManager = new WorkspaceManager(resolvedRepo.repoPath);
