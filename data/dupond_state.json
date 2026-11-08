@@ -410,6 +410,32 @@
       "jiraSynced": false,
       "slackNotified": false,
       "lastUpdated": "Just now"
+    },
+    {
+      "id": "task-fake-done",
+      "key": "AEG-906",
+      "title": "Bypass Attempt Task",
+      "description": "Tampered spec",
+      "epicId": "epic-1",
+      "status": "review",
+      "priority": "low",
+      "assignedAgentId": "agent-1",
+      "estimatedHours": 4,
+      "spentHours": 0,
+      "dependencies": [],
+      "subtasks": [
+        {
+          "id": "st-fake",
+          "title": "Unchecked",
+          "completed": false
+        }
+      ],
+      "tags": [],
+      "deliverables": [],
+      "lastAgentComment": "Quality Gate REJECTED \"Done\" transition: Acceptance Criteria Subtasks Verified: 1 of 1 subtask(s) still incomplete; Inspected Physical Code Artifact on Disk: No physical code artifact found on disk in .dupond_artifacts/AEG-906/",
+      "jiraSynced": false,
+      "slackNotified": false,
+      "lastUpdated": "Just now"
     }
   ],
   "agents": [
@@ -663,6 +689,46 @@
     }
   },
   "communications": [
+    {
+      "id": "comm-1794118007437",
+      "timestamp": "03:06 AM",
+      "senderId": "agent-orch",
+      "senderName": "Dupond Prime Core",
+      "senderRole": "Chief Orchestrator",
+      "recipientId": "all",
+      "content": "Central Quality Gate enforced: Rejected unauthorized \"Done\" transition for [AEG-906, AEG-906, AEG-906, AEG-906, AEG-906]. Quality checks must pass before completion.",
+      "messageType": "blocker"
+    },
+    {
+      "id": "comm-1794118007436",
+      "timestamp": "03:06 AM",
+      "senderId": "agent-orch",
+      "senderName": "Dupond Prime Core",
+      "senderRole": "Chief Orchestrator",
+      "recipientId": "all",
+      "content": "Central Quality Gate enforced: Rejected unauthorized \"Done\" transition for [AEG-906, AEG-906, AEG-906, AEG-906, AEG-906]. Quality checks must pass before completion.",
+      "messageType": "blocker"
+    },
+    {
+      "id": "comm-1794117980962",
+      "timestamp": "03:06 AM",
+      "senderId": "agent-orch",
+      "senderName": "Dupond Prime Core",
+      "senderRole": "Chief Orchestrator",
+      "recipientId": "all",
+      "content": "Central Quality Gate enforced: Rejected unauthorized \"Done\" transition for [AEG-999]. Quality checks must pass before completion.",
+      "messageType": "blocker"
+    },
+    {
+      "id": "comm-1794117980962",
+      "timestamp": "03:06 AM",
+      "senderId": "agent-orch",
+      "senderName": "Dupond Prime Core",
+      "senderRole": "Chief Orchestrator",
+      "recipientId": "all",
+      "content": "Central Quality Gate enforced: Rejected unauthorized \"Done\" transition for [AEG-999]. Quality checks must pass before completion.",
+      "messageType": "blocker"
+    },
     {
       "id": "comm-1794002491224",
       "timestamp": "07:01 PM",
@@ -959,5 +1025,5 @@
   ],
   "cycleCount": 99,
   "daemonRunning": false,
-  "lastUpdated": "2026-11-06T22:01:31.224Z"
+  "lastUpdated": "2026-11-08T06:06:47.437Z"
 }
