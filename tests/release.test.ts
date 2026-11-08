@@ -159,6 +159,13 @@ async function main() {
   // metadata would abort the release run.
   assert.deepStrictEqual(readManifestEntries(repoRoot), [{ path: '.', version: realSources.packageJson as string }]);
   assert.deepStrictEqual(findManifestProblems(readManifestEntries(repoRoot)), [], 'shipped manifest keys are not Release Please paths');
+  // The baseline must be the commit that first carried 0.1.0, otherwise commits
+  // from before the experimental release would be counted into the next one.
+  assert.strictEqual(
+    readReleasePolicy(repoRoot).bootstrapSha,
+    'bd3726ade06a4f60e9964d087f83e9bf25bfa572',
+    'bootstrap-sha must be the v0.1.0 preparation commit',
+  );
   assert.deepStrictEqual(
     findManifestProblems([
       { path: '$schema', version: 'https://example.invalid/manifest.json' },
@@ -180,7 +187,11 @@ async function main() {
     const mismatched = findVersionMismatches(readVersionSources(tmpRoot));
     assert.ok(mismatched.some((problem) => problem.includes('packages[""].version')), mismatched.join('\n'));
     const policyProblems = findPolicyProblems(readReleasePolicy(tmpRoot));
-    assert.strictEqual(policyProblems.length, 4, policyProblems.join('\n'));
+    assert.strictEqual(policyProblems.length, 5, policyProblems.join('\n'));
+    assert.ok(
+      policyProblems.some((problem) => problem.includes('bootstrap-sha')),
+      'An unpinned bootstrap baseline would let the automation release all of history',
+    );
     console.log('✔ [PASS] Lockfile root-package drift and unsafe policy flags are both refused');
 
     fs.writeFileSync(path.join(tmpRoot, 'package.json'), JSON.stringify({ name: 'x', version: 'not-a-version' }));
