@@ -602,6 +602,7 @@ class CoordinatorEngine {
     sha256: string;
     subtasksCompleted: string[];
     actionTaken: string;
+    runId?: string;
   }> {
     const blocked = () => new Error(
       `Execution blocked: No capable worker connected to fulfill acceptance criteria for ${task.key} (${task.title}). Requires real implementation in workspace.`
@@ -778,6 +779,7 @@ ${implementationCode.slice(0, 500)}...
       sha256: revisionSha,
       subtasksCompleted,
       actionTaken: `Executed real coding worker in isolated worktree for ${task.key} (Revision: ${revisionSha.slice(0, 10)})`,
+      runId: workerRun.id,
     };
   }
 
