@@ -13,7 +13,9 @@ import {
 } from './schema.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DEFAULT_DB_PATH = path.resolve(DATA_DIR, 'dupond.db');
+const DEFAULT_DB_PATH = process.env.DUPOND_DB_PATH
+  ? path.resolve(process.env.DUPOND_DB_PATH)
+  : path.resolve(DATA_DIR, 'dupond.db');
 
 export class TaskStore {
   private db: DatabaseSync;

@@ -375,6 +375,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
 
       return res.json({
         success: true,
+        runId: workerResult.runId,
         roleAssumed: `${agent.role} (Assumed for ${task.key})`,
         reasoning: `Inspected workspace and executed verified test suite for ${task.key} (${workerResult.fileSize} bytes, SHA-256: ${workerResult.sha256.slice(0, 10)}...).`,
         actionTaken: workerResult.actionTaken,
@@ -777,6 +778,34 @@ app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
     return res.status(result.status).json(result);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Delivery dispatch failed' });
+  }
+});
+
+// Endpoint: Read Run Details & Verification Evidence
+app.get('/api/runs/:id', (req: Request, res: Response) => {
+  try {
+    const run = taskStore.getRun(req.params.id);
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    const attempts = taskStore.listAttempts(run.id);
+    const verification = taskStore.getLatestVerification(run.id);
+    const delivery = taskStore.getDeliveryForRun(run.id);
+    return res.json({ run, attempts, verification, delivery });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to get run' });
+  }
+});
+
+// Endpoint: Read Latest Run for Task
+app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
+  try {
+    const run = taskStore.getLatestRunForTask(req.params.id) || taskStore.getRun(req.params.id);
+    if (!run) return res.status(404).json({ error: 'No run found for task' });
+    const attempts = taskStore.listAttempts(run.id);
+    const verification = taskStore.getLatestVerification(run.id);
+    const delivery = taskStore.getDeliveryForRun(run.id);
+    return res.json({ run, attempts, verification, delivery });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to get task runs' });
   }
 });
 
