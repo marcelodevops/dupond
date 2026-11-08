@@ -260,6 +260,24 @@ export function isConventionalPrTitle(title: string): boolean {
   return parseConventionalTitle(title) !== null;
 }
 
+const FALLBACK_EXAMPLE_TITLE = 'fix(release): gate publishing on the exact commit SHA';
+const BRANCH_STYLE_TITLE = /^([a-zA-Z]+)[\/\s_-]+(\S.*)$/;
+const NEAR_MISS_TITLE = /^([a-zA-Z]+)(?:\(([^()]*)\))?(!)?:[ \t]*(\S.*)$/;
+
+export function suggestConventionalTitle(title: string): string {
+  const trimmed = title.trim();
+  if (isConventionalPrTitle(trimmed)) return trimmed;
+  const nearMiss = NEAR_MISS_TITLE.exec(trimmed);
+  if (nearMiss && CONVENTIONAL_TYPES.includes(nearMiss[1].toLowerCase())) {
+    const [, type, scope, breaking, description] = nearMiss;
+    return `${type.toLowerCase()}${scope ? `(${scope})` : ''}${breaking ?? ''}: ${description.trim()}`;
+  }
+  const match = BRANCH_STYLE_TITLE.exec(trimmed);
+  const type = match?.[1].toLowerCase() ?? '';
+  if (!CONVENTIONAL_TYPES.includes(type)) return FALLBACK_EXAMPLE_TITLE;
+  return `${type}: ${match![2]}`;
+}
+
 /**
  * Pull the notes for one released version out of CHANGELOG.md. Used to publish the
  * experimental v0.1.0 notes written by hand instead of inventing new ones.
@@ -385,7 +403,8 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
     }
     console.error(
       `[release] title is not Conventional Commits and would be invisible to release automation: ${title}\n` +
-        `        expected one of: ${CONVENTIONAL_TYPES.join(', ')}(<scope>)?(!)?: description`,
+        `        expected one of: ${CONVENTIONAL_TYPES.join(', ')}(<scope>)?(!)?: description\n` +
+        `        example: ${suggestConventionalTitle(title)}`,
     );
     return 1;
   }
