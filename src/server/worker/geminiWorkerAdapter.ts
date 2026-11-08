@@ -361,8 +361,9 @@ Address the failure directly and verify your fix.
         iterations++;
         log(`Worker iteration ${iterations}/${maxIterations}`);
 
+        const selectedModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
         const response: any = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: selectedModel,
           contents: conversationContents,
           config: {
             tools: [{ functionDeclarations: toolDeclarations as any }],
