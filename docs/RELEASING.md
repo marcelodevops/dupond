@@ -59,11 +59,23 @@ source (`strategies/node.ts`, `versioning-strategies/default.ts`,
   Without it, the first run would find no tag, walk up to 250 commits of repository
   history, and offer to release all of it as one version with a rewritten changelog.
 
-Because Dupond squash-merges, **the PR title becomes the commit message on main
-and therefore decides the version**. The `Dupond Pull Request Title` check refuses
-titles that are not Conventional Commits so they cannot silently disappear from the
-changelog. Release Please's own titles (`chore: release 0.2.0`, or
-`chore(main): release 0.2.0`) pass the same check.
+* Tag names stay `vX.Y.Z`: `include-component-in-tag` is set to `false`
+  explicitly. Left out, release-please defaults it to `true` (`strategies/base.ts`,
+  `options.includeComponentInTag ?? true`) and tags `dupond-orchestrator-vX.Y.Z`,
+  while the release *finder* only matches a component-free tag — so automation would
+  never recognize the release it just made. This was observed: the first candidate
+  PR linked its comparison as `dupond-orchestrator-v0.1.0`, a ref that does not exist.
+
+Dupond merges PRs with **merge commits**, and the merge commit's own subject
+(`Merge pull request #10 from …`) is not a Conventional Commit at all — release-please
+logs `commit could not be parsed` for it. The version therefore comes from what the
+platform associates with that commit: **the pull request title decides it**. Verified
+on the real run 42531631584: PR #10 was merged as merge commit `2f2d70f`, and because
+its title was `feat: release automation`, the candidate release PR contained
+`### Features * release automation (2f2d70f)` and bumped to `0.2.0`. The
+`Dupond Pull Request Title` check exists because of exactly this: a title outside
+Conventional Commits is invisible to release automation. Release Please's own titles
+(`chore: release 0.2.0`, or `chore(main): release 0.2.0`) pass the same check.
 
 ## Release flow
 
@@ -84,10 +96,11 @@ changelog. Release Please's own titles (`chore: release 0.2.0`, or
    and the manifest entry are the three things to compare when deciding whether a
    run reconciled or stalled.
 
-Expect the first release PR after this automation lands to be a patch bump (`0.1.1`)
-caused by the automation commits themselves: they are typed `ci:`, which is hidden
-from the changelog but still counts as a commit after the `v0.1.0` tag. Merge it when
-there is something real to ship with it, or snooze it until then.
+The first release PR the automation actually built was `0.2.0`, from the `feat:`
+title of PR #10 — not the `0.1.1` this document first predicted, because the PR
+title (not the `ci:` commits) decided the bump. Merge such a PR when there is
+something real to ship with it, or leave it open/snooze it; it keeps being updated
+and folds in later changes.
 
 ## Duplicates, races, and retries
 
@@ -117,9 +130,26 @@ around that instead of assuming success:
   Any later step that must react to a release (npm publish, deploy, artifact
   mirror) has to run as a job in this same workflow with `needs: publish`; a
   `on: release` or `on: push: tags` workflow will simply never fire.
-* Nothing here requires repository secrets. `ci-gate` uses the job token read-only
+* Nothing here requires repository **secrets**. `ci-gate` uses the job token read-only
   (`actions: read`); `prepare`/`publish` get `contents: write` plus
   `pull-requests: write` and nothing broader. Credentials are never echoed.
+
+## Required repository setting (not a secret)
+
+`prepare` needs one toggle that the workflow's own `permissions` block cannot grant:
+**Settings → Actions → General → "Allow GitHub Actions to create and approve pull
+requests"**. With it off, the job token is refused no matter what the workflow asks
+for, and the first real run failed exactly there — after successfully creating the
+`release-please--branches--main--components--dupond-orchestrator` branch:
+
+```
+##[error]release-please failed: GitHub Actions is not permitted to create or approve pull requests.
+```
+
+`publish` depends on `prepare`, so that failure also means nothing is tagged: the
+run fails closed rather than half-releasing. Re-run
+**Dupond Release Automation → Run workflow** on `main` after enabling the toggle; the
+bot branch is reused, so no duplicate is created.
 
 ## The experimental v0.1.0 release
 
