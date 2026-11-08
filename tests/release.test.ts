@@ -15,6 +15,7 @@ import {
   readReleasePolicy,
   readVersionSources,
   REQUIRED_WORKFLOWS,
+  suggestConventionalTitle,
 } from '../scripts/release.ts';
 import type { WorkflowRun } from '../scripts/release.ts';
 
@@ -255,8 +256,13 @@ async function main() {
     'fix(scope)!: ',
   ]) {
     assert.ok(!isConventionalPrTitle(title), `expected to be refused: ${JSON.stringify(title)}`);
+    // The failure message tells the author to use this title, so it had better pass.
+    assert.ok(isConventionalPrTitle(suggestConventionalTitle(title)), `suggested title is not conforming: ${JSON.stringify(suggestConventionalTitle(title))}`);
   }
-  console.log('✔ [PASS] Free-form titles that would produce no version bump are refused');
+  assert.strictEqual(suggestConventionalTitle('Feat/release automation'), 'feat: release automation');
+  assert.strictEqual(suggestConventionalTitle('feat:no space after colon'), 'feat: no space after colon');
+  assert.strictEqual(suggestConventionalTitle('Fix(sandbox)!:disposes twice'), 'fix(sandbox)!: disposes twice');
+  console.log('✔ [PASS] Free-form titles that would produce no version bump are refused, with a conforming example offered');
 
   // --------------------------------------------------------------------------
   // Part 5: release notes come from the changelog that ships in the repository
