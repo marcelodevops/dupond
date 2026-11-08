@@ -1,423 +1,194 @@
 <p align="center">
   <img src="resources/dupond-banner.png" alt="Dupond — detective with a bowler hat and moustache" width="900">
 </p>
-# Dupond-Project Leader 🛡️🤖
-### Autonomous AI Project Orchestration, Dynamic Role Allocation & Real-Time Telemetry Engine
 
-![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
-![React](https://img.shields.io/badge/React-19.0-61dafb.svg?logo=react)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6.svg?logo=typescript)
-![Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%202.5%20%2F%20Flash-4285F4.svg?logo=google)
-![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8.svg?logo=tailwindcss)
-![Express](https://img.shields.io/badge/Express-4.21-000000.svg?logo=express)
-![Security Tests](https://img.shields.io/badge/Security%20Tests-38%2F38%20Passing-success.svg)
+# Dupond Orchestrator
 
----
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Node.js: 22+](https://img.shields.io/badge/Node.js-22.5%2B-green.svg)](https://nodejs.org/)
+[![TypeScript: 5+](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
+[![Google GenAI: Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%203.5%20%2F%203.8%20Flash-4285F4.svg)](https://ai.google.dev/)
+[![Version: 0.1.0-experimental](https://img.shields.io/badge/version-0.1.0--experimental-orange.svg)](CHANGELOG.md)
 
-## 🎯 Purpose
+Dupond is an autonomous, server-authoritative **task-to-Pull-Request system**. It takes structured task specifications with explicit acceptance criteria, prepares isolated Git worktrees, dispatches real coding workers powered by Google Gemini, authoritatively executes test checks inside an OS sandbox, and delivers verified changes as reviewable GitHub Pull Requests under human operator approval.
 
-Modern software engineering initiatives often suffer from **fragmented task delegation, specialist burnout, stale status tracking, and manual reporting overhead**. 
-
-**Dupond Orchestrator** resolves this by operating as an **Autonomous Project Management Engine**. It digests high-level curated project specs, automatically decomposes them into epics and actionable tasks, models topological prerequisite dependencies, and orchestrates an autonomous team of specialized AI agents. 
-
-Crucially, sub-agents **dynamically assume specialized roles** (such as *Solutions Architect*, *Penetration Tester*, *Design Systems Lead*, or *SRE*) based on emerging technical bottlenecks, project constraints, and inter-agent communication history. Real-time execution is surfaced on an interactive Kanban board, visual DAG diagrams, and automated executive digests with bi-directional Atlassian Jira and Slack synchronization.
+> **Experimental Release Notice (v0.1.0)**: Dupond v0.1.0 is an experimental release designed for supervised execution on disposable or dedicated development repositories. It does not provide microVM hardware virtualization, multi-tenant RBAC, or unmonitored production automation. All delivered Pull Requests require human review before merging.
 
 ---
 
-## 🏗️ Detailed Architectural Diagram
-
-### 1. System Architecture & Information Flow (Mermaid)
-
-```mermaid
-flowchart TB
-    subgraph UserInterface["Client Tier (React 19 SPA + Tailwind CSS v4)"]
-        UI_Nav["Control & Navigation Bar<br/>(Auto-Pilot / Step-by-Step)"]
-        UI_Kanban["Interactive 5-Column Kanban<br/>(Backlog, Todo, In Progress, Review, Done)"]
-        UI_DAG["Topological DAG & Gantt Visualizer<br/>(Dependency Flow, Burndown, Velocity)"]
-        UI_Matrix["Resource Allocation Matrix<br/>(Workload %, Dynamic Role Assumption)"]
-        UI_Reports["Executive Status Reports<br/>(C-Suite Briefs, Slack & Jira Digests)"]
-        UI_Studio["Orchestrator Persona Studio<br/>(Directives, Reasoning, Terminal)"]
-        UI_Integrations["Integrations & Custom Providers<br/>(Jira, Slack, Ollama, vLLM)"]
-    end
-
-    subgraph ServerBackend["Application Server Tier (Node.js + Express 4.x)"]
-        SRV_Router["Express API Router (/api/*)"]
-        SRV_Auth["Environment & Telemetry Gatekeeper<br/>(User-Agent: aistudio-build)"]
-        
-        subgraph Endpoints["API Service Endpoints"]
-            EP_Plan["/api/orchestrate/parse-plan<br/>Decompose plans into Epics & Tasks"]
-            EP_Alloc["/api/orchestrate/allocate-resources<br/>AI Workload & Skill Optimization"]
-            EP_Step["/api/orchestrate/agent-step<br/>Autonomous Agent Execution Cycle"]
-            EP_Report["/api/orchestrate/generate-report<br/>Stakeholder Synthesis Engine"]
-            EP_Jira["/api/integrations/jira/sync<br/>Issue Key & Status Mapping"]
-            EP_Slack["/api/integrations/slack/dispatch<br/>Incoming Webhook Dispatcher"]
-            EP_Custom["/api/custom-providers/ping<br/>External Endpoint Latency Probe"]
-        end
-    end
-
-    subgraph BrainTier["Intelligence & Agent Cluster"]
-        GeminiCore["Google GenAI SDK<br/>(gemini-3.8-flash)"]
-        OrchestratorAgent["Dupond Prime Core<br/>(Chief Orchestrator Agent)"]
-        
-        subgraph SpecialistNodes["Specialized Autonomous Agent Cluster"]
-            Agent_Arch["Nexus-7<br/>(Solutions Architect / Data Lead)"]
-            Agent_FE["Lyra UI<br/>(Frontend & UX Specialist)"]
-            Agent_BE["Kaelen Dev<br/>(Backend & Integration Dev)"]
-            Agent_QA["Valkyrie QA<br/>(SecOps & Quality Assurance Lead)"]
-            Agent_DevOps["Atlas CI<br/>(Site Reliability & Cloud Run Dev)"]
-        end
-        
-        MessageBus["Inter-Agent Event Bus<br/>(Directives, Handoffs, Role Shifts, Verdicts)"]
-    end
-
-    subgraph ExternalEcosystem["External Services & Integrations"]
-        JiraCloud["Atlassian Jira Cloud<br/>(Projects, Epics, Sprints, Tickets)"]
-        SlackWorkspaces["Slack Channels<br/>(#engineering-sprint, #stakeholder-briefs)"]
-        CustomLLMs["Custom API Providers<br/>(Ollama, vLLM, DeepSeek, Custom RPCs)"]
-    end
-
-    %% Flow connections
-    UI_Nav --> SRV_Router
-    UI_Kanban --> SRV_Router
-    UI_DAG --> SRV_Router
-    UI_Matrix --> SRV_Router
-    UI_Reports --> SRV_Router
-    UI_Studio --> SRV_Router
-    UI_Integrations --> SRV_Router
-
-    SRV_Router --> SRV_Auth
-    SRV_Auth --> Endpoints
-
-    EP_Plan --> GeminiCore
-    EP_Alloc --> GeminiCore
-    EP_Step --> OrchestratorAgent
-    EP_Report --> GeminiCore
-
-    OrchestratorAgent --> SpecialistNodes
-    SpecialistNodes <--> MessageBus
-    SpecialistNodes --> GeminiCore
-
-    EP_Jira <--> JiraCloud
-    EP_Slack --> SlackWorkspaces
-    EP_Custom <--> CustomLLMs
-```
-
----
-
-### 2. Comprehensive Component Layer Diagram
+## 🎯 What Dupond Does
 
 ```
-+---------------------------------------------------------------------------------------------------+
-|                                     DUPOND ORCHESTRATOR PLATFORM                                    |
-+---------------------------------------------------------------------------------------------------+
-|  PRESENTATION LAYER (React 19 + Tailwind CSS)                                                      |
-|  +-------------------------+  +--------------------------+  +----------------------------------+  |
-|  | Kanban Board Component  |  | Diagrams & Progress      |  | Resource Allocation Matrix       |  |
-|  | - 5-Column Lifecycle    |  | - Directed Graph (DAG)   |  | - 40h Capacity Buffer Gauge      |  |
-|  | - Execution Pulse Glow  |  | - Sprint Gantt Timeline  |  | - Workload Rebalance Engine      |  |
-|  | - Dependency Guardrails |  | - Burndown & Velocity    |  | - Dynamic Role Transition Studio |  |
-|  +-------------------------+  +--------------------------+  +----------------------------------+  |
-|  +-------------------------+  +--------------------------+  +----------------------------------+  |
-|  | Stakeholder Reports     |  | Orchestrator Studio      |  | Integrations & Providers Hub     |  |
-|  | - C-Suite Executive KPI |  | - Persona Directives     |  | - Jira Cloud Webhook Mapping     |  |
-|  | - Blocker Forecast      |  | - Autonomy Mode Selector |  | - Slack Block Kit Broadcaster    |  |
-|  | - Markdown/PDF Export   |  | - Real-Time Terminal     |  | - Custom Endpoint Latency Tester |  |
-|  +-------------------------+  +--------------------------+  +----------------------------------+  |
-+---------------------------------------------------------------------------------------------------+
-|  ORCHESTRATION & STATE MANAGEMENT (Client Hooks + Engine Cycle Controller)                         |
-|  - Auto-Pilot Loop (Autonomous execution with interval governor)                                   |
-|  - Step-by-Step Cycle Runner (Deterministic debugging and human-in-the-loop control)                |
-|  - Inter-Agent Event Log & Real-Time Toast Notification Dispatcher                                |
-+---------------------------------------------------------------------------------------------------+
-|  BACKEND APPLICATION SERVER (Node.js + Express 4.21 + Vite Middleware)                            |
-|  +---------------------------------------------------------------------------------------------+  |
-|  |  /api/orchestrate/parse-plan        -> Plan decomposition into Epics, Tasks, Subtasks       |  |
-|  |  /api/orchestrate/allocate-resources  -> Workload balancing, skill match scoring & role fit   |  |
-|  |  /api/orchestrate/agent-step        -> Agent task execution, deliverable & role assumption   |  |
-|  |  /api/orchestrate/generate-report    -> Executive summary, KPI extraction, Slack digest       |  |
-|  |  /api/integrations/jira/sync        -> Bi-directional ticket sync & issue payload mapping    |  |
-|  |  /api/integrations/slack/dispatch   -> Real/Simulated webhook posting to Slack channels      |  |
-|  |  /api/custom-providers/ping         -> REST / RPC endpoint latency benchmark & response test|  |
-|  +---------------------------------------------------------------------------------------------+  |
-+---------------------------------------------------------------------------------------------------+
-|  AI INTELLIGENCE & REASONING TIER (@google/genai SDK)                                             |
-|  - Google Gemini 3.8 Flash (`gemini-3.8-flash`)                                                   |
-|  - Server-side telemetry header (`httpOptions.headers['User-Agent'] = 'aistudio-build'`)          |
-|  - Safe heuristic fallbacks ensuring continuous offline and zero-downtime execution                |
-+---------------------------------------------------------------------------------------------------+
+Task Spec & Criteria
+       │
+       ▼
+Isolated Git Worktree (pinned to baseCommit)
+       │
+       ▼
+Gemini Coding Worker (inspects repo, edits code, runs permitted commands)
+       │
+       ▼
+Authoritative Verifier (OS sandbox, checks test pass & protected path integrity)
+       │
+  Fail? ──► Bounded Repair Loop (up to maxAttempts with actionable feedback)
+       │
+  Pass?
+       ▼
+Remote Base Drift Check (fetches remote base; re-verifies if base advanced)
+       │
+       ▼
+Human Operator Approval Gate (rejects unapproved deliveries)
+       │
+       ▼
+GitHub PR Delivery (pushes branch, opens PR via gh CLI, idempotent)
 ```
+
+1. **Explicit Target Resolution**: Resolves target repository paths explicitly; refuses to execute against missing paths and never silently falls back to the orchestrator's own repository.
+2. **Pinned Worktree Isolation**: Pins each task run to a recorded base commit in an ephemeral Git worktree (`git worktree add -B <branch> <path> <baseCommit>`).
+3. **Real Tool-Calling Worker**: The coding worker inspects repository files, reads tests, and modifies code through strictly scoped tools with path boundaries.
+4. **Authoritative Sandboxed Verification**: Independent of worker self-attestation, Dupond executes operator-configured verification commands inside an OS sandbox (macOS Seatbelt or Linux Podman/Docker).
+5. **Protected Path Integrity**: Strictly forbids modifications to test suites, build manifests, or CI workflows (`protectedPaths`). Any modification fails verification immediately.
+6. **Bounded Repair Loop**: If checks fail, captures stdout, stderr, and exit codes, providing actionable repair feedback to the worker for bounded subsequent attempts.
+7. **Remote Base Drift Verification**: Fetches the remote base branch before delivery. If the remote base has advanced, merges the updated base, re-verifies the combined result, and invalidates any prior approval if the commit changed.
+8. **Explicit Human Approval Gate**: Delivery is blocked until an operator reviews the verified diff and explicitly approves the exact commit revision.
+9. **Idempotent Delivery**: Delivers branches and opens PRs using the GitHub CLI (`gh`), reconciling existing PRs without creating duplicates.
 
 ---
 
-## ✨ Features
+## 🚀 Live Demonstration
 
-### 1. 📋 Curated Plan Ingestion & Decomposition
-- **Curated Templates**: Ingest ready-to-use plans (Enterprise AI MVP, PCI-DSS Payment Gateway, Clinical Telemetry) or paste custom markdown/bulleted product specs.
-- **Automated Breakdown**: Decomposes high-level visions into structured Epics, Granular Tasks, estimated hours, acceptance subtasks, tags, and suggested specialist roles.
-- **One-Click Adoption**: Instantly initialize the Kanban board and roadmap from parsed plans.
+An end-to-end demonstration of Dupond v0.1.0 was executed against a disposable public GitHub repository:
 
-### 2. 🗂️ Interactive Kanban Board with Real-Time Updates
-- **5-Column Pipeline**: `Backlog` ➔ `To Do` ➔ `In Progress` ➔ `Review & QA` ➔ `Done`.
-- **Live Execution Pulse**: Real-time visual indicator and glowing pulse on tasks currently being worked on by an active agent.
-- **Dependency Guardrails**: Automatically warns when a task is blocked by unfinished prerequisite dependencies (e.g., `Blocked by AEG-101`).
-- **Comprehensive Task Details**: View and edit subtask checklists, priority badges, Jira keys, tags, and real technical deliverables (code artifacts, schema contracts, OpenAPI specs).
+- **Delivered Pull Request**: [https://github.com/marcelodevops/dupond-live-demo/pull/1](https://github.com/marcelodevops/dupond-live-demo/pull/1)
+- **Delivered Commit SHA**: `e62c2e9ed11d1349efacb2344e08d2a8a9edeafb`
+- **Base Commit SHA**: `2b85fad2dc5bd849b1b05898db78dfc876761b0e` (`main`)
+- **Remote CI Run**: [https://github.com/marcelodevops/dupond-live-demo/actions/runs/42520092355](https://github.com/marcelodevops/dupond-live-demo/actions/runs/42520092355) (`SUCCESS`)
+- **Current Status**: **OPEN** (intentionally unmerged for inspection)
 
-### 3. 🧭 Visual Analytics & Progress Tracking Diagrams
-- **Interactive DAG Dependency Flow**: High-resolution SVG graph depicting nodes, directed bezier curves with arrowheads, status indicators, and critical path highlights.
-- **Sprint Gantt Timeline**: Day 1–14 sprint milestone timeline showing scheduled task bars, durations, and assignee avatar chips.
-- **Sprint Burndown Chart**: Compares ideal burndown trajectory with actual completed story points/hours remaining.
-- **Agent Velocity & Workload Distribution**: Real-time visualization of allocated hours against 40-hour capacity thresholds.
+### What the Artifact Proves:
+- The PR was delivered to a separate public GitHub repository.
+- Only application code (`src/math.js`, +17 lines) was modified to implement `percentageOf(value, percentage)`.
+- Protected paths (`test/**`, `package.json`, `.github/**`) were untouched.
+- GitHub Actions CI ran on the delivered commit and passed 100%.
 
-### 4. 👥 AI-Driven Resource Allocation & Dynamic Role Assumption
-- **Workload Balancing**: Real-time load percentage calculations identifying underloaded, balanced, or overloaded agents.
-- **AI Rebalance**: Evaluates agent skill sets, task difficulty, priority, and backlog to redistribute tasks optimally.
-- **Dynamic Role Assumption**: Agents change roles dynamically based on project requirements (e.g. Nexus-7 shifting from *Solutions Architect* to *Data Governance Lead*; Valkyrie QA assuming *Penetration Tester* for compliance audits).
-- **Role Transition History**: Complete audit trail of past role transitions and rationales.
-
-### 5. 📊 Automated Stakeholder Status Reporting
-- **Executive Scorecard**: Instant synthesis of sprint completion rate, velocity, blocker counts, and sprint health (*Green / Amber / Red*).
-- **Executive Narrative**: High-level summary crafted for C-Suite and product leadership.
-- **Technical Deliverables & Risk Mitigations**: Outlines key architectural wins and provides AI mitigation plans for potential bottlenecks.
-- **Digests**: Pre-formatted Markdown digests tailored for **Slack Block Kit** and **Atlassian Jira Release Notes**.
-- **Print / PDF View**: One-click printable executive brief.
-
-### 6. ⚙️ Orchestrator Persona Studio & Directives Terminal
-- **Agent Governance**: Customize the Chief Orchestrator's name, avatar, and system prompt directives.
-- **Autonomy Settings**: Switch between *Full Autonomous*, *Semi-Autonomous (Recommended)*, and *Step-by-Step Human Approval*.
-- **Cognitive Controls**: Configure reasoning level (*Deep Thinking* vs *Standard*) and risk tolerance (*Conservative*, *Balanced*, *Aggressive*).
-- **Directives Terminal**: Communicate live with the Orchestrator via an integrated chat terminal to inject ad-hoc requirements or reprioritize tasks.
-
-### 7. 🔌 Jira, Slack & Custom API Providers
-- **Atlassian Jira**: Bi-directional webhook synchronization, issue key generation, and ticket status mapping.
-- **Slack Notifications**: Webhook integration posting real-time alerts to `#engineering-sprint` and `#stakeholder-briefs`.
-- **Custom API Providers**: Register custom REST / RPC / LLM endpoints (e.g., local Ollama, vLLM, DeepSeek instances, or custom CI/CD pipelines) with real-time latency ping testing.
-- **Inter-Agent Message Bus**: Live chronological feed of directives, handoffs, deliverables, and role shifts.
+For full details on what the GitHub artifact proves versus what relies on local execution telemetry, see [`docs/live-demonstration.md`](docs/live-demonstration.md).
 
 ---
 
-## 💻 Tech Stack
+## 💻 Prerequisites & Setup
 
-| Component | Technology | Version | Description |
-| :--- | :--- | :--- | :--- |
-| **Frontend Framework** | React | `^19.0.1` | Next-generation React with functional components and hooks |
-| **Styling** | Tailwind CSS | `^4.3.3` | High-performance CSS framework with `@tailwindcss/vite` |
-| **Icons** | Lucide React | `^0.546.0` | Modern, clean icon set |
-| **Animation** | Motion | `^12.23.24` | Smooth transitions and layout animations |
-| **Backend Runtime** | Node.js + Express | `^4.21.2` | Full-stack API server hosting orchestrator endpoints |
-| **AI Intelligence** | `@google/genai` | `^2.4.0` | Official Google GenAI SDK powered by `gemini-3.8-flash` |
-| **Language** | TypeScript | `^7.0.2` | Strict end-to-end type safety |
-| **Build Tool** | Vite | `^8.3.0` | Instant HMR and production bundle optimization |
+### Runtime Requirements
+- **Node.js**: `v22.5.0` or higher (Node 22 LTS or Node 24 recommended; relies on Node's built-in `node:sqlite`).
+- **npm**: `v9.x` or higher.
+- **Git**: `v2.30+` installed and configured.
+- **GitHub CLI (`gh`)**: Installed and authenticated (`gh auth login`) with `repo` scopes for PR delivery.
+- **Google Gemini API Key**: Valid API key from [Google AI Studio](https://aistudio.google.com/).
+
+### Sandbox Prerequisites
+- **macOS**: Built-in Apple Seatbelt (`sandbox-exec`).
+- **Linux**: Rootless `podman` (recommended) or `docker`. If on Linux, pre-pull the sandbox image:
+  ```bash
+  npm run prepare:sandbox
+  ```
 
 ---
 
-## 🚀 Installation & Local Setup
+## ⚙️ Configuration & Environment Variables
 
-### Prerequisites
-- **Node.js**: Version `20.x` or higher (Node `22.x` recommended).
-- **npm** or **pnpm**: Version `9.x` or higher.
-- *(Optional)* **Gemini API Key**: If you have a Google AI Studio API key, set it in `.env` to enable full real-time Gemini generation (built-in intelligent heuristic fallbacks ensure the app works out of the box even without an active key).
-
-### Step 1: Clone or Open the Project
-Clone the repository (or open your downloaded project directory):
-```bash
-git clone <repository-url>
-cd dupond-orchestrator
-```
-
-### Step 2: Install Dependencies
-```bash
-npm install
-```
-
-### Step 3: Configure Environment Variables
 Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and verify your settings:
-```env
-# Optional Gemini API Key (Automatically injected in AI Studio)
-GEMINI_API_KEY="your_gemini_api_key_here"
+| Variable | Required | Default | Description |
+| :--- | :---: | :--- | :--- |
+| `DUPOND_AUTH_TOKEN` | Yes* | *(ephemeral random)* | Bearer token required for API access. If omitted in dev, a random token is generated and logged at startup. |
+| `GEMINI_API_KEY` | Yes | *(none)* | Google GenAI API key for the coding worker. |
+| `GEMINI_MODEL` | No | `gemini-3.5-flash` | Model identifier (`gemini-3.5-flash` or `gemini-3.8-flash`). Note: `gemini-2.5-flash` is deprecated. |
+| `PORT` | No | `3000` | HTTP port for the application server. |
+| `DUPOND_DB_PATH` | No | `./data/dupond.db` | File path for SQLite task and execution history database. |
+| `DUPOND_STATE_FILE` | No | `./data/dupond_state.json` | File path for JSON sprint and UI telemetry state. |
+| `DUPOND_SANDBOX_IMAGE` | No | `node:22-bookworm` | Container image used for Linux sandbox execution. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | No | *(system keyring)* | GitHub token for headless CI delivery. |
 
-# Application URL
-APP_URL="http://localhost:3000"
+---
 
-# Optional: Allow custom providers to target private/loopback hosts (Ollama, vLLM)
-# Default is "false" which enforces strict SSRF loopback & private IP blocking.
-DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS="false"
+## 🏃 Quickstart & Walkthrough
 
-# Optional: Custom state file path (defaults to ./data/dupond_state.json)
-# DUPOND_STATE_FILE="./data/dupond_state.json"
-```
-
-### Step 4: Run the Development Server
+### 1. Install Dependencies
 ```bash
-npm run dev
+npm install
 ```
 
-The Express server with embedded Vite middleware will start:
-```
-Dupond Orchestrator server running on http://0.0.0.0:3000
-```
-Open **[http://localhost:3000](http://localhost:3000)** in your browser.
-
-### Step 5: Build for Production
-To create a production-ready bundle and run:
+### 2. Start the Application Server
 ```bash
-npm run build
+export DUPOND_AUTH_TOKEN="your_operator_secret_token"
+export GEMINI_API_KEY="AIzaSy..."
 npm start
 ```
-
----
-
-## 📖 How to Use: Step-by-Step Guide
-
-### 1. Ingesting & Decomposing a Project Plan
-1. Click the **"Ingest Plan"** button in the top navigation bar.
-2. Choose one of the curated enterprise templates (e.g., *Enterprise AI Workflow MVP*) or select **"Clear / New Custom Plan"** to paste your own product spec.
-3. Click **"Decompose & Orchestrate Plan with AI"**.
-4. Dupond will parse the plan into epics, granular tasks, estimated effort, and recommended agent roles.
-5. Click **"Adopt Plan to Kanban Board"** to populate the workspace.
-
-### 2. Managing the Autonomous Execution Loop
-- **Auto-Pilot Mode**: Click the green **"Auto-Pilot"** button in the header. Dupond will continuously cycle through eligible tasks, advancing them through *In Progress*, *Review*, and *Done* stages while generating technical code deliverables and broadcasting handoff messages.
-- **Step-by-Step Mode**: Click **"Next Cycle"** to trigger a single deterministic agent execution step.
-- **Manual Drag / Click Transitions**: On the Kanban board, click the forward (`→`) or backward (`←`) arrow on any task card to move it across columns.
-
-### 3. Inspecting Deliverables & Running Specific Tasks
-1. Click on any task card on the Kanban board to open the **Task Detail Modal**.
-2. Review acceptance criteria subtasks and check them off interactively.
-3. View generated deliverables (source code, schemas, tests).
-4. Click **"Execute Agent Step on This Task"** to instruct the assigned specialist to perform immediate work on that specific item.
-
-### 4. Viewing Diagrams of Progress
-Navigate to the **"Diagrams & Progress"** tab:
-- **DAG Dependency Flow**: Inspect the topological graph to verify prerequisites and identify critical path bottlenecks.
-- **Sprint Gantt Timeline**: Check scheduled days 1–14 and task durations.
-- **Sprint Burndown**: Track actual progress against the ideal burndown trajectory.
-- **Velocity & Allocation**: Review current agent workload vs capacity.
-
-### 5. AI-Driven Workload Balancing & Role Assumption
-1. Navigate to the **"Resource Allocation"** tab.
-2. Check each agent’s capacity percentage (e.g. 75% Balanced, 90% Overloaded).
-3. Click **"AI Rebalance Workload"** to trigger the AI optimization engine to reassign tasks based on domain skills.
-4. Click **"Assume Role"** on any agent card to dynamically shift their title and role (e.g., assign *Lead Penetration Tester* to Valkyrie QA).
-
-### 6. Synthesizing Stakeholder Reports
-1. Navigate to the **"Stakeholder Reports"** tab.
-2. Click **"Generate Stakeholder Brief"**.
-3. Review the **Executive Narrative**, **Sprint Health rating**, **Key Highlights**, and **Risk Mitigations**.
-4. Click **"Copy"** on the Slack digest or Jira release notes, or click **"Dispatch to Slack"** to broadcast to your team.
-5. Click **"Print / PDF"** to generate an executive briefing document.
-
-### 7. Customizing the Orchestrator & Registering Custom Providers
-1. In the **"Orchestrator Studio"** tab:
-   - Edit the Chief Orchestrator's persona and system prompt directives.
-   - Adjust autonomy mode, reasoning depth, and risk tolerance.
-   - Use the **Directives Terminal** on the right to chat directly with Dupond.
-2. In the **"Jira & Slack Sync"** tab:
-   - Set up your Jira Cloud URL and test synchronization.
-   - Configure your incoming Slack webhook URL.
-   - Click **"Register Custom Endpoint"** to link your own local Ollama, vLLM, or custom microservice endpoints and ping them for latency.
-
----
-
-## 📡 API Reference
-
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/api/health` | Health probe returning service status, Gemini API key, and coordinator daemon state |
-| `GET` | `/api/orchestrate/state` | Returns the server-authoritative sprint state (`data/dupond_state.json`) |
-| `POST` | `/api/orchestrate/state` | Updates authoritative state with central Quality Gate validation |
-| `POST` | `/api/orchestrate/tasks/:id/transition` | Centralized transition endpoint enforcing dependencies, AST syntax, tests, and disk code artifacts |
-| `POST` | `/api/orchestrate/verify-task` | Multi-rule quality gate evaluator (Dependencies, Subtasks, Disk Artifact, Compiler AST, Unit Assertions) |
-| `POST` | `/api/orchestrate/engine/start` | Starts server-side background coordinator daemon (survives browser close) |
-| `POST` | `/api/orchestrate/engine/stop` | Pauses server-side background coordinator daemon |
-| `POST` | `/api/orchestrate/engine/step` | Executes a single deterministic cycle on the server engine |
-| `POST` | `/api/orchestrate/chat` | Action-capable Orchestrator terminal that mutates tasks, priorities, and daemon state |
-| `POST` | `/api/orchestrate/parse-plan` | Decomposes project text into Epics, Tasks, Subtasks, and Roles |
-| `POST` | `/api/orchestrate/allocate-resources` | Calculates capacity utilization and provides optimized task assignments |
-| `POST` | `/api/orchestrate/agent-step` | Worker execution step generating real code and test artifacts |
-| `POST` | `/api/orchestrate/generate-report` | Synthesizes an executive status report with KPIs and formatted digests |
-| `POST` | `/api/integrations/jira/sync` | Real Atlassian Jira Cloud issue creation and verification (`/rest/api/3`) |
-| `POST` | `/api/integrations/slack/dispatch` | Posts formatted Slack Block Kit alerts to real webhook channels |
-| `POST` | `/api/custom-providers/ping` | Tests external user-defined REST / LLM endpoints with latency measurement |
-| `POST` | `/api/custom-providers/execute` | Executes prompts directly against external self-hosted models (Ollama, vLLM) |
-
----
-
-## 🔒 Security Architecture & Guardrails
-
-Dupond implements defense-in-depth security boundaries protecting against SSRF, directory traversal, credential leakage, and arbitrary state tampering:
-
-### 1. Restricted Execution Sandbox & Workspace Isolation
-- **OS-Level Sandboxing**: Project execution and tests run in restricted environments. On macOS, Seatbelt (`sandbox-exec`) isolates process trees, restricting file writes strictly to the isolated worktree and private temp folders, while explicitly denying access to host credentials (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gemini`, `~/.gnupg`, and `.env` files).
-- **Environment Sanitization**: Worker and child processes run with sanitized environments—ambient host credentials, API tokens, and secrets are completely stripped.
-- **Process Group Termination**: Child processes run in separate process groups (`detached: true`) with hard execution timeouts; runaway processes are cleanly terminated with process-group `SIGKILL`.
-- **Note on Boundaries**: While OS-level sandboxing (Seatbelt/Podman) provides robust containment against accidental modifications and credential access, root-level containerization or microVMs (e.g. Firecracker) are planned for untrusted multi-tenant production hosting.
-
-### 2. Lexical Path Containment & Traversal Defense
-- **Task Key Ingress Validation**: All incoming task keys are strictly validated against `/^AEG-\d+$/` across all endpoints before touching filesystem operations.
-- **Containment Enforcement**: Handled via [`src/server/artifactPaths.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/artifactPaths.ts) and [`src/server/deliveryHandler.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/deliveryHandler.ts) using `isSafePathSegment` and `isPathLexicallyContained`, preventing prefix collisions (e.g. `/tmp/project-other`) and symlink-based escapes.
-- **Dangling Symlink Protection**: File deliveries utilize `O_EXCL` and `O_NOFOLLOW` flags to ensure symlinks cannot be traversed.
-
-### 3. DNS-Pinned SSRF Defense with Anti-Rebinding
-- **Pinned Socket Egress**: External HTTP dispatches in [`src/server/egress.ts`](file:///Users/mac/ops/repos/dupond-agent/src/server/egress.ts) pre-resolve hostnames and dial directly to verified IP addresses, defeating DNS rebinding and TOCTOU races.
-- **Private & Metadata Blocklist**: Refuses all IPv4 and IPv6 loopback (`127.0.0.1`, `::1`), RFC1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Carrier-Grade NAT (`100.64.0.0/10`), IPv6 ULA/link-local, and cloud instance metadata endpoints (`169.254.169.254`).
-- **TLS Handshake Safety**: Wraps pinned IP connections via `tls.connect` with the original hostname for SNI, avoiding TLS handshake hangs on non-SNI sockets.
-- **Redirect Resistance**: Outbound requests enforce `redirect: 'manual'` so third-party endpoints cannot bounce requests into internal infrastructure.
-- **Egress Allowlisting**: Jira sync is restricted to `*.atlassian.net` and Slack dispatches require `https://hooks.slack.com/`.
-
-### 4. Credential Redaction & Authoritative State Governance
-- **Wire Redaction**: Server state returned to clients (`getStateView()`) masks bearer secrets (Jira API tokens, Slack webhooks, repo tokens, custom provider auth headers) with `•` characters across all endpoints (including `updateState`).
-- **Round-Trip Preservation**: Re-saving state via `updateState` detects masked placeholders and preserves real server-held secrets without overwriting them.
-- **Authoritative Verification Gate**: Tasks cannot be marked `Done` via bulk updates or client assertions; completion strictly requires passing operator-configured verification commands against the exact commit revision.
-- **Zod Runtime Schema Validation**: All state mutations are validated against strict Zod schemas ([`src/types/schemas.ts`](file:///Users/mac/ops/repos/dupond-agent/src/types/schemas.ts)), eliminating arbitrary object injection or state clobbering.
-
----
-
-## 🚀 Task-to-PR Operational Pipeline
-
-Dupond provides an end-to-end autonomous flow taking user-defined tasks to verified Pull Requests:
-
-1. **Task & Execution Contracts**: Objective acceptance criteria, base commit, allowed/protected paths, operator-configured verification commands, and attempt budgets persisted in transactional SQLite (`src/server/db/`).
-2. **Pinned Workspace Isolation**: Each run prepares an isolated Git worktree pinned to the recorded base commit (`src/server/workspace/`).
-3. **Real Coding Worker Adapter**: Tool-calling agent (`GeminiCodingWorkerAdapter`) inspects repository files, applies code modifications, and tests changes inside the sandbox (`src/server/worker/`).
-4. **Authoritative Verification**: Runs operator-configured test suites; verifies protected test files were not tampered with (`src/server/verification/`).
-5. **Bounded Repair Loop**: Failed checks capture exact exit codes, stdout, and stderr, feeding actionable evidence back to the worker for up to `maxAttempts` before failing closed.
-6. **GitHub Delivery & Reconciliation**: Enforces operator approval policies, pushes branches, and creates/reconciles GitHub pull requests idempotently without duplicate PRs (`src/server/delivery/`). Never merges automatically.
-7. **Crash-Safe Reconciliation**: On boot, interrupted runs are reconciled honestly and orphaned task locks are reset.
-
-### Implemented Features vs. Planned Work
-- **Implemented**: Transactional SQLite store (`node:sqlite`), Git worktree manager, macOS Seatbelt sandbox executor, Gemini tool-calling coding worker, authoritative verification, bounded repair loop, GitHub delivery with duplicate PR prevention, and 13/13 verified acceptance scenarios.
-- **Planned Work**: MicroVM (Firecracker) isolation for remote Linux workers, multi-tenant RBAC, and automated post-merge deployment tracking.
-
----
-
-## 🧪 Testing & Verification Suite
-
-Dupond includes a comprehensive automated test suite covering security guardrails, sandbox isolation, SSRF prevention, database transactions, worker tool dispatch, repair loops, and end-to-end acceptance scenarios:
-
+Verify server health:
 ```bash
-# Run the complete test suite
-npm test
+curl -s http://localhost:3000/api/health
 ```
 
-### Test Coverage Breakdown:
-1. **Guardrails & Delivery Suite (`tests/guardrails.test.ts`)** (15 tests)
-2. **Security & Isolation Suite (`tests/trackA.test.ts`)** (19 tests)
-3. **Security Fixes & State Redaction Suite (`tests/securityFixes.test.ts`)** (4 tests)
-4. **Transactional SQLite TaskStore Suite (`tests/db.test.ts`)** (7 tests)
-5. **Workspace & Sandbox Isolation Suite (`tests/sandbox.test.ts`)** (8 tests)
-6. **Coding Worker Adapter Suite (`tests/workerAdapter.test.ts`)** (3 tests)
-7. **Repair Loop & Authoritative Verification Suite (`tests/repairLoop.test.ts`)** (4 tests)
-8. **GitHub Delivery & PR Reconciliation Suite (`tests/delivery.test.ts`)** (4 tests)
-9. **Full Acceptance Scenario Suite (`tests/e2ePipeline.test.ts`)** (13 tests)
-10. **Workload Balancer Suite (`workspace/AEG-104/workloadBalancer.test.ts`)** (4 tests)
+### 3. Practical API Walkthrough
+Dupond is controlled via authenticated HTTP API calls. A minimal execution cycle consists of:
+1. **Configure Repository**: `POST /api/orchestrate/state` (registers local target repository path and remote slug).
+2. **Submit Task**: `POST /api/orchestrate/state` (specifies criteria, allowed/protected paths, verification commands).
+3. **Execute Worker Step**: `POST /api/orchestrate/agent-step` (worker inspects workspace, edits code, verifies in sandbox).
+4. **Inspect Evidence**: `GET /api/runs/:id` (inspects diff, iteration logs, tokens, and authoritative test results).
+5. **Approve Delivery**: `POST /api/delivery/dispatch` with `{ isApproved: true, approvedBy: "..." }`.
+
+For concrete `curl` commands and JSON payload examples, see the [Practical API Walkthrough Guide](docs/walkthrough.md).
+
+---
+
+## 🔒 Security Architecture & Sandbox Isolation
+
+Dupond enforces strict defensive boundaries across all operations:
+
+- **Worktree Boundary**: All worker operations occur in an isolated Git worktree pinned to the recorded `baseCommit`.
+- **Command Sandboxing**:
+  - **macOS Seatbelt**: Denies file writes outside the worktree and temp directory; denies reading user home credentials (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gemini`, `~/.gnupg`, and `.env*` files); strips ambient host environment variables.
+  - **Linux Container**: Runs in a read-only root container with `--network none` mounting only the worktree.
+- **SSRF Defense with Anti-Rebinding**: Pinned socket egress pre-resolves hostnames to verify IP ranges before connecting, blocking private, link-local, loopback, and cloud metadata addresses (`169.254.169.254`).
+- **Credential Redaction**: Client-facing state endpoints mask all credentials with `••••••••`. State updates preserve real server-held secrets.
+
+For detailed architecture diagrams, Seatbelt rules, and isolation limits, see [Architecture & Sandbox Documentation](docs/architecture-and-sandbox.md).
+
+---
+
+## 🧪 Testing & Verification
+
+Dupond contains 11 automated test suites covering security guardrails, sandbox isolation, database transactions, worker tool dispatch, repair loops, and end-to-end acceptance scenarios:
+
+```bash
+# Run the complete automated test suite
+npm test
+
+# Run TypeScript type check
+npm run lint
+
+# Pre-pull container image for Linux sandbox
+npm run prepare:sandbox
+```
+
+### Test Suite Distinction:
+- **Local Test Suites (`npm test`)**: Use temporary local Git repositories, mock/fixture coding workers, and local Git remotes to verify coordination logic, sandbox boundaries, and database transactions deterministically without incurring API costs or requiring live network access.
+- **Live Demonstrations**: Run against actual remote GitHub repositories using the live Gemini API and real GitHub CLI authentication.
+
+---
+
+## 📚 Documentation Index
+
+- [Practical API Walkthrough](docs/walkthrough.md): Step-by-step API guide with concrete `curl` requests.
+- [Architecture & Sandbox Guide](docs/architecture-and-sandbox.md): Deep-dive into worktree management, Seatbelt profiles, Linux containers, and persistence schemas.
+- [Troubleshooting Guide](docs/troubleshooting.md): Solutions for missing credentials, Gemini 429 rate limits, Linux Podman timeouts, and base drift conflicts.
+- [Live Demonstration Audit](docs/live-demonstration.md): Full analysis of PR #1 in `marcelodevops/dupond-live-demo`.
+- [Release Changelog](CHANGELOG.md): Notes for the experimental v0.1.0 release.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **Apache License 2.0**
+This project is licensed under the [Apache License 2.0](LICENSE).
