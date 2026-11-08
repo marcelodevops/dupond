@@ -719,7 +719,7 @@ ${implementationCode.slice(0, 500)}...
         description: task.description,
         status: 'in_progress',
         priority: task.priority || 'high',
-        targetRepo: configuredRepo,
+        targetRepo: configuredRepo || 'marcelodevops/dupond-project-leader',
         targetRepoPath: configuredRepoPath,
         baseCommit: baseCommit,
         allowedPaths: allowedPaths,

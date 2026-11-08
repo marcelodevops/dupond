@@ -9,7 +9,7 @@ import { AuthoritativeVerifier } from '../src/server/verification/authoritativeV
 import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.js';
 import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.js';
 import { resolveTargetRepository } from '../src/server/workspace/targetRepositoryResolver.js';
-import { CodingWorkerAdapter } from '../src/server/worker/workerAdapter.js';
+import { CodingWorkerAdapter, WorkerExecutionContext } from '../src/server/worker/types.js';
 
 async function main() {
   console.log('===============================================================');
@@ -147,7 +147,7 @@ async function main() {
     const subtractWorker: CodingWorkerAdapter = {
       name: 'subtract_worker',
       isAvailable: async () => ({ available: true }),
-      execute: async (context) => {
+      execute: async (context: WorkerExecutionContext) => {
         fs.writeFileSync(path.join(context.worktreePath, 'src', 'math.cjs'), `function add(a, b) { return a + b; }\nfunction subtract(a, b) { return a - b; }\nmodule.exports = { add, subtract };\n`);
         fs.writeFileSync(path.join(context.worktreePath, 'test.js'), `const { add, subtract } = require('./src/math.cjs');\nif (add(1, 2) !== 3 || subtract(5, 2) !== 3) process.exit(1);\nconsole.log('Subtract test OK');\n`);
         return {
@@ -239,7 +239,7 @@ async function main() {
     const conflictWorker: CodingWorkerAdapter = {
       name: 'conflict_worker',
       isAvailable: async () => ({ available: true }),
-      execute: async (context) => {
+      execute: async (context: WorkerExecutionContext) => {
         fs.writeFileSync(path.join(context.worktreePath, 'src', 'math.cjs'), `// WORKER VERSION\nfunction add(a, b) { return a + b + 0; }\nmodule.exports = { add };\n`);
         return {
           success: true,
@@ -312,7 +312,7 @@ async function main() {
       worker: {
         name: 'non_multiply_worker',
         isAvailable: async () => ({ available: true }),
-        execute: async (context) => {
+        execute: async (context: WorkerExecutionContext) => {
           fs.writeFileSync(path.join(context.worktreePath, 'src', 'notes.txt'), 'worker notes\n');
           return {
             success: true,

@@ -7,6 +7,7 @@ import {
   WorkerExecutionContext,
   WorkerExecutionResult,
 } from './types.js';
+export * from './types.js';
 import { SandboxExecutor, defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
 
 export class GeminiCodingWorkerAdapter implements CodingWorkerAdapter {
