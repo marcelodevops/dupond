@@ -4,6 +4,7 @@ import path from 'path';
 import { TaskRecord, TaskRunRecord } from '../db/schema.js';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
 import { WorkspaceManager, defaultWorkspaceManager } from '../workspace/workspaceManager.js';
+import { resolveTargetRepository } from '../workspace/targetRepositoryResolver.js';
 import { CodingWorkerAdapter, WorkerExecutionContext } from '../worker/types.js';
 import { defaultCodingWorker } from '../worker/geminiWorkerAdapter.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
@@ -64,13 +65,36 @@ export class RepairCoordinator {
     const abortController = new AbortController();
     this.activeAbortControllers.set(runId, abortController);
 
-    // 1. Prepare isolated worktree
-    const wsManager = options.workspaceManager ||
-      ((task.targetRepoPath && fs.existsSync(task.targetRepoPath))
-        ? new WorkspaceManager(task.targetRepoPath)
-        : (task.targetRepo && fs.existsSync(task.targetRepo) && (fs.existsSync(path.join(task.targetRepo, '.git')) || fs.existsSync(path.join(task.targetRepo, 'HEAD'))))
-        ? new WorkspaceManager(task.targetRepo)
-        : this.workspaceManager);
+    // 1. Resolve target workspace fail-closed
+    let wsManager = options.workspaceManager;
+    let resolvedIdentity: string | undefined;
+
+    try {
+      const resolved = resolveTargetRepository({
+        targetRepo: task.targetRepo,
+        targetRepoPath: task.targetRepoPath,
+        allowOrchestratorRepo: task.targetRepo === 'marcelodevops/dupond-project-leader' || task.targetRepo === 'dupond',
+      });
+      resolvedIdentity = resolved.repoIdentity;
+      if (!wsManager || path.resolve(wsManager.getBaseRepoDir()) !== path.resolve(resolved.repoPath)) {
+        wsManager = new WorkspaceManager(resolved.repoPath);
+      }
+    } catch (err: any) {
+      this.store.unclaimTask(task.id, 'blocked', err.message);
+      const failedRun = this.store.createRun({
+        id: runId,
+        taskId: task.id,
+        status: 'failed',
+        targetRepo: task.targetRepo,
+        baseCommit: task.baseCommit,
+        targetBranch: branchName,
+        currentAttempt: 0,
+        durationMs: Date.now() - startTime,
+        failureType: 'implementation',
+        failureReason: `Target repository configuration blocked: ${err.message}`,
+      });
+      return failedRun;
+    }
 
     let worktreeInfo;
     try {
@@ -81,6 +105,7 @@ export class RepairCoordinator {
         id: runId,
         taskId: task.id,
         status: 'failed',
+        targetRepo: task.targetRepo || resolvedIdentity,
         baseCommit: task.baseCommit,
         targetBranch: branchName,
         currentAttempt: 0,
@@ -96,6 +121,7 @@ export class RepairCoordinator {
       id: runId,
       taskId: task.id,
       status: 'running',
+      targetRepo: task.targetRepo || resolvedIdentity,
       baseCommit: worktreeInfo.baseCommit,
       targetBranch: branchName,
       worktreePath: worktreeInfo.worktreePath,

@@ -32,6 +32,7 @@ export interface TaskRunRecord {
   id: string;
   taskId: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  targetRepo?: string;
   baseCommit: string;
   targetBranch: string;
   worktreePath?: string | null;
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id),
   status TEXT NOT NULL,
+  target_repo TEXT,
   base_commit TEXT NOT NULL,
   target_branch TEXT NOT NULL,
   worktree_path TEXT,

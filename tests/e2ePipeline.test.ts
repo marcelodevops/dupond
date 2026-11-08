@@ -36,6 +36,7 @@ async function runAcceptanceSuite() {
   fs.mkdirSync(disposableRemote, { recursive: true });
   execFileSync('git', ['init', '--bare', '-b', 'main'], { cwd: disposableRemote });
   execFileSync('git', ['--git-dir', disposableRemote, 'config', 'receive.shallowUpdate', 'true']);
+  execFileSync('git', ['push', disposableRemote, 'HEAD:refs/heads/main'], { cwd: process.cwd() });
 
   try {
     // ------------------------------------------------------------------------
@@ -433,7 +434,7 @@ async function runAcceptanceSuite() {
       description: 'Will be cancelled mid-execution while running child process',
       status: 'todo',
       priority: 'low',
-      targetRepo: 'test',
+      targetRepo: 'marcelodevops/dupond-project-leader',
       baseCommit: 'HEAD',
       allowedPaths: ['*'],
       protectedPaths: [],
@@ -541,7 +542,7 @@ async function runAcceptanceSuite() {
       description: 'Requires explicit approval before PR',
       status: 'review',
       priority: 'critical',
-      targetRepo: 'test',
+      targetRepo: 'marcelodevops/dupond-project-leader',
       baseCommit: 'HEAD',
       allowedPaths: ['*'],
       protectedPaths: [],
