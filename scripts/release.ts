@@ -151,6 +151,26 @@ export function readVersionSources(repoRoot: string): VersionSources {
   };
 }
 
+export interface ManifestEntry {
+  path: string;
+  version: string;
+}
+
+export function readManifestEntries(repoRoot: string): ManifestEntry[] {
+  const manifest = readJsonFile(path.join(repoRoot, '.release-please-manifest.json')) ?? {};
+  return Object.entries(manifest).map(([key, value]) => ({ path: key, version: String(value) }));
+}
+
+/**
+ * Release Please treats every manifest key as a repository path and every value as
+ * a version, so a documentation key such as "$schema" aborts the whole run.
+ */
+export function findManifestProblems(entries: ManifestEntry[]): string[] {
+  return entries
+    .filter((entry) => entry.path.startsWith('$') || entry.path === '' || !SEMVER.test(entry.version))
+    .map((entry) => `manifest entry "${entry.path}" must be a repository path mapped to a semantic version`);
+}
+
 export function readReleasePolicy(repoRoot: string): ReleasePolicy {
   const config = readJsonFile(path.join(repoRoot, 'release-please-config.json')) ?? {};
   const rootPackage = config.packages?.['.'] ?? {};
@@ -337,6 +357,7 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
   if (command === 'consistency') {
     const problems = [
       ...findVersionMismatches(readVersionSources(cwd)),
+      ...findManifestProblems(readManifestEntries(cwd)),
       ...findPolicyProblems(readReleasePolicy(cwd)),
     ];
     if (problems.length > 0) {

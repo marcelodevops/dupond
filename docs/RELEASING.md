@@ -19,6 +19,12 @@ Never hand-edit the version in `package.json`, `package-lock.json`, or
 `.release-please-manifest.json`. If they disagree, `npm run release:check` fails
 and CI blocks the release PR.
 
+`.release-please-manifest.json` must contain nothing but `"path": "version"` pairs.
+Release Please parses every key as a repository path and every value as a version,
+so an editor hint such as `"$schema"` aborts the run with `unable to parse version
+string`; that is why the shipped manifest has no `$schema` key even though its JSON
+schema file is published. `release-please-config.json` does accept `$schema`.
+
 ## Version policy
 
 * `fix:`, `perf:` → patch bump.

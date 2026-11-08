@@ -8,8 +8,10 @@ import {
   extractChangelogSection,
   findPolicyProblems,
   findVersionMismatches,
+  findManifestProblems,
   isConventionalPrTitle,
   parseConventionalTitle,
+  readManifestEntries,
   readReleasePolicy,
   readVersionSources,
   REQUIRED_WORKFLOWS,
@@ -153,6 +155,19 @@ async function main() {
   assert.strictEqual(realSources.packageJson, realSources.manifest, 'package.json and the Release Please manifest must agree');
   assert.deepStrictEqual(findVersionMismatches(realSources), [], `version metadata drifted: ${JSON.stringify(realSources)}`);
   assert.deepStrictEqual(findPolicyProblems(readReleasePolicy(repoRoot)), [], 'shipped release policy is invalid');
+  // Every manifest key is read as a path and every value as a version, so editor
+  // metadata would abort the release run.
+  assert.deepStrictEqual(readManifestEntries(repoRoot), [{ path: '.', version: realSources.packageJson as string }]);
+  assert.deepStrictEqual(findManifestProblems(readManifestEntries(repoRoot)), [], 'shipped manifest keys are not Release Please paths');
+  assert.deepStrictEqual(
+    findManifestProblems([
+      { path: '$schema', version: 'https://example.invalid/manifest.json' },
+      { path: '', version: '0.1.0' },
+      { path: '.', version: 'next' },
+    ]).length,
+    3,
+    'metadata keys, empty paths and non-semver values must all be refused',
+  );
   console.log(`✔ [PASS] package.json, package-lock.json and manifest all agree on ${realSources.packageJson}`);
   console.log('✔ [PASS] Shipped release policy keeps pre-1.0 breaking changes on minor bumps and releases prerelease');
 
