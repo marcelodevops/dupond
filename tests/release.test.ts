@@ -169,6 +169,13 @@ async function main() {
     'bd3726ade06a4f60e9964d087f83e9bf25bfa572',
     'bootstrap-sha must be the v0.1.0 preparation commit',
   );
+  // Tags must stay vX.Y.Z: the release finder matches a plain tag while the tag
+  // builder defaults to prefixing the component, so the option has to be explicit.
+  assert.strictEqual(
+    readReleasePolicy(repoRoot).includeComponentInTag,
+    false,
+    'include-component-in-tag must be set false so the next tag is v0.2.0, not dupond-orchestrator-v0.2.0',
+  );
   assert.deepStrictEqual(
     findManifestProblems([
       { path: '$schema', version: 'https://example.invalid/manifest.json' },
@@ -190,10 +197,14 @@ async function main() {
     const mismatched = findVersionMismatches(readVersionSources(tmpRoot));
     assert.ok(mismatched.some((problem) => problem.includes('packages[""].version')), mismatched.join('\n'));
     const policyProblems = findPolicyProblems(readReleasePolicy(tmpRoot));
-    assert.strictEqual(policyProblems.length, 5, policyProblems.join('\n'));
+    assert.strictEqual(policyProblems.length, 6, policyProblems.join('\n'));
     assert.ok(
       policyProblems.some((problem) => problem.includes('bootstrap-sha')),
       'An unpinned bootstrap baseline would let the automation release all of history',
+    );
+    assert.ok(
+      policyProblems.some((problem) => problem.includes('include-component-in-tag')),
+      'An omitted include-component-in-tag would tag dupond-orchestrator-vX.Y.Z instead of vX.Y.Z',
     );
     console.log('✔ [PASS] Lockfile root-package drift and unsafe policy flags are both refused');
 
