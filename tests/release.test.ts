@@ -18,6 +18,8 @@ import {
 } from '../scripts/release.ts';
 import type { WorkflowRun } from '../scripts/release.ts';
 
+// Synthetic fixtures, not real commits: the gate must separate two distinct SHAs and
+// no test in this file reaches the GitHub API.
 const SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const OTHER_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
