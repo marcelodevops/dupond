@@ -92,9 +92,10 @@ jobs:
     needs: [publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # GitHub Actions has no `releases` permission key; editing a release through
+    # the REST API is authorized by contents: write, the same grant `publish` uses.
     permissions:
-      contents: read
-      releases: write
+      contents: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v5

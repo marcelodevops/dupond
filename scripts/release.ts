@@ -240,6 +240,75 @@ export function findPolicyProblems(policy: ReleasePolicy): string[] {
   return problems;
 }
 
+// GitHub Actions validates a workflow file against this closed set before scheduling
+// anything. "releases" is deliberately absent: release writes come from contents.
+export const WORKFLOW_PERMISSION_SCOPES = [
+  'actions',
+  'artifact-metadata',
+  'attestations',
+  'checks',
+  'code-quality',
+  'contents',
+  'copilot-requests',
+  'deployments',
+  'discussions',
+  'id-token',
+  'issues',
+  'packages',
+  'pages',
+  'pull-requests',
+  'security-events',
+  'statuses',
+  'vulnerability-alerts',
+];
+
+const PERMISSION_ACCESS_LEVELS = ['read', 'write', 'none'];
+
+/**
+ * Validates every `permissions:` block in a workflow against the scopes Actions
+ * accepts. An unknown key is not a warning: Actions reports "Invalid workflow file"
+ * and the whole workflow, releases included, refuses to run on every event.
+ */
+export function findWorkflowPermissionProblems(fileName: string, contents: string): string[] {
+  const problems: string[] = [];
+  const lines = contents.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = /^(\s*)permissions:\s*(.*)$/.exec(lines[i]);
+    if (!header) continue;
+    const indent = header[1].length;
+    const inline = header[2].split('#')[0].trim();
+    if (inline) {
+      if (!['read-all', 'write-all', '{}'].includes(inline)) problems.push(`${fileName}:${i + 1} permissions must be read-all, write-all, {} or a block, got "${inline}"`);
+      continue;
+    }
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j];
+      if (!line.trim() || line.trim().startsWith('#')) continue;
+      if (line.search(/\S/) <= indent) break;
+      const entry = /^\s*([A-Za-z_][\w-]*)\s*:\s*(\S.*)$/.exec(line);
+      if (!entry) {
+        problems.push(`${fileName}:${j + 1} is not a "scope: access" permissions entry: ${line.trim()}`);
+        break;
+      }
+      const [, scope, rawValue] = entry;
+      const value = rawValue.split('#')[0].trim();
+      if (!WORKFLOW_PERMISSION_SCOPES.includes(scope)) problems.push(`${fileName}:${j + 1} "${scope}" is not a GitHub Actions permission scope${scope === 'releases' ? '; grant release writes with contents: write' : ''}`);
+      if (!PERMISSION_ACCESS_LEVELS.includes(value)) problems.push(`${fileName}:${j + 1} "${scope}" access must be read, write or none, got "${value}"`);
+    }
+  }
+  return problems;
+}
+
+export function readWorkflowPermissionProblems(repoRoot: string): string[] {
+  const workflowDir = path.join(repoRoot, '.github', 'workflows');
+  if (!fs.existsSync(workflowDir)) return [];
+  return fs
+    .readdirSync(workflowDir)
+    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .sort()
+    .flatMap((name) => findWorkflowPermissionProblems(`.github/workflows/${name}`, fs.readFileSync(path.join(workflowDir, name), 'utf-8')));
+}
+
 export const CONVENTIONAL_TYPES = ['feat', 'fix', 'perf', 'refactor', 'docs', 'test', 'build', 'ci', 'chore', 'style', 'revert'];
 
 const TITLE_PATTERN = /^([a-z]+)(?:\(([^()]*)\))?(!)?:[ \t]+(\S.*)$/;
@@ -469,12 +538,13 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
       ...findVersionMismatches(readVersionSources(cwd)),
       ...findManifestProblems(readManifestEntries(cwd)),
       ...findPolicyProblems(readReleasePolicy(cwd)),
+      ...readWorkflowPermissionProblems(cwd),
     ];
     if (problems.length > 0) {
-      console.error('[release] version/policy problems:\n- ' + problems.join('\n- '));
+      console.error('[release] release configuration problems:\n- ' + problems.join('\n- '));
       return 1;
     }
-    console.log(`[release] version metadata and release policy are consistent (${readVersionSources(cwd).packageJson})`);
+    console.log(`[release] version metadata, release policy and workflow permissions are consistent (${readVersionSources(cwd).packageJson})`);
     return 0;
   }
 
