@@ -335,11 +335,93 @@ export function fetchWorkflowRunsViaGh(sha: string, repo: string): WorkflowRun[]
   return parsed.filter((run) => sameSha(run.head_sha, sha));
 }
 
+export interface ReleaseRecord {
+  id: number;
+  tag_name: string;
+  name?: string | null;
+  commit_id?: string | null;
+}
+
+export interface ReleaseMetadataPatch {
+  id: number;
+  tag: string;
+  fields: Record<string, string>;
+  reasons: string[];
+}
+
+export const RELEASE_TITLE_PREFIX = 'Dupond';
+const SEMVER_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+// A release must carry a human title and the commit its tag actually points at.
+// Titles an author wrote by hand are never overwritten, and a tag that cannot be
+// resolved is left alone rather than guessed.
+export function planReleaseMetadata(
+  releases: ReleaseRecord[],
+  resolveTagCommit: (tag: string) => string | null,
+): ReleaseMetadataPatch[] {
+  const patches: ReleaseMetadataPatch[] = [];
+  for (const release of releases) {
+    if (!SEMVER_TAG.test(release.tag_name)) continue;
+    const fields: Record<string, string> = {};
+    const reasons: string[] = [];
+    const title = (release.name ?? '').trim();
+    if (title === release.tag_name || title === '') {
+      fields.name = `${RELEASE_TITLE_PREFIX} ${release.tag_name}`;
+      reasons.push('untitled release gets the Dupond prefix');
+    }
+    if (!release.commit_id) {
+      const sha = resolveTagCommit(release.tag_name);
+      if (sha) {
+        fields.target_commitish = sha;
+        reasons.push('no commit recorded, so the tag is resolved explicitly');
+      }
+    }
+    if (Object.keys(fields).length > 0) {
+      patches.push({ id: release.id, tag: release.tag_name, fields, reasons });
+    }
+  }
+  return patches;
+}
+
+export function fetchReleasesViaGh(repo: string): ReleaseRecord[] {
+  const stdout = execFileSync(
+    'gh',
+    ['api', '--paginate', `/repos/${repo}/releases?per_page=100`, '--jq', '.[] | {id,tag_name,name,commit_id}'],
+    { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024 },
+  );
+  return stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as ReleaseRecord);
+}
+
+// GitHub dereferences annotated tags here, so this returns the commit a tag points
+// at rather than the tag object itself.
+export function resolveTagCommitViaGh(tag: string, repo: string): string | null {
+  if (!SEMVER_TAG.test(tag)) return null;
+  try {
+    const stdout = execFileSync('gh', ['api', `/repos/${repo}/commits/${encodeURIComponent(tag)}`, '--jq', '.sha'], {
+      encoding: 'utf-8',
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const sha = stdout.trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+export function patchReleaseMetadataViaGh(id: number, repo: string, fields: Record<string, string>): void {
+  const args = ['api', '-X', 'PATCH', `/repos/${repo}/releases/${id}`];
+  for (const [key, value] of Object.entries(fields)) args.push('-f', `${key}=${value}`);
+  execFileSync('gh', args, { encoding: 'utf-8', stdio: 'pipe' });
+}
+
 interface CliArgs {
   command: string;
   flags: Record<string, string | boolean>;
 }
-
 function parseArgs(argv: string[]): CliArgs {
   const [command = 'consistency', ...rest] = argv;
   const flags: Record<string, string | boolean> = {};
@@ -454,7 +536,22 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
     return verdict.state === 'green' ? 0 : 1;
   }
 
-  console.error(`[release] unknown command "${command}" (expected: consistency, gate, notes, pr-title)`);
+  if (command === 'hygiene') {
+    const repo = typeof flags.repo === 'string' ? flags.repo : defaultRepo();
+    const patches = planReleaseMetadata(fetchReleasesViaGh(repo), (tag) => resolveTagCommitViaGh(tag, repo));
+    if (patches.length === 0) {
+      console.log('[hygiene] every release already has a title and a recorded commit');
+      return 0;
+    }
+    for (const patch of patches) {
+      console.log(`[hygiene] ${patch.tag} (release ${patch.id}): ${patch.reasons.join('; ')}`);
+      if (flags.apply === true) patchReleaseMetadataViaGh(patch.id, repo, patch.fields);
+    }
+    if (flags.apply !== true) console.log('[hygiene] dry run: pass --apply to write');
+    return 0;
+  }
+
+  console.error(`[release] unknown command "${command}" (expected: consistency, gate, hygiene, notes, pr-title)`);
   return 2;
 }
 

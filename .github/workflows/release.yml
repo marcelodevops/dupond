@@ -3,7 +3,8 @@ name: Dupond Release Automation
 # Release Please is the only version/changelog/tag/release tool in this repository.
 # It is invoked twice with different roles: "prepare" may only open or update the
 # release pull request, "publish" may only create the tag and GitHub release, and
-# publish is gated on verified CI for the exact commit being tagged.
+# publish is gated on verified CI for the exact commit being tagged. A third job,
+# "tidy", repairs release metadata after the fact and creates nothing.
 on:
   push:
     branches: [main]
@@ -82,3 +83,34 @@ jobs:
           token: ${{ github.token }}
           skip-github-pull-request: true
           skip-labeling: true
+
+  # Release Please titles a release with the bare tag, and a release created in the
+  # web UI can record no commit at all. This repairs both, and only both: notes,
+  # prerelease state, and any title a maintainer wrote by hand are left untouched.
+  tidy:
+    name: Normalize release metadata
+    needs: [publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      releases: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply release metadata repairs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npx tsx scripts/release.ts hygiene --apply

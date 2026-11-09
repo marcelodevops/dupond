@@ -11,6 +11,7 @@ import {
   findManifestProblems,
   isConventionalPrTitle,
   parseConventionalTitle,
+  planReleaseMetadata,
   readManifestEntries,
   readReleasePolicy,
   readVersionSources,
@@ -308,6 +309,45 @@ async function main() {
   assert.ok(!stacked.includes('newer thing'), 'must stop at the next version heading');
   assert.strictEqual(extractChangelogSection('# Changelog\n\n## 0.1.0\n\nx\n', '9.9.9'), '', 'unknown version yields no notes');
   console.log('✔ [PASS] Extraction stops at the next version and never fabricates notes');
+
+  // --------------------------------------------------------------------------
+  // Part 6: release titles and commit provenance are repaired, never invented
+  // --------------------------------------------------------------------------
+  console.log('\n--- Part 6: Release title and commit provenance ---');
+
+  const tagShas: Record<string, string> = { 'v0.1.0': SHA, 'v0.2.0': OTHER_SHA };
+  const resolve = (tag: string) => tagShas[tag] ?? null;
+
+  const untitled = planReleaseMetadata([{ id: 1, tag_name: 'v0.2.0', name: 'v0.2.0', commit_id: OTHER_SHA }], resolve);
+  assert.strictEqual(untitled.length, 1, JSON.stringify(untitled));
+  assert.deepStrictEqual(untitled[0].fields, { name: 'Dupond v0.2.0' }, 'a bare-tag title gains the prefix and nothing else');
+  assert.strictEqual(untitled[0].id, 1);
+
+  const experimental = planReleaseMetadata(
+    [{ id: 2, tag_name: 'v0.1.0', name: 'Dupond v0.1.0 — Experimental', commit_id: null }],
+    resolve,
+  );
+  assert.deepStrictEqual(
+    experimental[0].fields,
+    { target_commitish: SHA },
+    'a hand-written release title must survive; only the missing commit is repaired',
+  );
+
+  const guessed = planReleaseMetadata([{ id: 3, tag_name: 'v3.0.0', name: '', commit_id: null }], () => null);
+  assert.strictEqual(guessed[0].fields.name, 'Dupond v3.0.0', 'an untitled release is titled');
+  assert.strictEqual(guessed[0].fields.target_commitish, undefined, 'a tag that does not resolve is never guessed at');
+
+  assert.deepStrictEqual(
+    planReleaseMetadata([{ id: 4, tag_name: 'v0.2.0', name: 'Dupond v0.2.0', commit_id: OTHER_SHA }], resolve),
+    [],
+    'correct metadata is left completely alone',
+  );
+  assert.deepStrictEqual(
+    planReleaseMetadata([{ id: 5, tag_name: 'latest', name: 'latest', commit_id: null }], resolve),
+    [],
+    'tags outside vX.Y.Z are out of scope',
+  );
+  console.log('✔ [PASS] Release metadata is normalized idempotently without inventing commits');
 
   console.log('\n=== ALL RELEASE AUTOMATION TESTS PASSED ===');
 }

@@ -95,6 +95,12 @@ Conventional Commits is invisible to release automation. Release Please's own ti
 5. The release PR then gains the `autorelease: tagged` label. That label, the tag,
    and the manifest entry are the three things to compare when deciding whether a
    run reconciled or stalled.
+6. The `tidy` job runs `scripts/release.ts hygiene --apply` after `publish`. It
+   titles any release whose name is still the bare tag as `Dupond vX.Y.Z`, and pins
+   `target_commitish` to the commit the tag resolves to when the release recorded no
+   commit at all. It never touches notes, prerelease state, or a title a maintainer
+   wrote by hand — which is why `Dupond v0.1.0 — Experimental` keeps its wording —
+   and it creates nothing, so re-running it is a no-op.
 
 The first release PR the automation actually built was `0.2.0`, from the `feat:`
 title of PR #10 — not the `0.1.1` this document first predicted, because the PR
@@ -132,7 +138,8 @@ around that instead of assuming success:
   `on: release` or `on: push: tags` workflow will simply never fire.
 * Nothing here requires repository **secrets**. `ci-gate` uses the job token read-only
   (`actions: read`); `prepare`/`publish` get `contents: write` plus
-  `pull-requests: write` and nothing broader. Credentials are never echoed.
+  `pull-requests: write`; `tidy` gets `releases: write` and nothing broader.
+  Credentials are never echoed, and no step prints a token even on failure.
 
 ## Required repository setting (not a secret)
 
