@@ -20,13 +20,30 @@ This guide covers common errors, causes, and solutions when configuring and runn
   3. If `DUPOND_AUTH_TOKEN` was not set, check the server startup log for the ephemeral token generated for that session.
 
 ### Error: `Prerequisite missing: GEMINI_API_KEY is not set`
-- **Cause**: The coding worker requires a valid Google GenAI API key.
+- **Cause**: The coding worker is configured for `gemini` but lacks an API key.
 - **Solution**:
   Set the key in your environment or in `.env`:
   ```bash
   export GEMINI_API_KEY="AIzaSy..."
   ```
   Check `curl http://localhost:3000/api/health` to confirm `"hasGeminiKey": true`.
+
+### Error: `Prerequisite missing: OPENAI_API_KEY is not set`
+- **Cause**: The coding worker is configured for `openai` but lacks an API key.
+- **Solution**:
+  Set the key in your environment or in `.env`:
+  ```bash
+  export OPENAI_API_KEY="sk-..."
+  ```
+  Confirm that your OpenAI organization has an active developer project.
+
+### Error: `OpenAI account credit balance exhausted (429 insufficient_quota)`
+- **Cause**: The configured OpenAI developer account has zero prepaid credits remaining.
+- **Critical Distinction**: OpenAI developer API usage is billed separately from consumer ChatGPT web subscriptions (ChatGPT Plus, Team, or Pro). A consumer ChatGPT subscription does **not** provide API credits.
+- **Solution**:
+  1. Navigate to **[platform.openai.com/settings/organization/billing](https://platform.openai.com/settings/organization/billing/)**.
+  2. Add credit balance ($5–$10 is sufficient for hundreds of task runs).
+  3. Ensure your API key has permission for the desired model (e.g., `gpt-4o-mini`).
 
 ### Error: `GitHub authentication failed` or PR creation rejected
 - **Cause**: The GitHub CLI (`gh`) lacks credentials or has insufficient OAuth/PAT permissions to push branches or create pull requests.

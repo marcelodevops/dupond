@@ -22,7 +22,8 @@ import { taskStore } from './db/database.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
 import { WorkspaceManager } from './workspace/workspaceManager.js';
 import { resolveTargetRepository, orchestratorRepoSlug, isOrchestratorSelfTarget } from './workspace/targetRepositoryResolver.js';
-import { defaultCodingWorker } from './worker/geminiWorkerAdapter.js';
+import { resolveCodingWorker } from './worker/workerRegistry.js';
+import { CodingWorkerAdapter } from './worker/types.js';
 import { 
   DEFAULT_TASKS, 
   DEFAULT_AGENTS, 
@@ -734,8 +735,15 @@ ${implementationCode.slice(0, 500)}...
       });
     }
 
-    // If coding worker is not available or disabled, fail-closed
-    const workerAvailable = await defaultCodingWorker.isAvailable();
+    // Authoritatively resolve and check the worker configured for this task
+    let taskWorker: CodingWorkerAdapter;
+    try {
+      taskWorker = resolveCodingWorker(storeTask.workerConfig);
+    } catch (cfgErr: any) {
+      throw new Error(`Worker configuration blocked: ${cfgErr.message}`);
+    }
+
+    const workerAvailable = await taskWorker.isAvailable();
     if (!workerAvailable.available) {
       throw blocked();
     }
@@ -752,7 +760,7 @@ ${implementationCode.slice(0, 500)}...
 
     const workerRun = await defaultRepairCoordinator.executeTaskRun({
       task: storeTask,
-      worker: defaultCodingWorker,
+      worker: taskWorker,
       workspaceManager,
     });
 
