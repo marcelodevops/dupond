@@ -5,6 +5,7 @@ import path from 'path';
 import {
   evaluateCiGate,
   waitUntilGreen,
+  evaluateRequiredGreen,
   extractChangelogSection,
   findPolicyProblems,
   findVersionMismatches,
@@ -19,8 +20,10 @@ import {
   readVersionSources,
   readWorkflowPermissionProblems,
   REQUIRED_WORKFLOWS,
+  requiredGateTargets,
   summarizeHygieneAttempts,
   suggestConventionalTitle,
+  waitUntilRequiredGreen,
   WORKFLOW_PERMISSION_SCOPES,
 } from '../scripts/release.ts';
 import type { HygieneAttempt, WorkflowRun } from '../scripts/release.ts';
@@ -98,6 +101,36 @@ async function main() {
   assert.ok(neverRan.detail.includes('no main-branch push run found yet'), neverRan.detail);
   assert.ok(neverRan.detail.includes('GitHub Actions token'), 'Must name the token restriction explicitly');
   console.log('✔ [PASS] Missing CI run explains the Actions-token restriction');
+
+  // A release pull request merged earlier stays `autorelease: pending`, and publishing
+  // tags that pull request's merge commit rather than this run's head, so checking only
+  // the head would ship a commit whose own CI never passed (observed for 0.2.2).
+  assert.deepStrictEqual(requiredGateTargets(SHA, null), [{ sha: SHA, role: 'push head' }], 'nothing pending means one commit to verify');
+  assert.deepStrictEqual(
+    requiredGateTargets(SHA, SHA.toUpperCase()),
+    [{ sha: SHA, role: 'push head' }],
+    'the same commit is never verified twice',
+  );
+  const bothTargets = requiredGateTargets(SHA, OTHER_SHA);
+  assert.deepStrictEqual(bothTargets.map((target) => target.role), ['release commit to be tagged', 'push head']);
+
+  const releaseRed = (target: string): WorkflowRun[] =>
+    target === SHA ? [run({ head_sha: target })] : [run({ head_sha: target, conclusion: 'failure' })];
+  const blockedByReleaseCommit = evaluateRequiredGreen(bothTargets, releaseRed, REQUIRED_WORKFLOWS);
+  assert.strictEqual(blockedByReleaseCommit.state, 'blocked', blockedByReleaseCommit.detail);
+  assert.ok(blockedByReleaseCommit.detail.includes('release commit to be tagged'), blockedByReleaseCommit.detail);
+  assert.ok(blockedByReleaseCommit.detail.includes(OTHER_SHA), 'the verdict must name the commit that failed: ' + blockedByReleaseCommit.detail);
+  assert.strictEqual(blockedByReleaseCommit.sha, OTHER_SHA, 'the failing commit, not the run head, is the reported SHA');
+
+  const bothGreen = (target: string): WorkflowRun[] => [run({ head_sha: target, id: target === SHA ? 1 : 2 })];
+  const permitted = evaluateRequiredGreen(bothTargets, bothGreen, REQUIRED_WORKFLOWS);
+  assert.strictEqual(permitted.state, 'green', permitted.detail);
+  assert.ok(permitted.detail.includes('release commit to be tagged') && permitted.detail.includes('push head'), permitted.detail);
+
+  const waited = waitUntilRequiredGreen(bothTargets, releaseRed, REQUIRED_WORKFLOWS, 1, 0, () => {}, () => {});
+  assert.strictEqual(waited.state, 'blocked', waited.detail);
+  assert.ok(waited.detail.startsWith('release commit to be tagged'), 'the release commit is verified first, so a red one fails fast');
+  console.log('✔ [PASS] Publishing requires green CI on the commit that will actually be tagged');
 
   // --------------------------------------------------------------------------
   // Part 2: the gate waits for CI instead of failing early, then stops waiting

@@ -41,6 +41,9 @@ jobs:
     permissions:
       contents: read
       actions: read
+      # The gate reads the still-pending release pull request to learn which commit
+      # publish will tag. Read-only; if this lookup fails the gate fails closed.
+      pull-requests: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v5

@@ -93,12 +93,14 @@ Conventional Commits is invisible to release automation. Release Please's own ti
    tag anything.
 3. Review the release PR like any other change and merge it.
 4. The push of that merge triggers `release.yml` again. `ci-gate` waits for the
-   required workflow `Dupond Continuous Integration` to pass **for the exact commit
-   SHA being published** (`github.sha`), then `publish` runs Release Please with
-   `skip-github-pull-request: true`, which creates the tag and GitHub release.
-   Only a `push` run against `main` for that SHA counts; a green `pull_request` run
-   on the same commit, or green CI on a neighbouring commit, does not authorize a
-   publish.
+   required workflow `Dupond Continuous Integration` to pass for **every commit the
+   publish job is about to use**: the `github.sha` being run, and, when a release PR
+   merged earlier is still pending, that pull request's merge commit — because
+   Release Please tags the pending PR's merge commit, which is not the commit that
+   triggered this run. Only a `push` run against `main` counts; a green
+   `pull_request` run on the same commit, or green CI on a neighbouring commit, does
+   not authorize a publish. Once every target is green, `publish` runs Release Please
+   with `skip-github-pull-request: true`, which creates the tag and GitHub release.
 5. The release PR then gains the `autorelease: tagged` label. That label, the tag,
    and the manifest entry are the three things to compare when deciding whether a
    run reconciled or stalled.
@@ -128,6 +130,22 @@ and folds in later changes.
 * Re-running a CI workflow is safe: the gate always uses the newest attempt
   (`run_attempt`), so a re-run that fails revokes a previous success and a re-run
   that succeeds replaces a previous failure.
+* A release PR stays `autorelease: pending` until it is published, and the run that
+  publishes it is usually triggered by a *later* commit. Release Please tags the
+  pending PR's own merge commit, so the gate checks that commit as well as the run
+  head (`scripts/release.ts gate` prints which target it is verifying). Without this
+  second target a run could publish a release whose CI never passed.
+* **Incident, 0.2.2 (run 42557886553 → 42558785244).** The run for `89fa0408` blocked
+  itself correctly — CI run 42557886569 for that SHA concluded failure at
+  `tests/repairLoop.test.ts`. The next push to `main` (`010fbed`) then published `0.2.2`
+  and tagged `89fa0408`, because the gate of that later run had only checked `010fbed`,
+  which was green, while Release Please tagged the still-pending PR #17 merge commit.
+  `0.2.2` is a prerelease whose tag therefore points at a commit with red main CI; it is
+  left in place rather than retagged, since deleting a published tag renumbers
+  history. The gate now checks the pending release commit too, replaying that run
+  against live data returns `blocked: release commit to be tagged 89fa040… CI run
+  42557886569 concluded failure`, and the next version published from a green commit
+  supersedes it.
 * If a publish is blocked (red CI, timed-out gate, or a runner outage) nothing is
   tagged. Fix CI, then run **Dupond Release Automation → Run workflow** on `main`.
   The pending release is picked up and published exactly once.
@@ -146,27 +164,40 @@ around that instead of assuming success:
   mirror) has to run as a job in this same workflow with `needs: publish`; a
   `on: release` or `on: push: tags` workflow will simply never fire.
 * Nothing here requires repository **secrets**. `ci-gate` uses the job token read-only
-  (`actions: read`); `prepare`/`publish` get `contents: write` plus
+  (`actions: read` for run status, `pull-requests: read` for the pending release pull
+  request); `prepare`/`publish` get `contents: write` plus
   `pull-requests: write`; `tidy` gets `contents: write` and nothing broader. Actions
   has no `releases` permission key — naming one is a workflow-file parse error, and
   release edits are authorized by `contents: write`.
   Credentials are never echoed, and no step prints a token even on failure.
-* **Editing an existing release is not always possible from a workflow.** The
-  Releases API requires the authenticating token to be authorized to modify
-  workflows when the release's target commit "adds or modifies any file under
-  `.github/workflows/` relative to the repository's default branch", and it states
-  that "The `GITHUB_TOKEN` available to GitHub Actions cannot be authorized for
-  this". `v0.2.0`'s target commit (`05a2e96`) changes only `CHANGELOG.md` and the
-  version files, yet run 42553362672 was still refused with `403 Resource not
-  accessible by integration` — consistent with GitHub comparing that commit against
-  the *current* default branch, whose workflows have changed since it was tagged.
-  The same repair through a fine-grained personal token answered `403 Resource not
-  accessible by personal access token`, and the documented requirement for that path
-  is **Workflows: write** in addition to `Contents` — not verified here, because no
-  token used so far holds it. So `hygiene` treats an authorization refusal as a
-  reported skip: a release never fails because GitHub would not rename it. Titles and
-  provenance of older releases are a maintainer repair, run locally with a token that
-  satisfies the rule above.
+* **Some release edits are refused for a workflow token, and the rule is not
+  characterized here.** The Releases API says an edit needs the token to be authorized
+  to modify workflows when the release's target commit "adds or modifies any file
+  under `.github/workflows/` relative to the repository's default branch", and that
+  "The `GITHUB_TOKEN` available to GitHub Actions cannot be authorized for this". What
+  a job token actually reached, recorded per field (`hygiene --apply`, run head in
+  parentheses):
+
+  | Release | target commit | `name` | `target_commitish` |
+  | --- | --- | --- | --- |
+  | v0.1.0 | `bd3726ade` | maintainer's own wording, never rewritten | written (8b19cc3, 010fbed) |
+  | v0.2.0 | `05a2e9629` | written (8b19cc3) | refused (8b19cc3, 010fbed) |
+  | v0.2.1 | `3dbca8674` | already set by `publish` | refused (3dbca86, 010fbed) |
+  | v0.2.2 | `89fa04082` | written (010fbed) | written (010fbed) |
+
+  Those outcomes do not sort by tag age, and none of the refused targets touches a file
+  under `.github/workflows/`, so the docs' stated condition does not predict them; the
+  newest and the oldest target were accepted while the two middle ones were refused, in
+  every run that tried. Rather than encode a guess, `hygiene` sends one request per
+  field — so a permitted rename is not lost alongside a refused commit — classifies each
+  answer as applied, refused, or failed, and fails the job only on `failed`. A refused
+  field is retried on the next run, so anything GitHub later permits is repaired
+  automatically. A fine-grained personal token used for the same repair answered `403
+  Resource not accessible by personal access token`; the documented requirement for that
+  path is **Workflows: write** besides `Contents`, unverified here because no token used
+  so far holds it.
+  As of 010fbed every release carries the intended title and an explicit
+  `target_commitish` equal to its tag, so no maintainer repair is outstanding.
 
 ## Required repository setting (not a secret)
 
@@ -198,7 +229,7 @@ Reconcile-check before and after that one manual publish (all read-only):
 
 ```sh
 npm run release:check
-npx tsx scripts/release.ts gate --sha "$(git rev-parse origin/main)"   # exits 0 only when CI is green for that SHA
+npx tsx scripts/release.ts gate --sha "$(git rev-parse origin/main)"   # exits 0 only when CI is green for that SHA and for any still-pending release commit
 npx tsx scripts/release.ts notes --version 0.1.0                        # the truthful notes body, straight from CHANGELOG.md
 gh release view v0.1.0
 ```
