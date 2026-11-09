@@ -409,6 +409,7 @@ export interface ReleaseRecord {
   tag_name: string;
   name?: string | null;
   commit_id?: string | null;
+  target_commitish?: string | null;
 }
 
 export interface ReleaseMetadataPatch {
@@ -419,6 +420,7 @@ export interface ReleaseMetadataPatch {
 }
 
 export const RELEASE_TITLE_PREFIX = 'Dupond';
+const FULL_SHA = /^[0-9a-f]{40}$/;
 const SEMVER_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 // A release must carry a human title and the commit its tag actually points at.
@@ -438,11 +440,17 @@ export function planReleaseMetadata(
       fields.name = `${RELEASE_TITLE_PREFIX} ${release.tag_name}`;
       reasons.push('untitled release gets the Dupond prefix');
     }
-    if (!release.commit_id) {
-      const sha = resolveTagCommit(release.tag_name);
-      if (sha) {
+    // The Releases list endpoint has no `commit_id`; the recorded provenance is
+    // `target_commitish`, which for a web-UI release is a branch name rather than a commit.
+    const recorded = [release.commit_id, release.target_commitish].find((value) => FULL_SHA.test(value ?? '')) ?? null;
+    const sha = resolveTagCommit(release.tag_name);
+    if (sha) {
+      if (!recorded) {
         fields.target_commitish = sha;
         reasons.push('no commit recorded, so the tag is resolved explicitly');
+      } else if (!sameSha(recorded, sha)) {
+        fields.target_commitish = sha;
+        reasons.push(`recorded commit ${recorded.slice(0, 7)} disagrees with the tag`);
       }
     }
     if (Object.keys(fields).length > 0) {
@@ -455,7 +463,7 @@ export function planReleaseMetadata(
 export function fetchReleasesViaGh(repo: string): ReleaseRecord[] {
   const stdout = execFileSync(
     'gh',
-    ['api', '--paginate', `/repos/${repo}/releases?per_page=100`, '--jq', '.[] | {id,tag_name,name,commit_id}'],
+    ['api', '--paginate', `/repos/${repo}/releases?per_page=100`, '--jq', '.[] | {id,tag_name,name,commit_id,target_commitish}'],
     { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024 },
   );
   return stdout
@@ -551,16 +559,16 @@ export interface GateTarget {
 }
 
 /**
- * The commit the publish job will tag is not necessarily the commit this run was
- * triggered by: a release PR merged earlier stays `autorelease: pending` until it is
- * published, and Release Please tags that pull request's merge commit. Verifying only
- * the run head would publish a release whose own CI never passed, so both must be
- * green.
+ * The commits the publish job may use, in verification order: this run's head first, then
+ * any merged-but-unpublished release pull request, whose merge commit Release Please will
+ * tag instead. Merging a release pull request is itself a push of that commit, so the
+ * common path produces exactly one target.
  */
-export function requiredGateTargets(runSha: string, releaseCommitSha: string | null): GateTarget[] {
-  const targets: GateTarget[] = [];
-  if (releaseCommitSha && !sameSha(releaseCommitSha, runSha)) targets.push({ sha: releaseCommitSha, role: 'release commit to be tagged' });
-  targets.push({ sha: runSha, role: 'push head' });
+export function requiredGateTargets(runSha: string, releaseCommitShas: string[]): GateTarget[] {
+  const targets: GateTarget[] = [{ sha: runSha, role: 'push head' }];
+  for (const sha of releaseCommitShas) {
+    if (!targets.some((target) => sameSha(target.sha, sha))) targets.push({ sha, role: 'release commit to be tagged' });
+  }
   return targets;
 }
 
@@ -600,23 +608,29 @@ export function evaluateRequiredGreen(targets: GateTarget[], fetchRuns: RunsFetc
 }
 
 /**
- * The merge commit of the release pull request that publish will tag, or null when no
- * release is pending. A gh failure is thrown rather than reported as "nothing pending":
- * answering null on an API error would drop the second gate and re-open the exact hole
- * this check exists to close.
+ * Merge commits of release pull requests that are merged but not yet published. Read as
+ * one REST call: `GET /repos/{owner}/{repo}/pulls` already carries labels, `merged_at`
+ * and `merge_commit_sha`, whereas `gh pr list --label` answers through the search-backed
+ * GraphQL API and then needs a second lookup per pull request — and the gate is expected
+ * to fail closed, so it should not sit behind the endpoint with the tightest rate limit.
+ * A gh failure is thrown rather than reported as "nothing pending": answering empty on an
+ * API error would drop this check and re-open the exact hole it exists to close.
  */
-export function fetchPendingReleaseCommitViaGh(repo: string): string | null {
-  const numbers = execFileSync(
-    'gh',
-    ['pr', 'list', '--repo', repo, '--state', 'merged', '--label', 'autorelease: pending', '--json', 'number', '--jq', '.[0].number // empty'],
-    { encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 },
-  ).trim();
-  if (!numbers) return null;
-  const oid = execFileSync('gh', ['pr', 'view', numbers, '--repo', repo, '--json', 'mergeCommit', '--jq', '.mergeCommit.oid // empty'], {
+export function fetchPendingReleaseCommitsViaGh(repo: string): string[] {
+  interface ClosedPr {
+    merged_at: string | null;
+    merge_commit_sha: string | null;
+    labels: { name: string }[] | string[];
+  }
+  const response = execFileSync('gh', ['api', `repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`], {
     encoding: 'utf-8',
-    maxBuffer: 4 * 1024 * 1024,
-  }).trim();
-  return /^[0-9a-f]{40}$/.test(oid) ? oid : null;
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const pending = (JSON.parse(response) as ClosedPr[]).filter((pr) => {
+    const names = (pr.labels ?? []).map((label) => (typeof label === 'string' ? label : label.name));
+    return pr.merged_at && names.includes('autorelease: pending') && !!pr.merge_commit_sha;
+  });
+  return pending.map((pr) => pr.merge_commit_sha as string).filter((sha) => FULL_SHA.test(sha));
 }
 
 export function waitUntilGreen(
@@ -708,9 +722,10 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
     const timeoutSeconds = Number(flags.timeout ?? 1800);
     const intervalSeconds = Number(flags.interval ?? 30);
     const fetcher: RunsFetcher = (target) => fetchWorkflowRunsViaGh(target, repo);
-    const targets = requiredGateTargets(sha, fetchPendingReleaseCommitViaGh(repo));
+    const pending = fetchPendingReleaseCommitsViaGh(repo);
+    const targets = requiredGateTargets(sha, pending);
     if (targets.length > 1) {
-      console.log(`[gate] a release pull request is still pending; its merge commit must also be green before publishing`);
+      console.log(`[gate] ${pending.length} merged release pull request${pending.length > 1 ? 's are' : ' is'} still unpublished; their merge commits must be green too`);
     }
     const verdict = flags.wait
       ? waitUntilRequiredGreen(targets, fetcher, REQUIRED_WORKFLOWS, timeoutSeconds, intervalSeconds, (ms) => {
@@ -718,8 +733,8 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
         }, (message) => console.log(message))
       : evaluateRequiredGreen(targets, fetcher, REQUIRED_WORKFLOWS);
     console.log(`[gate] ${verdict.state}: ${verdict.detail}`);
-    if (verdict.state === 'blocked' && targets.length > 1 && targets[0].role === 'release commit to be tagged') {
-      console.log('[gate] the pending release cannot be published from a commit whose CI failed; land a fix on main so the automation prepares a newer release pull request, then re-run this workflow');
+    if (verdict.state !== 'green' && targets.length > 1 && !sameSha(verdict.sha, sha)) {
+      console.log(`[gate] ${verdict.sha} is a merged release pull request that publish would tag, so nothing is published from it while its own CI is not green. Either make CI pass for that commit — fix main and re-run "Dupond Continuous Integration" for this Checks Workflow for it — or have a maintainer resolve the pending release pull request before publishing anything else.`);
     }
     return verdict.state === 'green' ? 0 : 1;
   }
