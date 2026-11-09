@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/marcelodevops/dupond-project-leader/compare/v0.1.0...v0.2.0) (2026-11-09)
+
+
+### Features
+
+* release automation ([2f2d70f](https://github.com/marcelodevops/dupond-project-leader/commit/2f2d70ffd1e0e2f8e84d9183532a73461ea4bf28))
+
 ## 0.1.0 — Experimental
 
 First demonstrated task-to-PR milestone for Dupond.
