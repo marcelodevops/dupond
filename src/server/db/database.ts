@@ -11,6 +11,7 @@ import {
   AuditEventRecord,
   DDL_SCHEMA,
 } from './schema.js';
+import { computeEvidenceBinding } from '../verification/evidenceBinding.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DEFAULT_DB_PATH = process.env.DUPOND_DB_PATH
@@ -44,6 +45,18 @@ export class TaskStore {
       this.db.exec('ALTER TABLE task_runs ADD COLUMN target_repo TEXT;');
     } catch {
       // Column already exists
+    }
+    for (const column of [
+      'ALTER TABLE verification_records ADD COLUMN revision_tree_sha TEXT;',
+      'ALTER TABLE verification_records ADD COLUMN requirements_fingerprint TEXT;',
+      'ALTER TABLE verification_records ADD COLUMN verification_config_fingerprint TEXT;',
+      'ALTER TABLE verification_records ADD COLUMN evidence_binding_version TEXT;',
+    ]) {
+      try {
+        this.db.exec(column);
+      } catch {
+        // Column already exists
+      }
     }
   }
 
@@ -191,6 +204,133 @@ export class TaskStore {
       eventType: 'TASK_STATUS_UPDATED',
       actor: 'system',
       details: { status, blockedReason },
+    });
+  }
+
+  /**
+   * Compare-and-swap status change: the update only applies if the task still
+   * has one of the expected statuses. Status write and audit event share one
+   * transaction, so an applied transition is never recorded without its audit
+   * trail and a lost race leaves both untouched.
+   */
+  public transitionTaskCas(params: {
+    taskId: string;
+    expectedFrom: TaskRecord['status'][];
+    to: TaskRecord['status'];
+    actor: string;
+    clearClaim?: boolean;
+    blockedReason?: string;
+    details?: Record<string, any>;
+  }): boolean {
+    if (params.expectedFrom.length === 0) return false;
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      const placeholders = params.expectedFrom.map(() => '?').join(', ');
+      const clearClaim = params.clearClaim ? 1 : 0;
+      const stmt = this.db.prepare(`
+        UPDATE tasks
+        SET status = ?,
+            blocked_reason = ?,
+            claimed_by = CASE WHEN ? = 1 THEN NULL ELSE claimed_by END,
+            claimed_at = CASE WHEN ? = 1 THEN NULL ELSE claimed_at END,
+            updated_at = ?
+        WHERE id = ? AND status IN (${placeholders})
+      `);
+      const res = stmt.run(
+        params.to,
+        params.blockedReason || null,
+        clearClaim,
+        clearClaim,
+        now,
+        params.taskId,
+        ...params.expectedFrom,
+      ) as any;
+      if (res.changes === 0) return false;
+      this.recordAudit({
+        taskId: params.taskId,
+        eventType: 'TASK_LIFECYCLE_TRANSITION',
+        actor: params.actor,
+        details: { ...(params.details || {}), applied: true, casExpected: params.expectedFrom },
+      });
+      return true;
+    });
+  }
+
+  /**
+   * Applies a requirements/config change to a task and, when the evidence
+   * binding changes, records the invalidation and demotes any approved
+   * delivery of the latest run back to pending approval. Prior acceptance and
+   * approval can no longer authorize the new spec.
+   */
+  public updateTaskRequirements(
+    taskId: string,
+    updates: Partial<Pick<TaskRecord, 'acceptanceCriteria' | 'verificationCommands' | 'protectedPaths' | 'description'>>,
+    actor: string = 'system',
+  ): { updated: boolean; bindingChanged: boolean; invalidatedApprovalRunIds: string[] } {
+    return this.transaction(() => {
+      const current = this.getTask(taskId);
+      if (!current) return { updated: false, bindingChanged: false, invalidatedApprovalRunIds: [] };
+
+      const before = computeEvidenceBinding(current);
+      const merged: TaskRecord = { ...current, ...updates };
+      const after = computeEvidenceBinding(merged);
+      const bindingChanged =
+        before.requirementsFingerprint !== after.requirementsFingerprint ||
+        before.verificationConfigFingerprint !== after.verificationConfigFingerprint;
+
+      const now = new Date().toISOString();
+      const stmt = this.db.prepare(`
+        UPDATE tasks
+        SET description = ?, acceptance_criteria = ?, verification_commands = ?, protected_paths = ?, updated_at = ?
+        WHERE id = ?
+      `);
+      stmt.run(
+        merged.description || '',
+        JSON.stringify(merged.acceptanceCriteria || []),
+        JSON.stringify(merged.verificationCommands || []),
+        JSON.stringify(merged.protectedPaths || []),
+        now,
+        taskId,
+      );
+
+      this.recordAudit({
+        taskId,
+        eventType: 'TASK_REQUIREMENTS_UPDATED',
+        actor,
+        details: {
+          bindingChanged,
+          requirementsFingerprint: after.requirementsFingerprint,
+          verificationConfigFingerprint: after.verificationConfigFingerprint,
+        },
+      });
+
+      const invalidatedApprovalRunIds: string[] = [];
+      if (bindingChanged) {
+        const latestRun = this.getLatestRunForTask(taskId);
+        if (latestRun) {
+          const delivery = this.getDeliveryForRun(latestRun.id);
+          if (delivery && delivery.approvalStatus === 'approved') {
+            this.db
+              .prepare(`UPDATE delivery_records SET approval_status = 'pending_approval', approved_by = NULL WHERE id = ?`)
+              .run(delivery.id);
+            invalidatedApprovalRunIds.push(latestRun.id);
+            this.recordAudit({
+              taskId,
+              runId: latestRun.id,
+              eventType: 'APPROVAL_INVALIDATED',
+              actor,
+              details: {
+                reason: bindingChanged
+                  ? 'Acceptance requirements or verification configuration changed; prior approval no longer applies to the new spec.'
+                  : 'unchanged',
+                deliveredCommit: delivery.deliveredCommit,
+              },
+            });
+          }
+        }
+      }
+
+      return { updated: true, bindingChanged, invalidatedApprovalRunIds };
     });
   }
 
@@ -375,8 +515,10 @@ export class TaskStore {
     const stmt = this.db.prepare(`
       INSERT INTO verification_records (
         id, run_id, attempt_id, revision_sha, passed, checks, criteria_verified,
-        failure_reason, verified_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        failure_reason, verified_at,
+        revision_tree_sha, requirements_fingerprint, verification_config_fingerprint,
+        evidence_binding_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -389,6 +531,10 @@ export class TaskStore {
       JSON.stringify(record.criteriaVerified || []),
       record.failureReason || null,
       record.verifiedAt,
+      record.revisionTreeSha || null,
+      record.requirementsFingerprint || null,
+      record.verificationConfigFingerprint || null,
+      record.evidenceBindingVersion || null,
     );
 
     return record;
@@ -592,6 +738,10 @@ export class TaskStore {
       criteriaVerified: JSON.parse(row.criteria_verified || '[]'),
       failureReason: row.failure_reason,
       verifiedAt: row.verified_at,
+      revisionTreeSha: row.revision_tree_sha ?? null,
+      requirementsFingerprint: row.requirements_fingerprint ?? null,
+      verificationConfigFingerprint: row.verification_config_fingerprint ?? null,
+      evidenceBindingVersion: row.evidence_binding_version ?? null,
     };
   }
 

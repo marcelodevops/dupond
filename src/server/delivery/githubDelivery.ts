@@ -4,6 +4,8 @@ import path from 'path';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
 import { DeliveryRecord } from '../db/schema.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
+import { assessEvidenceValidity, verifiedRefForRun } from '../verification/evidenceBinding.js';
+import { LifecycleService } from '../lifecycle/lifecycleService.js';
 import { normalizeRepoSlug, isLocalRemoteOrigin, areRepoSlugsCompatible } from '../workspace/targetRepositoryResolver.js';
 
 export interface DispatchDeliveryOptions {
@@ -174,6 +176,19 @@ export class GitHubDeliveryService {
       }
     }
 
+    // Evidence currency: the passing record must be bound to the task's current
+    // requirements and verification configuration. Legacy (unbound), stale, or
+    // re-configured evidence requires fresh verification before delivery.
+    const validity = assessEvidenceValidity(task, verification);
+    if (!validity.valid) {
+      return {
+        success: false,
+        status: 409,
+        blocked: true,
+        error: `Delivery blocked (${validity.reason}): ${validity.detail} Fresh verification against the current requirements is required.`,
+      };
+    }
+
     // 4. Remote Base Branch Fetch and Drift Verification
     const baseBranch = options.targetBaseBranch || 'main';
     let latestRemoteBaseSha = '';
@@ -275,7 +290,27 @@ export class GitHubDeliveryService {
         checks: recheck.checks,
         criteriaVerified: recheck.criteriaVerified,
         failureReason: null,
+        revisionTreeSha: recheck.treeSha || null,
+        requirementsFingerprint: recheck.binding?.requirementsFingerprint || null,
+        verificationConfigFingerprint: recheck.binding?.verificationConfigFingerprint || null,
+        evidenceBindingVersion: recheck.binding?.evidenceBindingVersion || null,
       });
+
+      // Re-pin the durable verified ref to the newly accepted merged revision
+      try {
+        execFileSync('git', ['update-ref', verifiedRefForRun(run.id), mergedSha], {
+          cwd: realWorktree,
+          stdio: 'pipe',
+        });
+      } catch (pinErr: any) {
+        this.store.recordAudit({
+          taskId: task.id,
+          runId: run.id,
+          eventType: 'REVISION_PIN_FAILED',
+          actor: 'delivery',
+          details: { error: pinErr.message, commitSha: mergedSha },
+        });
+      }
 
       // Update run's baseCommit
       this.store.updateRun(run.id, { baseCommit: latestRemoteBaseSha });
@@ -484,8 +519,26 @@ ${task.acceptanceCriteria.map((c) => `- [x] ${c.title}`).join('\n')}
       approvedBy: options.approvedBy || 'authorized-operator',
     });
 
-    // Advance task status to done and persist PR URL
-    this.store.updateTaskStatus(task.id, 'done');
+    // Advance task status to done through the authoritative lifecycle service
+    // (re-checks evidence binding and the just-recorded approval, applied with
+    // compare-and-swap plus audit event in one transaction).
+    const lifecycle = new LifecycleService(this.store);
+    const doneTransition = lifecycle.transition({
+      taskId: task.id,
+      to: 'done',
+      actor: options.approvedBy || 'delivery',
+      viaDelivery: true,
+      reason: prUrl || `delivered ${deliveredCommit}`,
+    });
+    if (!doneTransition.ok) {
+      this.store.recordAudit({
+        taskId: task.id,
+        runId: run.id,
+        eventType: 'DELIVERY_STATUS_NOT_APPLIED',
+        actor: 'delivery',
+        details: { reason: doneTransition.reason, detail: doneTransition.detail },
+      });
+    }
 
     return {
       success: true,

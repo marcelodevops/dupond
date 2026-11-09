@@ -129,6 +129,31 @@ export class WorkspaceManager {
   public getWorktreesRoot(): string {
     return this.worktreesRoot;
   }
+
+  /**
+   * Pins a verified commit under a durable ref so the exact verified content
+   * survives worktree removal and branch deletion. Resolution stays in git:
+   * no parallel snapshot format is introduced.
+   */
+  public pinRevision(refName: string, commitSha: string): void {
+    execFileSync('git', ['update-ref', refName, commitSha], {
+      cwd: this.baseRepoDir,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    });
+  }
+
+  public resolvePinnedRevision(refName: string): string | null {
+    try {
+      return execFileSync('git', ['rev-parse', '--verify', refName], {
+        cwd: this.baseRepoDir,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+    } catch {
+      return null;
+    }
+  }
 }
 
 export const defaultWorkspaceManager = new WorkspaceManager();

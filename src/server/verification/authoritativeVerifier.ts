@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { SandboxExecutor, defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
+import { computeEvidenceBinding, EvidenceBinding } from './evidenceBinding.js';
 
 export interface AuthoritativeCheckResult {
   command: string;
@@ -15,6 +16,10 @@ export interface AuthoritativeCheckResult {
 export interface AuthoritativeVerificationResult {
   passed: boolean;
   revisionSha: string;
+  /** Git tree of the verified commit: the exact content this evidence proves. */
+  treeSha?: string;
+  /** Fingerprint of the requirements/config the evidence is bound to. */
+  binding?: EvidenceBinding;
   checks: AuthoritativeCheckResult[];
   criteriaVerified: string[];
   failureReason?: string;
@@ -65,6 +70,22 @@ export class AuthoritativeVerifier {
         durationMs: Date.now() - startTime,
       };
     }
+
+    let treeSha: string | undefined;
+    try {
+      treeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {
+        cwd: realWorktree,
+        encoding: 'utf-8',
+      }).trim();
+    } catch {
+      // tree remains unknown; evidence stays bound to the commit revision
+    }
+
+    const binding = computeEvidenceBinding({
+      acceptanceCriteria: params.acceptanceCriteria,
+      verificationCommands: params.verificationCommands,
+      protectedPaths: params.protectedPaths,
+    });
 
     // 2. Integrity Check: verify no protected files were modified
     const protectedPaths = params.protectedPaths || [];
@@ -218,6 +239,8 @@ export class AuthoritativeVerifier {
     return {
       passed: allPassed,
       revisionSha,
+      treeSha,
+      binding,
       checks,
       criteriaVerified,
       failureReason: allPassed ? undefined : firstFailingReason,

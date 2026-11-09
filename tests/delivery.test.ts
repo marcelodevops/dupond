@@ -6,6 +6,7 @@ import { TaskStore } from '../src/server/db/database.ts';
 import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
 import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
 import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.ts';
+import { computeEvidenceBinding } from '../src/server/verification/evidenceBinding.ts';
 
 async function main() {
   console.log('=== RUNNING GITHUB DELIVERY & RECONCILIATION TESTS ===\n');
@@ -85,7 +86,8 @@ async function main() {
     assert.ok(unverifiedResult.error?.includes('has not passed authoritative quality gates'));
     console.log('✔ [PASS] Delivery blocked fail-closed when quality gates are unverified');
 
-    // Record passing verification
+    // Record passing verification bound to the task's current spec
+    const binding = computeEvidenceBinding(task);
     store.recordVerification({
       runId: run.id,
       attemptId: attempt.id,
@@ -93,6 +95,10 @@ async function main() {
       passed: true,
       checks: [{ command: 'echo ok', exitCode: 0, stdout: 'ok', stderr: '', passed: true, durationMs: 10 }],
       criteriaVerified: ['crit-del'],
+      revisionTreeSha: execFileSync('git', ['rev-parse', `${deliveredCommit}^{tree}`], { cwd: worktree.worktreePath, encoding: 'utf-8' }).trim(),
+      requirementsFingerprint: binding.requirementsFingerprint,
+      verificationConfigFingerprint: binding.verificationConfigFingerprint,
+      evidenceBindingVersion: binding.evidenceBindingVersion,
     });
 
     // Test 2: Delivery blocked by approval policy when isApproved is false
