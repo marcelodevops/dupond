@@ -481,10 +481,47 @@ export function resolveTagCommitViaGh(tag: string, repo: string): string | null 
   }
 }
 
-export function patchReleaseMetadataViaGh(id: number, repo: string, fields: Record<string, string>): void {
-  const args = ['api', '-X', 'PATCH', `/repos/${repo}/releases/${id}`];
-  for (const [key, value] of Object.entries(fields)) args.push('-f', `${key}=${value}`);
-  execFileSync('gh', args, { encoding: 'utf-8', stdio: 'pipe' });
+export interface HygieneAttempt {
+  tag: string;
+  field: string;
+  status: 'applied' | 'refused' | 'failed';
+  detail: string;
+}
+
+// The Releases API refuses an edit whose resolved target commit is not authorized to
+// touch workflow files. A GITHUB_TOKEN can never satisfy that rule, and a personal
+// access token needs the Workflows permission, so a refusal here is an environment
+// limit rather than a bug worth failing a release over.
+export function isAuthorizationRefusal(error: unknown): boolean {
+  const err = error as { message?: string; stdout?: string; stderr?: string } | undefined;
+  const text = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+  return (
+    text.includes('Resource not accessible by integration') ||
+    text.includes('Resource not accessible by personal access token') ||
+    /\bHTTP 403\b/.test(text)
+  );
+}
+
+export function summarizeHygieneAttempts(attempts: HygieneAttempt[]): Record<HygieneAttempt['status'], number> {
+  const counts = { applied: 0, refused: 0, failed: 0 };
+  for (const attempt of attempts) counts[attempt.status] += 1;
+  return counts;
+}
+
+// One field per request: GitHub evaluates the whole PATCH at once, so writing the
+// title separately keeps a permitted rename from being lost with a refused commit.
+export function applyReleaseFieldViaGh(id: number, repo: string, tag: string, field: string, value: string): HygieneAttempt {
+  try {
+    execFileSync('gh', ['api', '-X', 'PATCH', `/repos/${repo}/releases/${id}`, '-f', `${field}=${value}`], {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    });
+    return { tag, field, status: 'applied', detail: '' };
+  } catch (error) {
+    const err = error as { message?: string; stderr?: string };
+    const detail = (err?.stderr || err?.message || 'unknown error').split('\n').find((line) => line.trim() !== '') ?? 'unknown error';
+    return { tag, field, status: isAuthorizationRefusal(error) ? 'refused' : 'failed', detail: detail.trim() };
+  }
 }
 
 interface CliArgs {
@@ -613,12 +650,28 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
       console.log('[hygiene] every release already has a title and a recorded commit');
       return 0;
     }
+    const attempts: HygieneAttempt[] = [];
     for (const patch of patches) {
       console.log(`[hygiene] ${patch.tag} (release ${patch.id}): ${patch.reasons.join('; ')}`);
-      if (flags.apply === true) patchReleaseMetadataViaGh(patch.id, repo, patch.fields);
+      if (flags.apply !== true) continue;
+      for (const [field, value] of Object.entries(patch.fields)) {
+        attempts.push(applyReleaseFieldViaGh(patch.id, repo, patch.tag, field, value));
+      }
     }
-    if (flags.apply !== true) console.log('[hygiene] dry run: pass --apply to write');
-    return 0;
+    if (flags.apply !== true) {
+      console.log('[hygiene] dry run: pass --apply to write');
+      return 0;
+    }
+    for (const attempt of attempts) {
+      if (attempt.status === 'applied') console.log(`[hygiene] ${attempt.tag}: ${attempt.field} written`);
+      else console.log(`[hygiene] ${attempt.tag}: ${attempt.field} ${attempt.status} — ${attempt.detail}`);
+    }
+    const counts = summarizeHygieneAttempts(attempts);
+    console.log(`[hygiene] applied ${counts.applied}, refused ${counts.refused}, failed ${counts.failed}`);
+    if (counts.refused > 0) {
+      console.log('[hygiene] a refused field needs a token authorized for workflow files, which GITHUB_TOKEN never is; run this command with a personal token that has Contents and Workflows write to finish it');
+    }
+    return counts.failed > 0 ? 1 : 0;
   }
 
   console.error(`[release] unknown command "${command}" (expected: consistency, gate, hygiene, notes, pr-title)`);

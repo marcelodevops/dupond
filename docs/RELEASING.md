@@ -107,7 +107,9 @@ Conventional Commits is invisible to release automation. Release Please's own ti
    `target_commitish` to the commit the tag resolves to when the release recorded no
    commit at all. It never touches notes, prerelease state, or a title a maintainer
    wrote by hand — which is why `Dupond v0.1.0 — Experimental` keeps its wording —
-   and it creates nothing, so re-running it is a no-op.
+   and it creates nothing, so re-running it is a no-op. Each field is written with its
+   own request, so a permitted rename is not lost alongside a refused commit, and an
+   authorization refusal is reported and skipped rather than failing the release.
 
 The first release PR the automation actually built was `0.2.0`, from the `feat:`
 title of PR #10 — not the `0.1.1` this document first predicted, because the PR
@@ -149,6 +151,22 @@ around that instead of assuming success:
   has no `releases` permission key — naming one is a workflow-file parse error, and
   release edits are authorized by `contents: write`.
   Credentials are never echoed, and no step prints a token even on failure.
+* **Editing an existing release is not always possible from a workflow.** The
+  Releases API requires the authenticating token to be authorized to modify
+  workflows when the release's target commit "adds or modifies any file under
+  `.github/workflows/` relative to the repository's default branch", and it states
+  that "The `GITHUB_TOKEN` available to GitHub Actions cannot be authorized for
+  this". `v0.2.0`'s target commit (`05a2e96`) changes only `CHANGELOG.md` and the
+  version files, yet run 42553362672 was still refused with `403 Resource not
+  accessible by integration` — consistent with GitHub comparing that commit against
+  the *current* default branch, whose workflows have changed since it was tagged.
+  The same repair through a fine-grained personal token answered `403 Resource not
+  accessible by personal access token`, and the documented requirement for that path
+  is **Workflows: write** in addition to `Contents` — not verified here, because no
+  token used so far holds it. So `hygiene` treats an authorization refusal as a
+  reported skip: a release never fails because GitHub would not rename it. Titles and
+  provenance of older releases are a maintainer repair, run locally with a token that
+  satisfies the rule above.
 
 ## Required repository setting (not a secret)
 
