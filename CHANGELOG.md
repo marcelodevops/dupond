@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.3](https://github.com/marcelodevops/dupond/compare/v0.2.2...v0.2.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **release:** gate the commit that will actually be tagged ([36ae500](https://github.com/marcelodevops/dupond/commit/36ae500d3f2d102dc4d5280b0b4c90fabdec728f))
+* **release:** gate the commit that will actually be tagged ([490fc99](https://github.com/marcelodevops/dupond/commit/490fc99d101f00c2784f8a6e998fe640670d2215))
+* **release:** read pending releases over REST and trust recorded provenance ([edfa7d1](https://github.com/marcelodevops/dupond/commit/edfa7d1cb94a558d1b389af9846df2f55427dbfc))
+* **release:** read pending releases over REST and trust recorded provenance ([bcc19a9](https://github.com/marcelodevops/dupond/commit/bcc19a9cc0c4a812338432029c9af793e0bae8b1))
+
 ## [0.2.2](https://github.com/marcelodevops/dupond-project-leader/compare/v0.2.1...v0.2.2) (2026-11-09)
 
 
