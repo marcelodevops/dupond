@@ -156,17 +156,21 @@ around that instead of assuming success:
   workflows when the release's target commit "adds or modifies any file under
   `.github/workflows/` relative to the repository's default branch", and it states
   that "The `GITHUB_TOKEN` available to GitHub Actions cannot be authorized for
-  this". `v0.2.0`'s target commit (`05a2e96`) changes only `CHANGELOG.md` and the
-  version files, yet run 42553362672 was still refused with `403 Resource not
-  accessible by integration` — consistent with GitHub comparing that commit against
-  the *current* default branch, whose workflows have changed since it was tagged.
+  this". Run 42554282156 drew the line exactly: the same job token patched the
+  just-published `v0.2.1`, whose target commit *is* current `main`, and was refused
+  for `v0.2.0`, whose target `05a2e96` predates the workflow changes of PRs #13/#14 —
+  even though that commit itself only touches `CHANGELOG.md` and the version files. So
+  GitHub compares the target commit against the *current* default branch, not in
+  isolation, and every release older than the last workflow edit becomes unpatchable
+  from a workflow.
   The same repair through a fine-grained personal token answered `403 Resource not
   accessible by personal access token`, and the documented requirement for that path
   is **Workflows: write** in addition to `Contents` — not verified here, because no
   token used so far holds it. So `hygiene` treats an authorization refusal as a
-  reported skip: a release never fails because GitHub would not rename it. Titles and
-  provenance of older releases are a maintainer repair, run locally with a token that
-  satisfies the rule above.
+  reported skip: a release never fails because GitHub would not rename it. Each new
+  release still gets its `Dupond vX.Y.Z` title from `tidy`; the `v0.2.0` title and the
+  recorded commit of the hand-created `v0.1.0` are a maintainer repair, run locally
+  with a token that satisfies the rule above.
 
 ## Required repository setting (not a secret)
 
