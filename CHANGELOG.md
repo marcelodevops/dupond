@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/marcelodevops/dupond-project-leader/compare/v0.2.0...v0.2.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **release:** use a workflow permission scope Actions accepts ([a246c9c](https://github.com/marcelodevops/dupond-project-leader/commit/a246c9c75d7f20626fdb8c5cc6b37e6eb80b9e9d))
+* **release:** use a workflow permission scope Actions accepts ([02eb336](https://github.com/marcelodevops/dupond-project-leader/commit/02eb336eece2a4a8f443486669422f1539a6759d))
+
 ## [0.2.0](https://github.com/marcelodevops/dupond-project-leader/compare/v0.1.0...v0.2.0) (2026-11-09)
 
 
