@@ -94,20 +94,28 @@ Conventional Commits is invisible to release automation. Release Please's own ti
 3. Review the release PR like any other change and merge it.
 4. The push of that merge triggers `release.yml` again. `ci-gate` waits for the
    required workflow `Dupond Continuous Integration` to pass for **every commit the
-   publish job is about to use**: the `github.sha` being run, and, when a release PR
-   merged earlier is still pending, that pull request's merge commit — because
+   publish job may use**: the `github.sha` being run, and, when a release PR merged
+   earlier is still unpublished, that pull request's merge commit too — because
    Release Please tags the pending PR's merge commit, which is not the commit that
-   triggered this run. Only a `push` run against `main` counts; a green
-   `pull_request` run on the same commit, or green CI on a neighbouring commit, does
-   not authorize a publish. Once every target is green, `publish` runs Release Please
-   with `skip-github-pull-request: true`, which creates the tag and GitHub release.
+   triggered this run. Merging the release PR is itself a push of that commit, so the
+   usual case is one target verified once, never the same CI twice. Only a `push` run
+   against `main` counts; a green `pull_request` run on the same commit, or green CI on
+   a neighbouring commit, does not authorize a publish. Once every target is green,
+   `publish` runs Release Please with `skip-github-pull-request: true`, which creates
+   the tag and GitHub release.
 5. The release PR then gains the `autorelease: tagged` label. That label, the tag,
    and the manifest entry are the three things to compare when deciding whether a
    run reconciled or stalled.
 6. The `tidy` job runs `scripts/release.ts hygiene --apply` after `publish`. It
    titles any release whose name is still the bare tag as `Dupond vX.Y.Z`, and pins
-   `target_commitish` to the commit the tag resolves to when the release recorded no
-   commit at all. It never touches notes, prerelease state, or a title a maintainer
+   `target_commitish` to the commit the tag resolves to when the release records a branch
+   name instead of a commit, or a commit that is not the tag's target. Provenance is read
+   from `target_commitish`, never from `commit_id`: the Releases list endpoint returns
+   `commit_id: null` even for a release whose commit is recorded, so keying on it would
+   re-plan every release on every run and re-send writes GitHub refuses forever. A release
+   that is already correct produces no request at all, and `hygiene` then reports that
+   every release has a title and a recorded commit. It never touches notes, prerelease
+   state, or a title a maintainer
    wrote by hand — which is why `Dupond v0.1.0 — Experimental` keeps its wording —
    and it creates nothing, so re-running it is a no-op. Each field is written with its
    own request, so a permitted rename is not lost alongside a refused commit, and an

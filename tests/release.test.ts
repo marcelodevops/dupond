@@ -105,14 +105,14 @@ async function main() {
   // A release pull request merged earlier stays `autorelease: pending`, and publishing
   // tags that pull request's merge commit rather than this run's head, so checking only
   // the head would ship a commit whose own CI never passed (observed for 0.2.2).
-  assert.deepStrictEqual(requiredGateTargets(SHA, null), [{ sha: SHA, role: 'push head' }], 'nothing pending means one commit to verify');
+  assert.deepStrictEqual(requiredGateTargets(SHA, []), [{ sha: SHA, role: 'push head' }], 'nothing pending means one commit to verify');
   assert.deepStrictEqual(
-    requiredGateTargets(SHA, SHA.toUpperCase()),
+    requiredGateTargets(SHA, [SHA.toUpperCase(), SHA]),
     [{ sha: SHA, role: 'push head' }],
     'the same commit is never verified twice',
   );
-  const bothTargets = requiredGateTargets(SHA, OTHER_SHA);
-  assert.deepStrictEqual(bothTargets.map((target) => target.role), ['release commit to be tagged', 'push head']);
+  const bothTargets = requiredGateTargets(SHA, [OTHER_SHA]);
+  assert.deepStrictEqual(bothTargets.map((target) => target.role), ['push head', 'release commit to be tagged']);
 
   const releaseRed = (target: string): WorkflowRun[] =>
     target === SHA ? [run({ head_sha: target })] : [run({ head_sha: target, conclusion: 'failure' })];
@@ -129,8 +129,15 @@ async function main() {
 
   const waited = waitUntilRequiredGreen(bothTargets, releaseRed, REQUIRED_WORKFLOWS, 1, 0, () => {}, () => {});
   assert.strictEqual(waited.state, 'blocked', waited.detail);
-  assert.ok(waited.detail.startsWith('release commit to be tagged'), 'the release commit is verified first, so a red one fails fast');
+  assert.ok(waited.detail.startsWith('release commit to be tagged'), waited.detail);
   console.log('✔ [PASS] Publishing requires green CI on the commit that will actually be tagged');
+
+  // Merging a release pull request is itself a push whose head is that release commit, so
+  // the ordinary path must keep exactly one target — otherwise every release would wait on
+  // the same CI twice.
+  const releaseMergeRun = requiredGateTargets(OTHER_SHA, [OTHER_SHA]);
+  assert.deepStrictEqual(releaseMergeRun, [{ sha: OTHER_SHA, role: 'push head' }], 'the pending commit is not a second target when it is this run');
+  console.log('✔ [PASS] A release merge run whose head is the pending commit verifies it once');
 
   // --------------------------------------------------------------------------
   // Part 2: the gate waits for CI instead of failing early, then stops waiting
@@ -385,6 +392,28 @@ async function main() {
     [],
     'tags outside vX.Y.Z are out of scope',
   );
+
+  // How the Releases list endpoint actually answers: `commit_id` is null even when the
+  // release records a commit, and the provenance sits in `target_commitish`. Keying the
+  // plan on `commit_id` alone re-planned every release on every run, so each write that
+  // GitHub refuses was retried forever and `hygiene` never reported a clean tree.
+  const asApiReports = (release: { id: number; tag_name: string; name: string; target_commitish: string }) => ({
+    ...release,
+    commit_id: null,
+  });
+  assert.deepStrictEqual(
+    planReleaseMetadata([asApiReports({ id: 6, tag_name: 'v0.2.0', name: 'Dupond v0.2.0', target_commitish: OTHER_SHA })], resolve),
+    [],
+    'a release whose target_commitish already equals its tag is finished work',
+  );
+  assert.deepStrictEqual(
+    planReleaseMetadata([asApiReports({ id: 7, tag_name: 'v0.1.0', name: 'Dupond v0.1.0 — Experimental', target_commitish: 'main' })], resolve)[0].fields,
+    { target_commitish: SHA },
+    'a branch name is not a recorded commit, so the tag is resolved explicitly',
+  );
+  const drifted = planReleaseMetadata([asApiReports({ id: 8, tag_name: 'v0.2.0', name: 'Dupond v0.2.0', target_commitish: SHA })], resolve);
+  assert.deepStrictEqual(drifted[0].fields, { target_commitish: OTHER_SHA }, 'a recorded commit that is not the tag target is repaired');
+  assert.ok(drifted[0].reasons[0].includes('disagrees with the tag'), JSON.stringify(drifted[0].reasons));
   console.log('✔ [PASS] Release metadata is normalized idempotently without inventing commits');
 
   // The exact failure GitHub returned for the v0.2.0 repair in run 42553362672.
