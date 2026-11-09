@@ -8,7 +8,12 @@ import { WorkspaceManager } from '../src/server/workspace/workspaceManager.js';
 import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.js';
 import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.js';
 import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.js';
-import { resolveTargetRepository } from '../src/server/workspace/targetRepositoryResolver.js';
+import {
+  resolveTargetRepository,
+  canonicalizeRepoSlug,
+  areRepoSlugsCompatible,
+  isOrchestratorSelfTarget,
+} from '../src/server/workspace/targetRepositoryResolver.js';
 import { CodingWorkerAdapter, WorkerExecutionContext } from '../src/server/worker/types.js';
 
 async function main() {
@@ -76,6 +81,22 @@ async function main() {
       return true;
     }, 'Silent fallback to orchestrator repository is prohibited');
     console.log('✔ [PASS] Silent fallback to orchestrator repository prohibited');
+
+    // 6. Repository slug canonicalization and backward-compatibility with legacy slug
+    assert.strictEqual(canonicalizeRepoSlug('marcelodevops/dupond-project-leader'), 'marcelodevops/dupond');
+    assert.strictEqual(canonicalizeRepoSlug('git@github.com:marcelodevops/dupond-project-leader.git'), 'marcelodevops/dupond');
+    assert.strictEqual(canonicalizeRepoSlug('https://github.com/marcelodevops/dupond.git'), 'marcelodevops/dupond');
+    assert.strictEqual(canonicalizeRepoSlug('marcelodevops/other-repo'), 'marcelodevops/other-repo');
+
+    assert.strictEqual(areRepoSlugsCompatible('marcelodevops/dupond-project-leader', 'marcelodevops/dupond'), true);
+    assert.strictEqual(areRepoSlugsCompatible('git@github.com:marcelodevops/dupond-project-leader.git', 'https://github.com/marcelodevops/dupond.git'), true);
+    assert.strictEqual(areRepoSlugsCompatible('marcelodevops/dupond', 'marcelodevops/dupond'), true);
+    assert.strictEqual(areRepoSlugsCompatible('marcelodevops/dupond', 'marcelodevops/different-repo'), false);
+
+    assert.strictEqual(isOrchestratorSelfTarget('marcelodevops/dupond'), true);
+    assert.strictEqual(isOrchestratorSelfTarget('marcelodevops/dupond-project-leader'), true);
+    assert.strictEqual(isOrchestratorSelfTarget('marcelodevops/unrelated-repo'), false);
+    console.log('✔ [PASS] Repository rename compatibility and self-target protection verified');
 
     // ------------------------------------------------------------------------
     // Part 2: Remote Base Advanced Through a Second Clone

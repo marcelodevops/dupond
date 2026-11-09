@@ -40,7 +40,7 @@ async function main() {
     description: 'Ensure PR delivery policies and reconciliation work',
     status: 'review',
     priority: 'high',
-    targetRepo: 'marcelodevops/dupond-project-leader',
+    targetRepo: 'marcelodevops/dupond',
     baseCommit: worktree.baseCommit,
     allowedPaths: ['*'],
     protectedPaths: [],
@@ -132,7 +132,7 @@ async function main() {
       isApproved: true,
       approvedBy: 'lead-devops-operator',
       disposableRemoteDir: disposableRemote,
-      repoUrl: 'marcelodevops/dupond-project-leader',
+      repoUrl: 'marcelodevops/dupond',
     });
 
     assert.strictEqual(deliveryResult.success, true);
