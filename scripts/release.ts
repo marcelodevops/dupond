@@ -545,6 +545,80 @@ function parseArgs(argv: string[]): CliArgs {
   return { command, flags };
 }
 
+export interface GateTarget {
+  sha: string;
+  role: 'push head' | 'release commit to be tagged';
+}
+
+/**
+ * The commit the publish job will tag is not necessarily the commit this run was
+ * triggered by: a release PR merged earlier stays `autorelease: pending` until it is
+ * published, and Release Please tags that pull request's merge commit. Verifying only
+ * the run head would publish a release whose own CI never passed, so both must be
+ * green.
+ */
+export function requiredGateTargets(runSha: string, releaseCommitSha: string | null): GateTarget[] {
+  const targets: GateTarget[] = [];
+  if (releaseCommitSha && !sameSha(releaseCommitSha, runSha)) targets.push({ sha: releaseCommitSha, role: 'release commit to be tagged' });
+  targets.push({ sha: runSha, role: 'push head' });
+  return targets;
+}
+
+export function waitUntilRequiredGreen(
+  targets: GateTarget[],
+  fetchRuns: RunsFetcher,
+  required: string[],
+  timeoutSeconds: number,
+  intervalSeconds: number,
+  sleep: (ms: number) => void,
+  log: (message: string) => void,
+): GateVerdict {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  const runIds: number[] = [];
+  for (const target of targets) {
+    const remaining = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    const verdict = waitUntilGreen(target.sha, fetchRuns, required, remaining, intervalSeconds, sleep, (message) =>
+      log(`[gate ${target.role}] ${message}`),
+    );
+    if (verdict.state !== 'green') return { ...verdict, detail: `${target.role} ${target.sha}: ${verdict.detail}` };
+    runIds.push(...verdict.runIds);
+    log(`[gate ${target.role}] ${target.sha} verified by run ${verdict.runIds.join(', ')}`);
+  }
+  const detail = `Required CI is green for ${targets.map((target) => `${target.role} ${target.sha.slice(0, 7)}`).join(' and ')}`;
+  return { state: 'green', sha: targets[targets.length - 1].sha, detail, runIds };
+}
+
+export function evaluateRequiredGreen(targets: GateTarget[], fetchRuns: RunsFetcher, required: string[]): GateVerdict {
+  const runIds: number[] = [];
+  for (const target of targets) {
+    const verdict = evaluateCiGate(fetchRuns(target.sha), target.sha, required);
+    if (verdict.state !== 'green') return { ...verdict, detail: `${target.role} ${target.sha}: ${verdict.detail}` };
+    runIds.push(...verdict.runIds);
+  }
+  const detail = `Required CI is green for ${targets.map((target) => `${target.role} ${target.sha.slice(0, 7)}`).join(' and ')}`;
+  return { state: 'green', sha: targets[targets.length - 1].sha, detail, runIds };
+}
+
+/**
+ * The merge commit of the release pull request that publish will tag, or null when no
+ * release is pending. A gh failure is thrown rather than reported as "nothing pending":
+ * answering null on an API error would drop the second gate and re-open the exact hole
+ * this check exists to close.
+ */
+export function fetchPendingReleaseCommitViaGh(repo: string): string | null {
+  const numbers = execFileSync(
+    'gh',
+    ['pr', 'list', '--repo', repo, '--state', 'merged', '--label', 'autorelease: pending', '--json', 'number', '--jq', '.[0].number // empty'],
+    { encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 },
+  ).trim();
+  if (!numbers) return null;
+  const oid = execFileSync('gh', ['pr', 'view', numbers, '--repo', repo, '--json', 'mergeCommit', '--jq', '.mergeCommit.oid // empty'], {
+    encoding: 'utf-8',
+    maxBuffer: 4 * 1024 * 1024,
+  }).trim();
+  return /^[0-9a-f]{40}$/.test(oid) ? oid : null;
+}
+
 export function waitUntilGreen(
   sha: string,
   fetchRuns: RunsFetcher,
@@ -634,12 +708,19 @@ export function main(argv: string[] = process.argv.slice(2), cwd: string = proce
     const timeoutSeconds = Number(flags.timeout ?? 1800);
     const intervalSeconds = Number(flags.interval ?? 30);
     const fetcher: RunsFetcher = (target) => fetchWorkflowRunsViaGh(target, repo);
+    const targets = requiredGateTargets(sha, fetchPendingReleaseCommitViaGh(repo));
+    if (targets.length > 1) {
+      console.log(`[gate] a release pull request is still pending; its merge commit must also be green before publishing`);
+    }
     const verdict = flags.wait
-      ? waitUntilGreen(sha, fetcher, REQUIRED_WORKFLOWS, timeoutSeconds, intervalSeconds, (ms) => {
+      ? waitUntilRequiredGreen(targets, fetcher, REQUIRED_WORKFLOWS, timeoutSeconds, intervalSeconds, (ms) => {
           execFileSync('sleep', [String(Math.ceil(ms / 1000))], { stdio: 'ignore' });
         }, (message) => console.log(message))
-      : evaluateCiGate(fetcher(sha), sha, REQUIRED_WORKFLOWS);
+      : evaluateRequiredGreen(targets, fetcher, REQUIRED_WORKFLOWS);
     console.log(`[gate] ${verdict.state}: ${verdict.detail}`);
+    if (verdict.state === 'blocked' && targets.length > 1 && targets[0].role === 'release commit to be tagged') {
+      console.log('[gate] the pending release cannot be published from a commit whose CI failed; land a fix on main so the automation prepares a newer release pull request, then re-run this workflow');
+    }
     return verdict.state === 'green' ? 0 : 1;
   }
 
