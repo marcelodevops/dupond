@@ -19,6 +19,13 @@ Never hand-edit the version in `package.json`, `package-lock.json`, or
 `.release-please-manifest.json`. If they disagree, `npm run release:check` fails
 and CI blocks the release PR.
 
+`release:check` also validates every `permissions:` block under
+`.github/workflows/`. Actions matches those keys against a closed list and refuses
+to parse the file if one is unknown — `releases` is **not** on that list; release
+writes come from `contents: write`. An unparseable workflow is a silent outage, not a
+loud one: run 42548503983 failed in 0s and no `prepare`, `ci-gate`, `publish` or
+`tidy` job ran for the `main` commit at all.
+
 `.release-please-manifest.json` must contain nothing but `"path": "version"` pairs.
 Release Please parses every key as a repository path and every value as a version,
 so an editor hint such as `"$schema"` aborts the run with `unable to parse version
@@ -138,7 +145,9 @@ around that instead of assuming success:
   `on: release` or `on: push: tags` workflow will simply never fire.
 * Nothing here requires repository **secrets**. `ci-gate` uses the job token read-only
   (`actions: read`); `prepare`/`publish` get `contents: write` plus
-  `pull-requests: write`; `tidy` gets `releases: write` and nothing broader.
+  `pull-requests: write`; `tidy` gets `contents: write` and nothing broader. Actions
+  has no `releases` permission key — naming one is a workflow-file parse error, and
+  release edits are authorized by `contents: write`.
   Credentials are never echoed, and no step prints a token even on failure.
 
 ## Required repository setting (not a secret)
