@@ -9,6 +9,8 @@ import { CodingWorkerAdapter, WorkerExecutionContext } from '../worker/types.js'
 import { defaultCodingWorker } from '../worker/geminiWorkerAdapter.js';
 import { resolveCodingWorker } from '../worker/workerRegistry.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
+import { verifiedRefForRun } from '../verification/evidenceBinding.js';
+import { LifecycleService } from '../lifecycle/lifecycleService.js';
 import { defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
 
 export interface ExecutionLoopOptions {
@@ -306,7 +308,7 @@ export class RepairCoordinator {
           break;
         }
 
-        // Record verification record
+        // Record verification bound to the exact revision, requirements, and config
         this.store.recordVerification({
           runId: run.id,
           attemptId: attempt.id,
@@ -315,6 +317,10 @@ export class RepairCoordinator {
           checks: verification.checks,
           criteriaVerified: verification.criteriaVerified,
           failureReason: verification.failureReason,
+          revisionTreeSha: verification.treeSha || null,
+          requirementsFingerprint: verification.binding?.requirementsFingerprint || null,
+          verificationConfigFingerprint: verification.binding?.verificationConfigFingerprint || null,
+          evidenceBindingVersion: verification.binding?.evidenceBindingVersion || null,
         });
 
         // Update attempt record with verified outcomes
@@ -358,8 +364,39 @@ export class RepairCoordinator {
           status: 'completed',
           durationMs: totalDuration,
         });
-        // Transition task to review (ready for PR delivery)
-        this.store.updateTaskStatus(task.id, 'review');
+
+        // Pin the verified commit so the exact accepted content remains
+        // resolvable after the ephemeral worktree and branch are removed.
+        if (finalVerificationSha) {
+          try {
+            wsManager.pinRevision(verifiedRefForRun(run.id), finalVerificationSha);
+          } catch (pinErr: any) {
+            this.store.recordAudit({
+              taskId: task.id,
+              runId: run.id,
+              eventType: 'REVISION_PIN_FAILED',
+              actor: 'verifier',
+              details: { error: pinErr.message, commitSha: finalVerificationSha },
+            });
+          }
+        }
+
+        // Enter Review only through the authoritative lifecycle service, which
+        // re-checks that the recorded evidence is bound to the current spec.
+        const lifecycle = new LifecycleService(this.store);
+        const reviewTransition = lifecycle.transition({
+          taskId: task.id,
+          to: 'review',
+          actor: 'verifier',
+          reason: 'Authoritative verification passed',
+        });
+        if (!reviewTransition.ok) {
+          this.store.unclaimTask(
+            task.id,
+            'blocked',
+            `Verification passed but Review was refused by the lifecycle service: ${reviewTransition.detail}`,
+          );
+        }
       } else {
         const isCancelled = this.isCancelled(runId) || abortController.signal.aborted;
         const finalStatus = isCancelled ? 'cancelled' : 'failed';

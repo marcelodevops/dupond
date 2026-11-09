@@ -19,6 +19,7 @@ import {
 } from '../types';
 import { StateMutationSchema } from '../types/schemas.js';
 import { taskStore } from './db/database.js';
+import { defaultLifecycleService } from './lifecycle/lifecycleService.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
 import { WorkspaceManager } from './workspace/workspaceManager.js';
 import { resolveTargetRepository, orchestratorRepoSlug, isOrchestratorSelfTarget } from './workspace/targetRepositoryResolver.js';
@@ -277,6 +278,23 @@ class CoordinatorEngine {
       validatedPartial.tasks = validatedPartial.tasks.map((task) => {
         const existing = existingTasks.find((t) => t.id === task.id || t.key === task.key);
 
+        // Projection rule: for tasks registered in the authoritative store,
+        // acceptance-bearing statuses are owned by the lifecycle service and
+        // its evidence gates. A posted state blob is clamped to the persisted
+        // status instead of independently granting Review or Done.
+        if (task.status === 'review' || task.status === 'done') {
+          const dbTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+          if (dbTask && dbTask.status !== task.status) {
+            rejectedDoneTasks.push(task.key);
+            return {
+              ...task,
+              status: dbTask.status as TaskStatus,
+              lastAgentComment: `Authoritative lifecycle: "${task.status}" is granted only by evidence-bound transitions, not by posted state. Showing persisted status "${dbTask.status}".`,
+              lastUpdated: 'Just now',
+            };
+          }
+        }
+
         // Detect if acceptance criteria or description changed; invalidate previous evidence
         if (existing) {
           const subtasksChanged = JSON.stringify(existing.subtasks) !== JSON.stringify(task.subtasks);
@@ -358,6 +376,33 @@ class CoordinatorEngine {
     const task = this.state.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
       return { success: false, error: `Task ${taskId} not found` };
+    }
+
+    // Tasks registered in the authoritative store transition only through the
+    // lifecycle service, which gates Review/Done on bound verification evidence.
+    // The JSON entry is updated as a projection of that outcome afterward.
+    const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
+    if (dbTask) {
+      const outcome = defaultLifecycleService.transition({
+        taskId: dbTask.id,
+        to: targetStatus,
+        actor: 'api',
+        reason: 'Status transition requested via orchestration API',
+      });
+      if (!outcome.ok) {
+        return {
+          success: false,
+          error: outcome.detail || `Lifecycle service refused "${targetStatus}" (${outcome.reason})`,
+        };
+      }
+      const projected: Task = {
+        ...task,
+        status: targetStatus,
+        lastUpdated: 'Just now',
+      };
+      this.state.tasks = this.state.tasks.map((t) => (t.id === task.id ? projected : t));
+      this.saveStateToDisk();
+      return { success: true, task: projected };
     }
 
     if (targetStatus === 'done') {
