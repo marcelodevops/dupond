@@ -9,14 +9,17 @@ import {
   findPolicyProblems,
   findVersionMismatches,
   findManifestProblems,
+  findWorkflowPermissionProblems,
   isConventionalPrTitle,
   parseConventionalTitle,
   planReleaseMetadata,
   readManifestEntries,
   readReleasePolicy,
   readVersionSources,
+  readWorkflowPermissionProblems,
   REQUIRED_WORKFLOWS,
   suggestConventionalTitle,
+  WORKFLOW_PERMISSION_SCOPES,
 } from '../scripts/release.ts';
 import type { WorkflowRun } from '../scripts/release.ts';
 
@@ -348,6 +351,45 @@ async function main() {
     'tags outside vX.Y.Z are out of scope',
   );
   console.log('✔ [PASS] Release metadata is normalized idempotently without inventing commits');
+
+  // --------------------------------------------------------------------------
+  // Part 7: a workflow Actions cannot parse would take the release pipeline down
+  // --------------------------------------------------------------------------
+  console.log('\n--- Part 7: Workflow permission scopes ---');
+
+  assert.ok(!WORKFLOW_PERMISSION_SCOPES.includes('releases'), 'Actions has no releases scope; contents: write authorizes release writes');
+  assert.deepStrictEqual(
+    readWorkflowPermissionProblems(repoRoot),
+    [],
+    'a scope outside the Actions list invalidates the whole workflow file, so the shipped workflows must use only known scopes',
+  );
+
+  const badScope = findWorkflowPermissionProblems(
+    'release.yml',
+    ['jobs:', '  tidy:', '    permissions:', '      contents: read', '      releases: write', '    steps: []'].join('\n'),
+  );
+  assert.strictEqual(badScope.length, 1, badScope.join('\n'));
+  assert.ok(badScope[0].includes('releases'), badScope[0]);
+
+  const badAccess = findWorkflowPermissionProblems(
+    'ci.yml',
+    ['permissions:', '  contents: rw', '', 'jobs:'].join('\n'),
+  );
+  assert.deepStrictEqual(badAccess.length, 1, badAccess.join('\n'));
+
+  assert.deepStrictEqual(
+    findWorkflowPermissionProblems('ok.yml', ['permissions:', '  actions: read', '  pull-requests: none'].join('\n')),
+    [],
+    'known scopes with valid access levels are accepted',
+  );
+  for (const inline of ['permissions: read-all', 'permissions: write-all', 'permissions: {}']) {
+    assert.deepStrictEqual(findWorkflowPermissionProblems('ok.yml', inline), [], inline + ' is valid');
+  }
+  assert.deepStrictEqual(
+    findWorkflowPermissionProblems('bad.yml', 'permissions: everything'),
+    ['bad.yml:1 permissions must be read-all, write-all, {} or a block, got "everything"'],
+  );
+  console.log('✔ [PASS] Unknown workflow permission scopes are refused before they can disable the pipeline');
 
   console.log('\n=== ALL RELEASE AUTOMATION TESTS PASSED ===');
 }
