@@ -219,6 +219,67 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
             </div>
           </div>
 
+          {/* Coding Worker Provider & Model */}
+          <div className="grid grid-cols-2 gap-3 pt-1">
+            <div>
+              <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
+                Worker Provider
+              </label>
+              <select
+                value={task.workerConfig?.provider || 'gemini'}
+                onChange={(e) => {
+                  const prov = e.target.value;
+                  const defaultMod = prov === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
+                  onUpdateTask({
+                    ...task,
+                    workerConfig: {
+                      provider: prov,
+                      model: defaultMod,
+                    },
+                  });
+                }}
+                className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold"
+              >
+                <option value="gemini">Google Gemini</option>
+                <option value="openai">OpenAI</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
+                Worker Model
+              </label>
+              <select
+                value={task.workerConfig?.model || (task.workerConfig?.provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash')}
+                onChange={(e) => {
+                  onUpdateTask({
+                    ...task,
+                    workerConfig: {
+                      provider: task.workerConfig?.provider || 'gemini',
+                      model: e.target.value,
+                    },
+                  });
+                }}
+                className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                {(task.workerConfig?.provider || 'gemini') === 'gemini' ? (
+                  <>
+                    <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended)</option>
+                    <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
+                    <option value="gpt-4o">gpt-4o</option>
+                    <option value="o3-mini">o3-mini</option>
+                    <option value="o1">o1</option>
+                    <option value="gpt-4.5-preview">gpt-4.5-preview</option>
+                  </>
+                )}
+              </select>
+            </div>
+          </div>
+
           {/* Quality Gates Verification Report Card */}
           {verificationResult && (
             <div className={`p-4 rounded-xl border ${verificationResult.passed ? 'bg-emerald-950/40 border-emerald-800/60' : 'bg-rose-950/40 border-rose-800/60'} space-y-2.5 animate-fadeIn`}>
