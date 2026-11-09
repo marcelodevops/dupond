@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/marcelodevops/dupond/compare/v0.2.3...v0.3.0) (2026-11-09)
+
+
+### Features
+
+* **worker:** implement provider-independent coding workers with Gemini and OpenAI support ([7aa4718](https://github.com/marcelodevops/dupond/commit/7aa471897029347873a2fa1db6f495d739396947))
+* **worker:** implement provider-independent coding workers with Gemini and OpenAI support ([9933f56](https://github.com/marcelodevops/dupond/commit/9933f56ddea0fed3b072e78682ed609331a6b1f9))
+
 ## [0.2.3](https://github.com/marcelodevops/dupond/compare/v0.2.2...v0.2.3) (2026-11-09)
 
 
