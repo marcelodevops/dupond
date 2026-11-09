@@ -7,6 +7,7 @@ import { WorkspaceManager, defaultWorkspaceManager } from '../workspace/workspac
 import { resolveTargetRepository, isOrchestratorSelfTarget } from '../workspace/targetRepositoryResolver.js';
 import { CodingWorkerAdapter, WorkerExecutionContext } from '../worker/types.js';
 import { defaultCodingWorker } from '../worker/geminiWorkerAdapter.js';
+import { resolveCodingWorker } from '../worker/workerRegistry.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
 import { defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
 
@@ -57,13 +58,51 @@ export class RepairCoordinator {
    */
   public async executeTaskRun(options: ExecutionLoopOptions): Promise<TaskRunRecord> {
     const { task } = options;
-    const worker = options.worker || defaultCodingWorker;
     const startTime = Date.now();
 
     const runId = options.runId || `run-${task.key.toLowerCase()}-${Date.now()}`;
     const branchName = `dupond/${task.key}-feat-${Date.now()}`;
     const abortController = new AbortController();
     this.activeAbortControllers.set(runId, abortController);
+
+    // 0. Resolve coding worker fail-closed
+    let worker: CodingWorkerAdapter;
+    try {
+      worker = options.worker || resolveCodingWorker(task.workerConfig, this.verifier.getSandbox());
+    } catch (err: any) {
+      this.store.unclaimTask(task.id, 'blocked', err.message);
+      const failedRun = this.store.createRun({
+        id: runId,
+        taskId: task.id,
+        status: 'failed',
+        targetRepo: task.targetRepo,
+        baseCommit: task.baseCommit,
+        targetBranch: branchName,
+        currentAttempt: 0,
+        durationMs: Date.now() - startTime,
+        failureType: 'implementation',
+        failureReason: `Worker configuration invalid: ${err.message}`,
+      });
+      return failedRun;
+    }
+
+    const workerAvail = await worker.isAvailable();
+    if (!workerAvail.available) {
+      this.store.unclaimTask(task.id, 'blocked', workerAvail.error || 'Worker unavailable');
+      const failedRun = this.store.createRun({
+        id: runId,
+        taskId: task.id,
+        status: 'failed',
+        targetRepo: task.targetRepo,
+        baseCommit: task.baseCommit,
+        targetBranch: branchName,
+        currentAttempt: 0,
+        durationMs: Date.now() - startTime,
+        failureType: 'implementation',
+        failureReason: `Worker prerequisite unavailable: ${workerAvail.error}`,
+      });
+      return failedRun;
+    }
 
     // 1. Resolve target workspace fail-closed
     let wsManager = options.workspaceManager;
@@ -146,11 +185,12 @@ export class RepairCoordinator {
         }
 
         const attemptStartTime = Date.now();
+        const workerIdentifier = worker.provider && worker.model ? `${worker.provider}:${worker.model}` : worker.name;
         const attempt = this.store.createAttempt({
           runId: run.id,
           attemptNumber: attemptNum,
           status: 'running',
-          workerType: worker.name,
+          workerType: workerIdentifier,
           filesModified: [],
           durationMs: 0,
           startedAt: new Date().toISOString(),
@@ -173,6 +213,7 @@ export class RepairCoordinator {
           timeoutMs: (task.timeoutSeconds || 300) * 1000,
           runId,
           abortSignal: abortController.signal,
+          workerConfig: task.workerConfig,
         };
 
         let workerResult;

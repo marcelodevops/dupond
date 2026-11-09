@@ -9,10 +9,10 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js: 22+](https://img.shields.io/badge/Node.js-22.5%2B-green.svg)](https://nodejs.org/)
 [![TypeScript: 5+](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
-[![Google GenAI: Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%203.5%20%2F%203.8%20Flash-4285F4.svg)](https://ai.google.dev/)
+[![Coding Workers: Gemini & OpenAI](https://img.shields.io/badge/Workers-Gemini%20%7C%20OpenAI-4285F4.svg)](docs/providers.md)
 [![Version: 0.1.0-experimental](https://img.shields.io/badge/version-0.1.0--experimental-orange.svg)](CHANGELOG.md)
 
-Dupond (also referred to as **Dupond Orchestrator**) is an autonomous, server-authoritative **task-to-Pull-Request system**. It takes structured task specifications with explicit acceptance criteria, prepares isolated Git worktrees, dispatches real coding workers powered by Google Gemini, authoritatively executes test checks inside an OS sandbox, and delivers verified changes as reviewable GitHub Pull Requests under human operator approval.
+Dupond (also referred to as **Dupond Orchestrator**) is an autonomous, server-authoritative **task-to-Pull-Request system**. It takes structured task specifications with explicit acceptance criteria, prepares isolated Git worktrees, dispatches provider-independent coding workers (supporting Google Gemini and OpenAI), authoritatively executes test checks inside an OS sandbox, and delivers verified changes as reviewable GitHub Pull Requests under human operator approval.
 
 > **Experimental Release Notice (v0.1.0)**: Dupond v0.1.0 is an experimental release designed for supervised execution on disposable or dedicated development repositories. It does not provide microVM hardware virtualization, multi-tenant RBAC, or unmonitored production automation. All delivered Pull Requests require human review before merging.
 
@@ -27,7 +27,7 @@ Task Spec & Criteria
 Isolated Git Worktree (pinned to baseCommit)
        │
        ▼
-Gemini Coding Worker (inspects repo, edits code, runs permitted commands)
+Coding Worker (Gemini or OpenAI: inspects repo, edits code, runs permitted commands)
        │
        ▼
 Authoritative Verifier (OS sandbox, checks test pass & protected path integrity)
@@ -61,10 +61,11 @@ GitHub PR Delivery (pushes branch, opens PR via gh CLI, idempotent)
 
 An end-to-end demonstration of Dupond v0.1.0 was executed against a disposable public GitHub repository:
 
-- **Delivered Pull Request**: [https://github.com/marcelodevops/dupond-live-demo/pull/1](https://github.com/marcelodevops/dupond-live-demo/pull/1)
-- **Delivered Commit SHA**: `e62c2e9ed11d1349efacb2344e08d2a8a9edeafb`
-- **Base Commit SHA**: `2b85fad2dc5bd849b1b05898db78dfc876761b0e` (`main`)
-- **Remote CI Run**: [https://github.com/marcelodevops/dupond-live-demo/actions/runs/42520092355](https://github.com/marcelodevops/dupond-live-demo/actions/runs/42520092355) (`SUCCESS`)
+- **Delivered Pull Request (PR #1)**: [https://github.com/marcelodevops/dupond-live-demo/pull/1](https://github.com/marcelodevops/dupond-live-demo/pull/1)
+- **Delivered Pull Request (PR #2)**: [https://github.com/marcelodevops/dupond-live-demo/pull/2](https://github.com/marcelodevops/dupond-live-demo/pull/2)
+- **Delivered Commit SHA**: `e073ee81300a37f7ddf87a15e1f516cdd5d7439f` (PR #2)
+- **Base Commit SHA**: `85efa5e17524f2e5326d307091bfb8287785dc54` (`main`)
+- **Remote CI Run**: [https://github.com/marcelodevops/dupond-live-demo/actions](https://github.com/marcelodevops/dupond-live-demo/actions) (`SUCCESS`)
 - **Current Status**: **OPEN** (intentionally unmerged for inspection)
 
 ### What the Artifact Proves:
@@ -105,8 +106,10 @@ cp .env.example .env
 | Variable | Required | Default | Description |
 | :--- | :---: | :--- | :--- |
 | `DUPOND_AUTH_TOKEN` | Yes* | *(ephemeral random)* | Bearer token required for API access. If omitted in dev, a random token is generated and logged at startup. |
-| `GEMINI_API_KEY` | Yes | *(none)* | Google GenAI API key for the coding worker. |
-| `GEMINI_MODEL` | No | `gemini-3.5-flash` | Model identifier (`gemini-3.5-flash` or `gemini-3.8-flash`). Note: `gemini-2.5-flash` is deprecated. |
+| `GEMINI_API_KEY` | Optional* | *(none)* | Google GenAI API key for Gemini coding workers. Required if using Gemini. |
+| `GEMINI_MODEL` | No | `gemini-3.5-flash` | Default Gemini model identifier (`gemini-3.5-flash` or `gemini-3.8-flash`). |
+| `OPENAI_API_KEY` | Optional* | *(none)* | OpenAI API key for OpenAI coding workers. Required if using OpenAI. |
+| `OPENAI_MODEL` | No | `gpt-4o-mini` | Default OpenAI model identifier (`gpt-4o-mini`, `gpt-4o`, `o1`, `o3-mini`, `gpt-4.5-preview`). |
 | `PORT` | No | `3000` | HTTP port for the application server. |
 | `DUPOND_DB_PATH` | No | `./data/dupond.db` | File path for SQLite task and execution history database. |
 | `DUPOND_STATE_FILE` | No | `./data/dupond_state.json` | File path for JSON sprint and UI telemetry state. |
@@ -185,10 +188,11 @@ npm run prepare:sandbox
 
 ## 📚 Documentation Index
 
+- [Provider-Independent Coding Workers](docs/providers.md): Architecture, Gemini/OpenAI configuration, platform billing prerequisites, and live parity audit.
 - [Practical API Walkthrough](docs/walkthrough.md): Step-by-step API guide with concrete `curl` requests.
 - [Architecture & Sandbox Guide](docs/architecture-and-sandbox.md): Deep-dive into worktree management, Seatbelt profiles, Linux containers, and persistence schemas.
-- [Troubleshooting Guide](docs/troubleshooting.md): Solutions for missing credentials, Gemini 429 rate limits, Linux Podman timeouts, and base drift conflicts.
-- [Live Demonstration Audit](docs/live-demonstration.md): Full analysis of PR #1 in `marcelodevops/dupond-live-demo`.
+- [Troubleshooting Guide](docs/troubleshooting.md): Solutions for missing credentials, rate limits, Linux Podman timeouts, and base drift conflicts.
+- [Live Demonstration Audit](docs/live-demonstration.md): Full analysis of live demonstrations in `marcelodevops/dupond-live-demo`.
 - [Release Changelog](CHANGELOG.md): Notes for the experimental v0.1.0 release.
 
 ---
