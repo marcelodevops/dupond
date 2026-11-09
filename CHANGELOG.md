@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/marcelodevops/dupond-project-leader/compare/v0.2.1...v0.2.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* **release:** treat release-metadata refusals as skips instead of cra… ([8b19cc3](https://github.com/marcelodevops/dupond-project-leader/commit/8b19cc3a0187927f89fd2261c3ee40769110d91a))
+* **release:** treat release-metadata refusals as skips instead of crashes ([efc6223](https://github.com/marcelodevops/dupond-project-leader/commit/efc622349e7bf2eed0e3bf316bfc87ddf83274cd))
+
 ## [0.2.1](https://github.com/marcelodevops/dupond-project-leader/compare/v0.2.0...v0.2.1) (2026-11-09)
 
 
