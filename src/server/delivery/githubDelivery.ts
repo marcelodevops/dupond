@@ -4,7 +4,7 @@ import path from 'path';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
 import { DeliveryRecord } from '../db/schema.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
-import { normalizeRepoSlug, isLocalRemoteOrigin } from '../workspace/targetRepositoryResolver.js';
+import { normalizeRepoSlug, isLocalRemoteOrigin, areRepoSlugsCompatible } from '../workspace/targetRepositoryResolver.js';
 
 export interface DispatchDeliveryOptions {
   runId: string;
@@ -62,7 +62,7 @@ export class GitHubDeliveryService {
         error: `Delivery blocked: Run ${run.id} has no persisted target repository. Refusing to deliver against an unrecorded identity.`,
       };
     }
-    if (options.repoUrl && normalizeRepoSlug(options.repoUrl) !== normalizeRepoSlug(persistedTargetRepo)) {
+    if (options.repoUrl && !areRepoSlugsCompatible(options.repoUrl, persistedTargetRepo)) {
       return {
         success: false,
         status: 400,
@@ -164,7 +164,7 @@ export class GitHubDeliveryService {
     if (expectedRepo && originUrl) {
       const expectedSlug = normalizeRepoSlug(expectedRepo);
       const originSlug = normalizeRepoSlug(originUrl);
-      if (!isLocalRemoteOrigin(originUrl) && expectedSlug && originSlug && expectedSlug !== originSlug) {
+      if (!isLocalRemoteOrigin(originUrl) && expectedSlug && originSlug && !areRepoSlugsCompatible(expectedSlug, originSlug)) {
         return {
           success: false,
           status: 400,

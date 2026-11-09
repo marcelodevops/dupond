@@ -94,14 +94,41 @@ export function orchestratorRepoSlug(): string {
 }
 
 /**
+ * Canonicalizes repository slugs to recognize renamed repositories and preserve
+ * compatibility with legacy slugs and GitHub redirects:
+ * e.g. "marcelodevops/dupond-project-leader" -> "marcelodevops/dupond"
+ */
+export function canonicalizeRepoSlug(urlOrSlug?: string): string {
+  if (!urlOrSlug) return '';
+  const norm = normalizeRepoSlug(urlOrSlug);
+  if (norm === 'marcelodevops/dupond-project-leader') {
+    return 'marcelodevops/dupond';
+  }
+  return norm;
+}
+
+/**
+ * Checks whether two repository slugs/URLs are equivalent, accounting for
+ * normalization and historical repository renames.
+ */
+export function areRepoSlugsCompatible(slugA?: string, slugB?: string): boolean {
+  if (!slugA || !slugB) return false;
+  const normA = normalizeRepoSlug(slugA);
+  const normB = normalizeRepoSlug(slugB);
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+  return canonicalizeRepoSlug(normA) === canonicalizeRepoSlug(normB);
+}
+
+/**
  * Whether a target names the orchestrator's own repository, judged against the
  * real origin of this checkout instead of a hardcoded literal, so a task cannot
- * claim the exemption by naming an alias.
+ * claim the exemption by naming an alias. Recognizes both current and legacy slugs.
  */
 export function isOrchestratorSelfTarget(nameOrUrl?: string): boolean {
   if (!nameOrUrl) return false;
   const own = orchestratorRepoSlug();
-  return !!own && normalizeRepoSlug(nameOrUrl) === own;
+  return !!own && areRepoSlugsCompatible(nameOrUrl, own);
 }
 
 /**
@@ -192,7 +219,7 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
   // 4. Strict check: Never silently select orchestrator repository
   if (isOrchestratorRepo) {
     // Only allow if targetRepo explicitly names this repository and caller explicitly permits it
-    const explicitlyTargetsOrchestrator = expectedSlug && orchestratorSlug && expectedSlug === orchestratorSlug;
+    const explicitlyTargetsOrchestrator = expectedSlug && orchestratorSlug && areRepoSlugsCompatible(expectedSlug, orchestratorSlug);
     if (!explicitlyTargetsOrchestrator && !options.allowOrchestratorRepo) {
       throw new Error(
         `Target repository mismatch: Configured target repository "${configuredTargetRepo || 'unspecified'}" resolved to the orchestrator workspace at "${orchestratorPath}". Never silently select the orchestrator repository.`
@@ -204,7 +231,7 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
   // repo. A local filesystem remote stands in for a real origin in tests and has
   // no network identity to compare, so it is exempted by transport.
   if (expectedSlug && targetOriginSlug && !isLocalRemoteOrigin(targetOrigin)) {
-    if (targetOriginSlug !== expectedSlug) {
+    if (!areRepoSlugsCompatible(targetOriginSlug, expectedSlug)) {
       throw new Error(
         `Target repository mismatch: Workspace repository origin "${targetOriginSlug}" does not match configured target "${expectedSlug}". Refusing to execute on mismatched repository.`
       );
