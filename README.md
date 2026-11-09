@@ -2,7 +2,9 @@
   <img src="resources/dupond-banner.png" alt="Dupond — detective with a bowler hat and moustache" width="900">
 </p>
 
-# Dupond Orchestrator
+# Dupond
+
+### Autonomous project orchestration, verified delivery.
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js: 22+](https://img.shields.io/badge/Node.js-22.5%2B-green.svg)](https://nodejs.org/)
@@ -10,7 +12,7 @@
 [![Google GenAI: Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%203.5%20%2F%203.8%20Flash-4285F4.svg)](https://ai.google.dev/)
 [![Version: 0.1.0-experimental](https://img.shields.io/badge/version-0.1.0--experimental-orange.svg)](CHANGELOG.md)
 
-Dupond is an autonomous, server-authoritative **task-to-Pull-Request system**. It takes structured task specifications with explicit acceptance criteria, prepares isolated Git worktrees, dispatches real coding workers powered by Google Gemini, authoritatively executes test checks inside an OS sandbox, and delivers verified changes as reviewable GitHub Pull Requests under human operator approval.
+Dupond (also referred to as **Dupond Orchestrator**) is an autonomous, server-authoritative **task-to-Pull-Request system**. It takes structured task specifications with explicit acceptance criteria, prepares isolated Git worktrees, dispatches real coding workers powered by Google Gemini, authoritatively executes test checks inside an OS sandbox, and delivers verified changes as reviewable GitHub Pull Requests under human operator approval.
 
 > **Experimental Release Notice (v0.1.0)**: Dupond v0.1.0 is an experimental release designed for supervised execution on disposable or dedicated development repositories. It does not provide microVM hardware virtualization, multi-tenant RBAC, or unmonitored production automation. All delivered Pull Requests require human review before merging.
 
@@ -115,8 +117,10 @@ cp .env.example .env
 
 ## 🏃 Quickstart & Walkthrough
 
-### 1. Install Dependencies
+### 1. Clone & Install Dependencies
 ```bash
+git clone git@github.com:marcelodevops/dupond.git
+cd dupond
 npm install
 ```
 

@@ -13,7 +13,7 @@ async function main() {
     description: 'Ensure isolated workspace and verification',
     status: 'todo',
     priority: 'high',
-    targetRepo: 'marcelodevops/dupond-project-leader',
+    targetRepo: 'marcelodevops/dupond',
     baseCommit: 'c0d1c2588d352c58a6b2bc3ea26b7f7f3e072d76',
     allowedPaths: ['src/**'],
     protectedPaths: ['tests/acceptance/**'],
@@ -113,12 +113,12 @@ async function main() {
   const delivery = store.recordDelivery({
     runId: run.id,
     provider: 'github',
-    repoUrl: 'https://github.com/marcelodevops/dupond-project-leader',
+    repoUrl: 'https://github.com/marcelodevops/dupond',
     baseCommit: task.baseCommit,
     deliveredCommit: 'abc123commitsha',
     branch: 'dupond/AEG-501-feature',
     prNumber: 42,
-    prUrl: 'https://github.com/marcelodevops/dupond-project-leader/pull/42',
+    prUrl: 'https://github.com/marcelodevops/dupond/pull/42',
     ciStatus: 'pending',
     approvalStatus: 'approved',
     approvedBy: 'operator-1',
@@ -126,7 +126,7 @@ async function main() {
 
   assert.strictEqual(delivery.prNumber, 42);
   const existingDelivery = store.getDeliveryByBranch('dupond/AEG-501-feature');
-  assert.strictEqual(existingDelivery?.prUrl, 'https://github.com/marcelodevops/dupond-project-leader/pull/42');
+  assert.strictEqual(existingDelivery?.prUrl, 'https://github.com/marcelodevops/dupond/pull/42');
   console.log('✔ [PASS] Delivery record stores PR URL, CI status and facilitates branch reconciliation');
 
   // Test 6: Restart reconciliation
