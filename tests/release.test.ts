@@ -10,6 +10,7 @@ import {
   findVersionMismatches,
   findManifestProblems,
   findWorkflowPermissionProblems,
+  isAuthorizationRefusal,
   isConventionalPrTitle,
   parseConventionalTitle,
   planReleaseMetadata,
@@ -18,10 +19,11 @@ import {
   readVersionSources,
   readWorkflowPermissionProblems,
   REQUIRED_WORKFLOWS,
+  summarizeHygieneAttempts,
   suggestConventionalTitle,
   WORKFLOW_PERMISSION_SCOPES,
 } from '../scripts/release.ts';
-import type { WorkflowRun } from '../scripts/release.ts';
+import type { HygieneAttempt, WorkflowRun } from '../scripts/release.ts';
 
 // Synthetic fixtures, not real commits: the gate must separate two distinct SHAs and
 // no test in this file reaches the GitHub API.
@@ -351,6 +353,30 @@ async function main() {
     'tags outside vX.Y.Z are out of scope',
   );
   console.log('✔ [PASS] Release metadata is normalized idempotently without inventing commits');
+
+  // The exact failure GitHub returned for the v0.2.0 repair in run 42553362672.
+  const refusal = Object.assign(new Error('Command failed: gh api -X PATCH ...'), {
+    status: 1,
+    stdout: '{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/releases/releases#update-a-release","status":"403"}',
+    stderr: 'gh: Resource not accessible by integration (HTTP 403)\n',
+  });
+  assert.ok(isAuthorizationRefusal(refusal), 'the observed release-edit refusal must be recognized, not crash the pipeline');
+  assert.ok(isAuthorizationRefusal(Object.assign(new Error('x'), { stderr: 'gh: Resource not accessible by personal access token (HTTP 403)\n' })));
+  assert.ok(!isAuthorizationRefusal(Object.assign(new Error('connect ETIMEDOUT'), { stderr: 'gh: something else\n' })), 'a transport error is not an authorization refusal');
+
+  const attempts: HygieneAttempt[] = [
+    { tag: 'v0.2.1', field: 'name', status: 'applied', detail: '' },
+    { tag: 'v0.2.0', field: 'name', status: 'refused', detail: 'gh: HTTP 403' },
+    { tag: 'v0.2.0', field: 'target_commitish', status: 'refused', detail: 'gh: HTTP 403' },
+    { tag: 'v0.1.0', field: 'target_commitish', status: 'failed', detail: 'connect ECONNRESET' },
+  ];
+  assert.deepStrictEqual(summarizeHygieneAttempts(attempts), { applied: 1, refused: 2, failed: 1 });
+  assert.deepStrictEqual(
+    summarizeHygieneAttempts([{ tag: 'v0.2.0', field: 'name', status: 'refused', detail: 'gh: HTTP 403' }]),
+    { applied: 0, refused: 1, failed: 0 },
+    'a run that only hit refusals stays free of failures, so the release is not marked red',
+  );
+  console.log('✔ [PASS] Authorization refusals are counted separately from real failures');
 
   // --------------------------------------------------------------------------
   // Part 7: a workflow Actions cannot parse would take the release pipeline down

@@ -85,8 +85,9 @@ jobs:
           skip-labeling: true
 
   # Release Please titles a release with the bare tag, and a release created in the
-  # web UI can record no commit at all. This repairs both, and only both: notes,
-  # prerelease state, and any title a maintainer wrote by hand are left untouched.
+  # web UI can record no commit at all. This repairs both where GitHub permits it:
+  # notes, prerelease state, and any title a maintainer wrote by hand are left
+  # untouched, and an authorization refusal is reported without failing the release.
   tidy:
     name: Normalize release metadata
     needs: [publish]
