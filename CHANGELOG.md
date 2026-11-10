@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/marcelodevops/dupond/compare/v0.4.0...v0.4.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* remove checkbox-based acceptance grants from the JSON quality path ([d91f261](https://github.com/marcelodevops/dupond/commit/d91f261b4e5cd5abff3f6a44c8933e971c60da65))
+
 ## [0.4.0](https://github.com/marcelodevops/dupond/compare/v0.3.0...v0.4.0) (2026-11-10)
 
 
