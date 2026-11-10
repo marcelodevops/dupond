@@ -5,8 +5,14 @@ import { TaskRecord, VerificationRecord } from '../db/schema.js';
  * Bump when the meaning of a stored verification record changes.
  * Records written under an older version no longer satisfy the gate and
  * force fresh verification, the same as a legacy unbound record.
+ *
+ * v2 folds the task description (the specification) into the requirements
+ * fingerprint, which v1 omitted. Migration behavior: v1-bound evidence cannot
+ * prove the v2 contract, so it is rejected as `verifier-upgraded` and fresh
+ * verification is required. No rows are rewritten; fingerprints are only ever
+ * produced by the verification pipeline at record time.
  */
-export const EVIDENCE_BINDING_VERSION = 'dupond-evidence-v1';
+export const EVIDENCE_BINDING_VERSION = 'dupond-evidence-v2';
 
 export interface EvidenceBinding {
   requirementsFingerprint: string;
@@ -15,6 +21,7 @@ export interface EvidenceBinding {
 }
 
 export interface EvidenceBindingParams {
+  description?: string;
   acceptanceCriteria?: Array<{ id: string; title: string; checkCommand?: string }>;
   verificationCommands?: Array<string | { command: string; criteriaIds?: string[] }>;
   protectedPaths?: string[];
@@ -53,7 +60,11 @@ export function computeEvidenceBinding(params: EvidenceBindingParams): EvidenceB
     checkCommand: c.checkCommand || null,
   }));
   const commands = (params.verificationCommands || []).map(normalizeCommand);
-  const requirementsFingerprint = sha256(canonicalJson(criteria));
+  // The description is the specification the criteria are written against. An
+  // edit that rewords what is being accepted must invalidate evidence, so it
+  // belongs in the requirements fingerprint alongside the criteria themselves.
+  const specification = params.description ?? '';
+  const requirementsFingerprint = sha256(canonicalJson({ specification, criteria }));
   const verificationConfigFingerprint = sha256(
     canonicalJson({ commands, protectedPaths: params.protectedPaths || [] }),
   );
@@ -83,7 +94,7 @@ export type EvidenceValidity =
  * present spec is rejected: fail-closed, requiring fresh verification.
  */
 export function assessEvidenceValidity(
-  task: Pick<TaskRecord, 'acceptanceCriteria' | 'verificationCommands' | 'protectedPaths'>,
+  task: Pick<TaskRecord, 'acceptanceCriteria' | 'verificationCommands' | 'protectedPaths' | 'description'>,
   verification: VerificationRecord | null,
 ): EvidenceValidity {
   const binding = computeEvidenceBinding(task);
@@ -120,7 +131,7 @@ export function assessEvidenceValidity(
     return {
       valid: false,
       reason: 'stale-requirements',
-      detail: 'Acceptance criteria changed after this evidence was recorded. The prior verification does not apply to the current requirements.',
+      detail: 'The specification or acceptance criteria changed after this evidence was recorded. The prior verification does not apply to the current requirements.',
     };
   }
   if (verification.verificationConfigFingerprint !== binding.verificationConfigFingerprint) {
