@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { TaskRecord, VerificationRecord } from '../db/schema.js';
+import { DeliveryRecord, TaskRecord, VerificationRecord } from '../db/schema.js';
 
 /**
  * Bump when the meaning of a stored verification record changes.
@@ -163,4 +163,135 @@ export function assessEvidenceValidity(
  */
 export function verifiedRefForRun(runId: string): string {
   return `refs/dupond/verified/${runId}`;
+}
+
+/**
+ * What an operator's approval certifies: the candidate revision, the contract
+ * (specification + criteria and verification configuration) that was current
+ * when it was given, and the evidence record it rested on. Approval is only
+ * ever persisted with this identity attached, so a later decision can tell
+ * whether the approval still applies to what would be accepted.
+ */
+export interface ApprovalExpectation {
+  revisionSha: string;
+  requirementsFingerprint: string;
+  verificationConfigFingerprint: string;
+  verificationId: string;
+  evidenceBindingVersion: string;
+}
+
+export type ApprovalAssessment =
+  | { accepted: true }
+  | { accepted: false; reason: string; detail: string };
+
+type SpecSource = Pick<TaskRecord, 'acceptanceCriteria' | 'verificationCommands' | 'protectedPaths' | 'description'>;
+
+/**
+ * Validate the identity an approval claims *before* it is written, against
+ * freshly read state. Callers cannot substitute their own earlier checks for
+ * this one: a requirements edit, a new verification record, or a newer
+ * candidate that lands between the caller's validation and the approval write
+ * makes this refuse, so no approval is ever recorded against a contract the
+ * operator did not review.
+ */
+export function validateApprovalExpectation(params: {
+  task: SpecSource;
+  verification: VerificationRecord | null;
+  deliveredCommit: string;
+  expectation: ApprovalExpectation;
+}): ApprovalAssessment {
+  const { task, verification, deliveredCommit, expectation } = params;
+  const binding = computeEvidenceBinding(task);
+
+  if (expectation.evidenceBindingVersion !== binding.evidenceBindingVersion) {
+    return {
+      accepted: false,
+      reason: 'verifier-upgraded',
+      detail: `The approval was prepared under verification protocol ${expectation.evidenceBindingVersion}; the current protocol is ${binding.evidenceBindingVersion}. Fresh approval required.`,
+    };
+  }
+  if (
+    expectation.requirementsFingerprint !== binding.requirementsFingerprint ||
+    expectation.verificationConfigFingerprint !== binding.verificationConfigFingerprint
+  ) {
+    return {
+      accepted: false,
+      reason: 'stale-requirements',
+      detail: 'The specification, acceptance criteria, or verification configuration changed after this approval was prepared. The approval certifies a contract the task no longer has.',
+    };
+  }
+  if (expectation.revisionSha !== deliveredCommit) {
+    return {
+      accepted: false,
+      reason: 'approval-revision-mismatch',
+      detail: `The approval was prepared for revision ${expectation.revisionSha}, but this delivery carries ${deliveredCommit}.`,
+    };
+  }
+  if (!verification || verification.id !== expectation.verificationId) {
+    return {
+      accepted: false,
+      reason: 'no-evidence',
+      detail: `The evidence this approval rested on (${expectation.verificationId}) is no longer the latest verification for this run.`,
+    };
+  }
+  const validity = assessEvidenceValidity(task, verification);
+  if (!validity.valid) {
+    return { accepted: false, reason: validity.reason, detail: validity.detail };
+  }
+  return { accepted: true };
+}
+
+/**
+ * Whether the approval already recorded on a delivery still certifies what is
+ * about to be accepted: the same contract, the same evidence, the same
+ * revision. Rows approved before approval binding existed carry no identity and
+ * are refused, the same way legacy evidence is refused.
+ */
+export function assessApprovalCurrency(params: {
+  task: SpecSource;
+  delivery: DeliveryRecord;
+  verification: VerificationRecord | null;
+}): ApprovalAssessment {
+  const { task, delivery, verification } = params;
+  const binding = computeEvidenceBinding(task);
+
+  if (
+    !delivery.approvalRequirementsFingerprint ||
+    !delivery.approvalVerificationConfigFingerprint ||
+    !delivery.approvalRevisionSha ||
+    !delivery.approvalVerificationId ||
+    !delivery.approvalBindingVersion
+  ) {
+    return {
+      accepted: false,
+      reason: 'legacy-approval',
+      detail: `Approval by ${delivery.approvedBy || 'unknown'} predates approval binding and cannot certify the current contract. Explicit operator re-approval is required.`,
+    };
+  }
+  if (
+    delivery.approvalRequirementsFingerprint !== binding.requirementsFingerprint ||
+    delivery.approvalVerificationConfigFingerprint !== binding.verificationConfigFingerprint ||
+    delivery.approvalBindingVersion !== binding.evidenceBindingVersion
+  ) {
+    return {
+      accepted: false,
+      reason: 'stale-approval',
+      detail: 'The approval was granted against a different specification or verification configuration than the task has now. Explicit operator re-approval is required.',
+    };
+  }
+  if (delivery.approvalRevisionSha !== delivery.deliveredCommit) {
+    return {
+      accepted: false,
+      reason: 'approval-revision-mismatch',
+      detail: `The approval certifies revision ${delivery.approvalRevisionSha}, but this delivery carries ${delivery.deliveredCommit}.`,
+    };
+  }
+  if (!verification || delivery.approvalVerificationId !== verification.id) {
+    return {
+      accepted: false,
+      reason: 'stale-approval',
+      detail: `The approval rested on verification ${delivery.approvalVerificationId}, which is no longer the latest evidence for this run.`,
+    };
+  }
+  return { accepted: true };
 }

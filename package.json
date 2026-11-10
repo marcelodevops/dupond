@@ -11,7 +11,7 @@
     "clean": "rm -rf dist server.js",
     "prepare:sandbox": "tsx scripts/prepareSandbox.ts",
     "release:check": "tsx scripts/release.ts consistency",
-    "test": "tsx tests/guardrails.test.ts && tsx tests/trackA.test.ts && tsx tests/securityFixes.test.ts && tsx tests/db.test.ts && tsx tests/sandbox.test.ts && tsx tests/workerAdapter.test.ts && tsx tests/repairLoop.test.ts && tsx tests/delivery.test.ts && tsx tests/disposableRepo.test.ts && tsx tests/remoteBaseDriftAndTargetRepo.test.ts && tsx tests/acceptanceEvidenceLifecycle.test.ts && tsx tests/e2ePipeline.test.ts && tsx tests/uiAuthClient.test.ts && tsx tests/uiAuthGate.test.ts && tsx tests/providerWorkers.test.ts && tsx workspace/AEG-104/workloadBalancer.test.ts && tsx tests/release.test.ts",
+    "test": "tsx tests/guardrails.test.ts && tsx tests/trackA.test.ts && tsx tests/securityFixes.test.ts && tsx tests/db.test.ts && tsx tests/sandbox.test.ts && tsx tests/workerAdapter.test.ts && tsx tests/repairLoop.test.ts && tsx tests/delivery.test.ts && tsx tests/disposableRepo.test.ts && tsx tests/remoteBaseDriftAndTargetRepo.test.ts && tsx tests/acceptanceEvidenceLifecycle.test.ts && tsx tests/acceptanceMapping.test.ts && tsx tests/e2ePipeline.test.ts && tsx tests/uiAuthClient.test.ts && tsx tests/uiAuthGate.test.ts && tsx tests/providerWorkers.test.ts && tsx workspace/AEG-104/workloadBalancer.test.ts && tsx tests/release.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
