@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.4](https://github.com/marcelodevops/dupond/compare/v0.4.3...v0.4.4) (2026-11-10)
+
+
+### Bug Fixes
+
+* **acceptance:** route requirement edits to the contract and bind approvals to it ([6b3cde5](https://github.com/marcelodevops/dupond/commit/6b3cde50c7f1bbc6c6ca53e08438e32082e476e9))
+* **acceptance:** route requirement edits to the contract and bind approvals to it ([c0d785c](https://github.com/marcelodevops/dupond/commit/c0d785cd4d88d0fb22e80ccc4bd2af5e7659f9fc))
+
 ## [0.4.3](https://github.com/marcelodevops/dupond/compare/v0.4.2...v0.4.3) (2026-11-10)
 
 
