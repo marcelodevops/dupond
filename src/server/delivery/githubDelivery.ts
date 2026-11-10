@@ -269,6 +269,7 @@ export class GitHubDeliveryService {
         verificationCommands: task.verificationCommands,
         protectedPaths: task.protectedPaths,
         acceptanceCriteria: task.acceptanceCriteria,
+        description: task.description,
       });
 
       if (!recheck.passed) {
@@ -341,16 +342,64 @@ export class GitHubDeliveryService {
     if (existingDelivery && existingDelivery.prUrl) {
       if (existingDelivery.deliveredCommit === deliveredCommit) {
         console.log(`[Delivery] Existing PR found for branch ${run.targetBranch}: ${existingDelivery.prUrl} matching delivered commit ${deliveredCommit}. Reconciling...`);
+
+        // Re-approval: the PR and delivered commit are reused, but the early
+        // return must not skip the approval that this call explicitly carries.
+        // After a requirements change the delivery sits at pending_approval;
+        // reaching here already passed the approval gate, so record the fresh
+        // operator approval against the existing delivery — never restoring it
+        // silently — and apply the lifecycle transition, which re-validates
+        // the current evidence inside its own transaction.
+        let reconciledDelivery = existingDelivery;
+        let reapproved = false;
+        if (task.requireApproval && existingDelivery.approvalStatus !== 'approved') {
+          if (options.isApproved === true && options.approvedBy) {
+            const updated = this.store.markDeliveryApproved(existingDelivery.id, options.approvedBy);
+            if (updated) {
+              reconciledDelivery = updated;
+              reapproved = true;
+            }
+          } else {
+            return {
+              success: false,
+              status: 403,
+              blocked: true,
+              approvalRequired: true,
+              error: `Delivery blocked: Approval for delivered commit ${deliveredCommit} is "${existingDelivery.approvalStatus}" and was not re-granted. Explicit operator approval against the current evidence is required.`,
+            };
+          }
+        }
+
+        const reconcileLifecycle = new LifecycleService(this.store);
+        const reconcileTransition = reconcileLifecycle.transition({
+          taskId: task.id,
+          to: 'done',
+          actor: options.approvedBy || 'delivery-reconcile',
+          viaDelivery: true,
+          reason: existingDelivery.prUrl,
+        });
+        if (!reconcileTransition.ok) {
+          this.store.recordAudit({
+            taskId: task.id,
+            runId: run.id,
+            eventType: 'DELIVERY_STATUS_NOT_APPLIED',
+            actor: 'delivery',
+            details: { reason: reconcileTransition.reason, detail: reconcileTransition.detail },
+          });
+        }
+
         return {
           success: true,
           status: 200,
-          deliveryRecord: existingDelivery,
+          deliveryRecord: reconciledDelivery,
           prUrl: existingDelivery.prUrl,
           branch: existingDelivery.branch,
           deliveredCommit: existingDelivery.deliveredCommit,
           baseCommit: existingDelivery.baseCommit,
           ciStatus: existingDelivery.ciStatus,
-          message: `Idempotent delivery: Existing pull request reconciled at ${existingDelivery.prUrl}`,
+          message: reapproved
+            ? `Idempotent delivery: Existing pull request reconciled at ${existingDelivery.prUrl}; fresh operator approval recorded against commit ${deliveredCommit}`
+            : `Idempotent delivery: Existing pull request reconciled at ${existingDelivery.prUrl}`,
         };
       } else {
         console.log(`[Delivery] Existing PR found at ${existingDelivery.prUrl} for older revision ${existingDelivery.deliveredCommit}. Advancing PR to new verified commit ${deliveredCommit}...`);

@@ -1,5 +1,5 @@
 import { TaskRecord, TaskRunRecord, VerificationRecord, DeliveryRecord } from '../db/schema.js';
-import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
+import { TaskStore, LifecycleSnapshot, taskStore as defaultTaskStore } from '../db/database.js';
 import { assessEvidenceValidity, EvidenceValidity } from '../verification/evidenceBinding.js';
 
 export type LifecycleStatus = TaskRecord['status'];
@@ -30,8 +30,15 @@ const START_ALLOWED_FROM: LifecycleStatus[] = ['todo', 'backlog', 'blocked'];
 /**
  * The single authoritative lifecycle service. Every status change that claims
  * acceptance (Review, Done) is validated here against bound evidence, applied
- * with compare-and-swap, and audited inside the same transaction. UI/JSON state
- * is a projection of these outcomes and cannot grant acceptance on its own.
+ * with compare-and-swap plus audit event in one transaction. UI/JSON state is
+ * a projection of these outcomes and cannot grant acceptance on its own.
+ *
+ * The authoritative decision runs inside the store transaction's write lock
+ * against freshly read rows. Validating evidence before the write is not a
+ * guarantee: another connection can change the requirements, the verification
+ * evidence, or the relevant run in the window between validation and commit,
+ * so the same checks are re-executed transactionally and only that outcome is
+ * applied.
  */
 export class LifecycleService {
   private store: TaskStore;
@@ -47,85 +54,29 @@ export class LifecycleService {
     }
 
     const from = task.status;
+
+    // Fast-path pre-check against the current read so callers get precise,
+    // typed refusals (including the evidence breakdown) without opening a
+    // write transaction for hopeless transitions.
     const run = this.store.getLatestRunForTask(task.id);
     const verification = run ? this.store.getLatestVerification(run.id) : null;
-
-    if (request.to === 'review') {
-      if (!REVIEW_ALLOWED_FROM.includes(from)) {
-        return { ok: false, from, to: request.to, reason: 'transition-not-allowed', detail: `Cannot enter Review from "${from}". Reopen the task first.` };
+    const delivery = run ? this.store.getDeliveryForRun(run.id) : null;
+    const preDecision = this.evaluate(request, { task, run, verification, delivery });
+    if (!preDecision.accept) {
+      const result: TransitionResult = {
+        ok: false,
+        from,
+        to: request.to,
+        reason: preDecision.reason,
+        detail: preDecision.detail,
+      };
+      if (request.to === 'review' || request.to === 'done') {
+        result.evidence = assessEvidenceValidity(task, verification);
       }
-      const validity = assessEvidenceValidity(task, verification);
-      if (!validity.valid) {
-        return {
-          ok: false,
-          from,
-          to: request.to,
-          reason: validity.reason,
-          detail: `Review requires current passing evidence bound to this task's requirements: ${validity.detail}`,
-          evidence: validity,
-        };
-      }
+      return result;
     }
 
-    if (request.to === 'done') {
-      const validity = assessEvidenceValidity(task, verification);
-      if (!validity.valid) {
-        return {
-          ok: false,
-          from,
-          to: request.to,
-          reason: validity.reason,
-          detail: `Done requires current passing evidence bound to this task's requirements: ${validity.detail}`,
-          evidence: validity,
-        };
-      }
-      const delivery = run ? this.store.getDeliveryForRun(run.id) : null;
-      if (!delivery) {
-        return {
-          ok: false,
-          from,
-          to: request.to,
-          reason: 'delivery-pending',
-          detail: `Done requires a recorded delivery for run ${run?.id || '(none)'}. Verified work alone does not complete a task.`,
-        };
-      }
-      if (verification && delivery.deliveredCommit !== verification.revisionSha) {
-        return {
-          ok: false,
-          from,
-          to: request.to,
-          reason: 'delivered-revision-mismatch',
-          detail: `Delivered commit ${delivery.deliveredCommit} is not the verified revision ${verification.revisionSha}. Acceptance must resolve to the exact delivered content.`,
-        };
-      }
-      if (task.requireApproval && delivery.approvalStatus !== 'approved') {
-        return {
-          ok: false,
-          from,
-          to: request.to,
-          reason: 'approval-pending',
-          detail: `Delivery approval is "${delivery.approvalStatus}"; Done requires an approved delivery.`,
-        };
-      }
-      if (!request.viaDelivery && !DONE_ALLOWED_FROM.includes(from)) {
-        return {
-          ok: false,
-          from,
-          to: request.to,
-          reason: 'transition-not-allowed',
-          detail: `Manual Done transition requires status Review (got "${from}").`,
-        };
-      }
-    }
-
-    if (request.to === 'in_progress') {
-      if (!START_ALLOWED_FROM.includes(from)) {
-        return { ok: false, from, to: request.to, reason: 'transition-not-allowed', detail: `Cannot start work from "${from}". Reopen the task first.` };
-      }
-    } else if (!REOPEN_TARGETS.includes(request.to) && request.to !== 'review' && request.to !== 'done') {
-      return { ok: false, from, to: request.to, reason: 'unsupported-transition', detail: `Lifecycle service does not mediate transitions to "${request.to}".` };
-    }
-
+    let rejection: { reason?: string; detail?: string } | null = null;
     const applied = this.store.transitionTaskCas({
       taskId: task.id,
       expectedFrom: [from],
@@ -138,12 +89,30 @@ export class LifecycleService {
         actor: request.actor,
         reason: request.reason,
         viaDelivery: request.viaDelivery === true,
-        runId: run?.id || null,
-        verificationId: verification?.id || null,
+      },
+      guard: (snapshot) => {
+        const decision = this.evaluate(request, snapshot);
+        if (!decision.accept) rejection = { reason: decision.reason, detail: decision.detail };
+        return decision;
       },
     });
 
     if (!applied) {
+      // `rejection` is written from inside the transaction guard; re-widen it
+      // explicitly because control-flow analysis assumes the closure ran.
+      const refusal = rejection as { reason?: string; detail?: string } | null;
+      if (refusal) {
+        return {
+          ok: false,
+          from,
+          to: request.to,
+          reason: refusal.reason,
+          detail: refusal.detail,
+          evidence: request.to === 'review' || request.to === 'done'
+            ? assessEvidenceValidity(task, this.store.getLatestVerification(this.store.getLatestRunForTask(task.id)?.id || '') || null)
+            : undefined,
+        };
+      }
       return {
         ok: false,
         from,
@@ -154,6 +123,92 @@ export class LifecycleService {
     }
 
     return { ok: true, from, to: request.to };
+  }
+
+  /**
+   * All rules that decide whether `request` may be applied, evaluated against
+   * the given (fresh, inside-transaction) snapshot. Pure: reads nothing except
+   * the snapshot.
+   */
+  private evaluate(request: TransitionRequest, snapshot: LifecycleSnapshot): {
+    accept: boolean;
+    reason?: string;
+    detail?: string;
+    run?: TaskRunRecord | null;
+  } {
+    const { task, run, verification, delivery } = snapshot;
+    if (!task) {
+      return { accept: false, reason: 'not-found', detail: `Task ${request.taskId} disappeared before the transition could apply.` };
+    }
+    const status = task.status;
+
+    if (request.to === 'review') {
+      if (!REVIEW_ALLOWED_FROM.includes(status)) {
+        return { accept: false, reason: 'transition-not-allowed', detail: `Cannot enter Review from "${status}". Reopen the task first.` };
+      }
+      const validity = assessEvidenceValidity(task, verification);
+      if (!validity.valid) {
+        return {
+          accept: false,
+          reason: validity.reason,
+          detail: `Review requires current passing evidence bound to this task's requirements: ${validity.detail}`,
+        };
+      }
+      return { accept: true, run };
+    }
+
+    if (request.to === 'done') {
+      const validity = assessEvidenceValidity(task, verification);
+      if (!validity.valid) {
+        return {
+          accept: false,
+          reason: validity.reason,
+          detail: `Done requires current passing evidence bound to this task's requirements: ${validity.detail}`,
+        };
+      }
+      if (!delivery) {
+        return {
+          accept: false,
+          reason: 'delivery-pending',
+          detail: `Done requires a recorded delivery for run ${run?.id || '(none)'}. Verified work alone does not complete a task.`,
+        };
+      }
+      if (verification && delivery.deliveredCommit !== verification.revisionSha) {
+        return {
+          accept: false,
+          reason: 'delivered-revision-mismatch',
+          detail: `Delivered commit ${delivery.deliveredCommit} is not the verified revision ${verification.revisionSha}. Acceptance must resolve to the exact delivered content.`,
+        };
+      }
+      if (task.requireApproval && delivery.approvalStatus !== 'approved') {
+        return {
+          accept: false,
+          reason: 'approval-pending',
+          detail: `Delivery approval is "${delivery.approvalStatus}"; Done requires an approved delivery.`,
+        };
+      }
+      if (!request.viaDelivery && !DONE_ALLOWED_FROM.includes(status)) {
+        return {
+          accept: false,
+          reason: 'transition-not-allowed',
+          detail: `Manual Done transition requires status Review (got "${status}").`,
+        };
+      }
+      return { accept: true, run };
+    }
+
+    if (request.to === 'in_progress') {
+      if (!START_ALLOWED_FROM.includes(status)) {
+        return { accept: false, reason: 'transition-not-allowed', detail: `Cannot start work from "${status}". Reopen the task first.` };
+      }
+      return { accept: true, run };
+    }
+
+    if (REOPEN_TARGETS.includes(request.to)) {
+      return { accept: true, run };
+    }
+
+    return { accept: false, reason: 'unsupported-transition', detail: `Lifecycle service does not mediate transitions to "${request.to}".` };
   }
 
   /**

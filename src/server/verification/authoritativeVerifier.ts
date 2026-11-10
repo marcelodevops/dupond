@@ -38,8 +38,33 @@ export class AuthoritativeVerifier {
   }
 
   /**
+   * Uncommitted worktree content: modified/added/deleted tracked files and
+   * untracked (non-ignored) files. Git ignores build output that .gitignore
+   * excludes, so ordinary test-run side effects that are not part of the
+   * candidate do not register here.
+   */
+  private uncommittedChanges(worktreePath: string): string[] {
+    try {
+      return execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+        cwd: worktreePath,
+        encoding: 'utf-8',
+      }).split('\n').map((l) => l.trim()).filter(Boolean);
+    } catch {
+      // Unreadable status must not certify anything; treat it as dirty.
+      return ['(git status failed)'];
+    }
+  }
+
+  /**
    * Authoritatively verifies changes in a worktree against operator-configured checks.
    * Does NOT rely on worker declarations or passCriterion calls.
+   *
+   * Evidence certifies a commit, so the checks must run against exactly that
+   * commit's content. The worktree is required to be clean before any command
+   * executes and to remain unchanged (same HEAD, still clean) afterwards:
+   * uncommitted content — including content produced by the verification
+   * commands themselves — is a different candidate from the recorded revision
+   * and can never be certified by it.
    */
   public async verify(params: {
     worktreePath: string;
@@ -47,6 +72,7 @@ export class AuthoritativeVerifier {
     verificationCommands: Array<string | { command: string; criteriaIds?: string[] }>;
     protectedPaths?: string[];
     acceptanceCriteria?: Array<{ id: string; title: string; checkCommand?: string }>;
+    description?: string;
     runId?: string;
     abortSignal?: AbortSignal;
   }): Promise<AuthoritativeVerificationResult> {
@@ -82,21 +108,33 @@ export class AuthoritativeVerifier {
     }
 
     const binding = computeEvidenceBinding({
+      description: params.description,
       acceptanceCriteria: params.acceptanceCriteria,
       verificationCommands: params.verificationCommands,
       protectedPaths: params.protectedPaths,
     });
 
-    // 2. Integrity Check: verify no protected files were modified
+    // 1. Integrity Check: verify no protected files were modified
     const protectedPaths = params.protectedPaths || [];
     if (protectedPaths.length > 0) {
       try {
-        const modifiedFiles = execFileSync('git', ['diff', '--name-only', params.baseCommit, 'HEAD'], {
+        // Committed *and* working-tree changes count against protected paths.
+        // Diffing the index against the base revision catches a worker that
+        // modified package.json and never committed it, which a baseCommit..HEAD
+        // diff alone would certify as clean.
+        const modifiedFiles = execFileSync(
+          'git',
+          ['diff', '--name-only', params.baseCommit, '--', '.'],
+          { cwd: realWorktree, encoding: 'utf-8' },
+        ).trim().split('\n').filter(Boolean);
+
+        const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
           cwd: realWorktree,
           encoding: 'utf-8',
         }).trim().split('\n').filter(Boolean);
 
-        for (const file of modifiedFiles) {
+        const touched = Array.from(new Set([...modifiedFiles, ...untracked]));
+        for (const file of touched) {
           const isProtected = protectedPaths.some((p) => {
             const clean = p.replace(/\*\*?$/, '');
             return file.startsWith(clean) || file === clean;
@@ -105,6 +143,8 @@ export class AuthoritativeVerifier {
             return {
               passed: false,
               revisionSha,
+              treeSha,
+              binding,
               checks: [],
               criteriaVerified: [],
               failureReason: `Integrity check failed: Worker modified protected file "${file}". Modifying protected acceptance checks or build manifests is forbidden.`,
@@ -116,12 +156,35 @@ export class AuthoritativeVerifier {
         return {
           passed: false,
           revisionSha,
+          treeSha,
+          binding,
           checks: [],
           criteriaVerified: [],
           failureReason: `Integrity check failed during git diff: ${err.message}`,
           durationMs: Date.now() - startTime,
         };
       }
+    }
+
+    // 1b. Candidate integrity: the checks below execute against the working
+    // tree. If it differs from the recorded revision, the evidence would
+    // certify content that cannot be delivered. Fail closed instead.
+    const dirtyBefore = this.uncommittedChanges(realWorktree);
+    if (dirtyBefore.length > 0) {
+      return {
+        passed: false,
+        revisionSha,
+        treeSha,
+        binding,
+        checks: [],
+        criteriaVerified: [],
+        failureReason:
+          `Candidate not deliverable: worktree at ${realWorktree} has ${dirtyBefore.length} uncommitted change(s) ` +
+          `(${dirtyBefore.slice(0, 5).join('; ')}). Verification would test content that differs from revision ` +
+          `${revisionSha}; a fix in the working tree must never be certified by a commit. Commit the changes as a ` +
+          `new candidate revision and verify again.`,
+        durationMs: Date.now() - startTime,
+      };
     }
 
     // 3. Run Operator-Configured Verification Commands & Map to Criteria
@@ -234,6 +297,28 @@ export class AuthoritativeVerifier {
       if (!firstFailingReason) {
         firstFailingReason = `Verification incomplete: Acceptance criteria [${unmetCriteria.join(', ')}] have no passing check evidence.`;
       }
+    }
+
+    // Post-run candidate integrity: verification commands that edit the tree
+    // or advance HEAD mean the content that passed is no longer the recorded
+    // revision. Reject the candidate; the next attempt must deliberately
+    // prepare a new committed candidate and reverify.
+    const headAfterChecks = (() => {
+      try {
+        return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: realWorktree, encoding: 'utf-8' }).trim();
+      } catch {
+        return revisionSha;
+      }
+    })();
+    const dirtyAfter = this.uncommittedChanges(realWorktree);
+    if (allPassed && (dirtyAfter.length > 0 || headAfterChecks !== revisionSha)) {
+      allPassed = false;
+      firstFailingReason =
+        `Verification commands altered the candidate: ` +
+        (headAfterChecks !== revisionSha
+          ? `HEAD advanced from ${revisionSha} to ${headAfterChecks} during checks. `
+          : `Worktree has ${dirtyAfter.length} uncommitted change(s) (${dirtyAfter.slice(0, 5).join('; ')}) after checks. `) +
+        `Revision ${revisionSha} cannot be certified from content its checks did not run against. Prepare a new candidate commit and reverify.`;
     }
 
     return {

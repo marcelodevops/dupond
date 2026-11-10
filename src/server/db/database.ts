@@ -18,6 +18,19 @@ const DEFAULT_DB_PATH = process.env.DUPOND_DB_PATH
   ? path.resolve(process.env.DUPOND_DB_PATH)
   : path.resolve(DATA_DIR, 'dupond.db');
 
+export interface LifecycleSnapshot {
+  task: TaskRecord | null;
+  run: TaskRunRecord | null;
+  verification: VerificationRecord | null;
+  delivery: DeliveryRecord | null;
+}
+
+export interface GuardDecision {
+  accept: boolean;
+  reason?: string;
+  detail?: string;
+}
+
 export class TaskStore {
   private db: DatabaseSync;
 
@@ -212,6 +225,12 @@ export class TaskStore {
    * has one of the expected statuses. Status write and audit event share one
    * transaction, so an applied transition is never recorded without its audit
    * trail and a lost race leaves both untouched.
+   *
+   * `guard` runs inside the same transaction, after the write lock is held and
+   * against freshly read rows. Acceptance-bearing statuses (Review, Done)
+   * require a guard: validating evidence before this call is not enough,
+   * because another connection can change the requirements, the verification
+   * evidence, or the relevant run between that validation and the status write.
    */
   public transitionTaskCas(params: {
     taskId: string;
@@ -221,9 +240,21 @@ export class TaskStore {
     clearClaim?: boolean;
     blockedReason?: string;
     details?: Record<string, any>;
+    guard?: (snapshot: LifecycleSnapshot) => GuardDecision;
   }): boolean {
     if (params.expectedFrom.length === 0) return false;
+    const grantsAcceptance = params.to === 'review' || params.to === 'done';
+    if (grantsAcceptance && !params.guard) {
+      // Refusing here is fail-closed: an unguarded write could apply a decision
+      // derived from evidence that no longer exists.
+      return false;
+    }
     return this.transaction(() => {
+      if (params.guard) {
+        const decision = params.guard(this.readLifecycleSnapshot(params.taskId));
+        if (!decision.accept) return false;
+      }
+
       const now = new Date().toISOString();
       const placeholders = params.expectedFrom.map(() => '?').join(', ');
       const clearClaim = params.clearClaim ? 1 : 0;
@@ -257,16 +288,35 @@ export class TaskStore {
   }
 
   /**
-   * Applies a requirements/config change to a task and, when the evidence
-   * binding changes, records the invalidation and demotes any approved
-   * delivery of the latest run back to pending approval. Prior acceptance and
-   * approval can no longer authorize the new spec.
+   * Reads the rows an acceptance decision depends on. Called inside
+   * transitionTaskCas's transaction, so the guard evaluates against state that
+   * cannot change underneath it: the write lock is already held.
+   */
+  private readLifecycleSnapshot(taskId: string): LifecycleSnapshot {
+    const task = this.getTask(taskId);
+    const run = task ? this.getLatestRunForTask(task.id) : null;
+    const verification = run ? this.getLatestVerification(run.id) : null;
+    const delivery = run ? this.getDeliveryForRun(run.id) : null;
+    return { task, run, verification, delivery };
+  }
+  /**
+   * Applies a requirements/config change to a task. When the evidence binding
+   * changes, everything the old spec authorized is revoked transactionally in
+   * the same write lock: an approved delivery of the latest run is demoted to
+   * pending approval, an acceptance-bearing status (Review, Done) is demoted to
+   * In Progress, and stale worker claims are cleared. The reason is audited.
+   * Historical verification and delivery rows are never rewritten.
    */
   public updateTaskRequirements(
     taskId: string,
     updates: Partial<Pick<TaskRecord, 'acceptanceCriteria' | 'verificationCommands' | 'protectedPaths' | 'description'>>,
     actor: string = 'system',
-  ): { updated: boolean; bindingChanged: boolean; invalidatedApprovalRunIds: string[] } {
+  ): {
+    updated: boolean;
+    bindingChanged: boolean;
+    invalidatedApprovalRunIds: string[];
+    revokedAcceptanceFrom?: TaskRecord['status'];
+  } {
     return this.transaction(() => {
       const current = this.getTask(taskId);
       if (!current) return { updated: false, bindingChanged: false, invalidatedApprovalRunIds: [] };
@@ -305,6 +355,7 @@ export class TaskStore {
       });
 
       const invalidatedApprovalRunIds: string[] = [];
+      let revokedAcceptanceFrom: TaskRecord['status'] | undefined;
       if (bindingChanged) {
         const latestRun = this.getLatestRunForTask(taskId);
         if (latestRun) {
@@ -320,17 +371,42 @@ export class TaskStore {
               eventType: 'APPROVAL_INVALIDATED',
               actor,
               details: {
-                reason: bindingChanged
-                  ? 'Acceptance requirements or verification configuration changed; prior approval no longer applies to the new spec.'
-                  : 'unchanged',
+                reason: 'Acceptance requirements or verification configuration changed; prior approval no longer applies to the new spec.',
                 deliveredCommit: delivery.deliveredCommit,
               },
             });
           }
         }
+
+        // Revoke the acceptance-bearing status itself: Review and Done were
+        // granted against the old spec and cannot survive re-binding. The task
+        // returns to In Progress for rework and fresh verification, and any
+        // stale claim is cleared so scheduling starts from a clean slate.
+        if (current.status === 'review' || current.status === 'done') {
+          revokedAcceptanceFrom = current.status;
+          this.db.prepare(`
+            UPDATE tasks
+            SET status = 'in_progress', claimed_by = NULL, claimed_at = NULL, blocked_reason = NULL, updated_at = ?
+            WHERE id = ?
+          `).run(now, taskId);
+          this.recordAudit({
+            taskId,
+            eventType: 'TASK_ACCEPTANCE_REVOKED',
+            actor,
+            details: {
+              reason: 'requirements-rebound',
+              from: current.status,
+              to: 'in_progress',
+              previousRequirementsFingerprint: before.requirementsFingerprint,
+              previousVerificationConfigFingerprint: before.verificationConfigFingerprint,
+              newRequirementsFingerprint: after.requirementsFingerprint,
+              newVerificationConfigFingerprint: after.verificationConfigFingerprint,
+            },
+          });
+        }
       }
 
-      return { updated: true, bindingChanged, invalidatedApprovalRunIds };
+      return { updated: true, bindingChanged, invalidatedApprovalRunIds, revokedAcceptanceFrom };
     });
   }
 
@@ -584,7 +660,10 @@ export class TaskStore {
   }
 
   public getDeliveryForRun(runId: string): DeliveryRecord | null {
-    const stmt = this.db.prepare('SELECT * FROM delivery_records WHERE run_id = ?');
+    // A run can accumulate several delivery records when a PR is advanced to
+    // newer verified revisions; acceptance gates must resolve against the
+    // most recent one, and history is preserved.
+    const stmt = this.db.prepare('SELECT * FROM delivery_records WHERE run_id = ? ORDER BY delivered_at DESC, rowid DESC LIMIT 1');
     const row = stmt.get(runId) as any;
     if (!row) return null;
     return this.mapDeliveryRow(row);
@@ -595,6 +674,41 @@ export class TaskStore {
     const row = stmt.get(branch) as any;
     if (!row) return null;
     return this.mapDeliveryRow(row);
+  }
+
+  /**
+   * Records an explicit operator approval against an existing delivery without
+   * creating a duplicate delivery or a second pull request. Used when a
+   * previously delivered commit is re-verified under changed requirements and
+   * must be reapproved before the lifecycle can grant Done again.
+   */
+  public markDeliveryApproved(deliveryId: string, approvedBy: string): DeliveryRecord | null {
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM delivery_records WHERE id = ?').get(deliveryId) as any;
+      if (!row) return null;
+      this.db
+        .prepare(`UPDATE delivery_records SET approval_status = 'approved', approved_by = ? WHERE id = ?`)
+        .run(approvedBy, deliveryId);
+      const record = this.mapDeliveryRow(row);
+      this.recordAudit({
+        taskId: this.getTaskIdForRun(record.runId) || undefined,
+        runId: record.runId,
+        eventType: 'DELIVERY_REAPPROVED',
+        actor: approvedBy,
+        details: {
+          deliveryId: record.id,
+          deliveredCommit: record.deliveredCommit,
+          prUrl: record.prUrl,
+          note: 'Explicit operator approval recorded against the existing delivery; no new pull request created.',
+        },
+      });
+      return this.getDeliveryForRun(record.runId);
+    });
+  }
+
+  private getTaskIdForRun(runId: string): string | null {
+    const row = this.db.prepare('SELECT task_id FROM task_runs WHERE id = ?').get(runId) as any;
+    return row ? row.task_id : null;
   }
 
   // --- Audit Events ---
