@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/marcelodevops/dupond/compare/v0.4.2...v0.4.3) (2026-11-10)
+
+
+### Bug Fixes
+
+* **ui:** surface API auth failures instead of serving seeded board data ([9b83197](https://github.com/marcelodevops/dupond/commit/9b83197a65a0b604aa74aed8ffc60c1a98ec6ce5))
+
 ## [0.4.2](https://github.com/marcelodevops/dupond/compare/v0.4.1...v0.4.2) (2026-11-10)
 
 
