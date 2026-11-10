@@ -194,6 +194,11 @@ export class GitHubDeliveryService {
       };
     }
 
+    // The evidence row the operator's consent rests on. Base-drift integration
+    // below may replace it with an equally-bound record it produced itself;
+    // nothing else may.
+    let consentVerificationId = verification.id;
+
     // 4. Remote Base Branch Fetch and Drift Verification
     const baseBranch = options.targetBaseBranch || 'main';
     let latestRemoteBaseSha = '';
@@ -287,8 +292,9 @@ export class GitHubDeliveryService {
       }
 
       // Record fresh passing verification tied to merged SHA
+      const driftVerificationId = `ver-drift-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       this.store.recordVerification({
-        id: `ver-drift-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: driftVerificationId,
         runId: run.id,
         attemptId: verification.attemptId || `drift-merge-${Date.now()}`,
         revisionSha: mergedSha,
@@ -301,6 +307,11 @@ export class GitHubDeliveryService {
         verificationConfigFingerprint: recheck.binding?.verificationConfigFingerprint || null,
         evidenceBindingVersion: recheck.binding?.evidenceBindingVersion || null,
       });
+
+      // The merged record replaces the original evidence for this exact
+      // candidate and contract (the recheck ran against the dispatch's own
+      // snapshot), so consent follows it.
+      consentVerificationId = driftVerificationId;
 
       // Re-pin the durable verified ref to the newly accepted merged revision
       try {
@@ -340,27 +351,18 @@ export class GitHubDeliveryService {
 
     // 4b. Approval identity. Everything the operator is being asked to accept —
     // the candidate revision, the contract (specification, criteria, and
-    // verification configuration), and the evidence row it rests on — is
-    // snapshotted once here and handed to the approval write, which re-validates
-    // it inside its own transaction. Anything that changed while this delivery
-    // was running makes the approval refuse rather than certify a contract that
-    // was never reviewed.
-    const approvalTask = this.store.getTask(task.id);
-    const approvalVerification = this.store.getLatestVerification(run.id);
-    if (!approvalTask || !approvalVerification) {
-      return {
-        success: false,
-        status: 409,
-        blocked: true,
-        error: `Delivery blocked: The task or its evidence for run ${run.id} is no longer recorded; nothing was approved.`,
-      };
-    }
-    const approvalBinding = computeEvidenceBinding(approvalTask);
+    // verification configuration), and the evidence row it rests on — is taken
+    // from the dispatch context validated above and never re-read: rebuilding
+    // consent from fresher rows would let a mid-dispatch contract rewrite be
+    // certified by an operator who only ever saw the old one. The approval
+    // write re-validates this identity inside its own transaction, so anything
+    // that changed while this delivery was running makes the approval refuse.
+    const approvalBinding = computeEvidenceBinding(task);
     const approvalExpectation: ApprovalExpectation = {
       revisionSha: deliveredCommit,
       requirementsFingerprint: approvalBinding.requirementsFingerprint,
       verificationConfigFingerprint: approvalBinding.verificationConfigFingerprint,
-      verificationId: approvalVerification.id,
+      verificationId: consentVerificationId,
       evidenceBindingVersion: approvalBinding.evidenceBindingVersion,
     };
 
