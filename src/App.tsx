@@ -27,7 +27,8 @@ import { IntegrationsView } from './components/IntegrationsView';
 import { PlanIngestionModal } from './components/PlanIngestionModal';
 import { TaskDetailModal } from './components/TaskDetailModal';
 import { AddTaskModal } from './components/AddTaskModal';
-import { Sparkles, Bot, AlertCircle, CheckCircle, Bell } from 'lucide-react';
+import { Sparkles, Bot, AlertCircle, CheckCircle, Bell, Lock } from 'lucide-react';
+import { apiFetch, getApiToken, isAuthRequired, onAuthStateChange, setApiToken } from './lib/api';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('kanban');
@@ -95,8 +96,9 @@ export default function App() {
   // Server-authoritative state synchronization (survives browser close)
   useEffect(() => {
     const fetchServerState = async () => {
+      if (isAuthRequired()) return;
       try {
-        const res = await fetch('/api/orchestrate/state');
+        const res = await apiFetch('/api/orchestrate/state');
         if (res.ok) {
           const data = await res.json();
           if (data.tasks && data.tasks.length > 0) setTasks(data.tasks);
@@ -119,13 +121,19 @@ export default function App() {
   // Push local updates to server-authoritative state
   const syncToServer = async (partialState: any) => {
     try {
-      await fetch('/api/orchestrate/state', {
+      const res = await apiFetch('/api/orchestrate/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(partialState),
       });
+      if (!res.ok) {
+        const detail = res.status === 401
+          ? 'the API rejected the stored token'
+          : `server responded ${res.status}`;
+        showToast('Changes Not Saved', `Board updates are local only — ${detail}.`, 'alert');
+      }
     } catch (e) {
-      console.warn('Failed to push state to server:', e);
+      showToast('Changes Not Saved', 'Could not reach the Dupond API; board updates are local only.', 'alert');
     }
   };
 
@@ -144,13 +152,25 @@ export default function App() {
     }, 4000);
   };
 
+  // A 401 means the board has no server backing, so it is surfaced instead of
+  // falling back to the bundled seed data.
+  const [authRequired, setAuthRequired] = useState<boolean>(() => isAuthRequired());
+  const [tokenDraft, setTokenDraft] = useState<string>(() => getApiToken() ?? '');
+
+  useEffect(() => onAuthStateChange(setAuthRequired), []);
+
+  const handleConnect = () => {
+    setApiToken(tokenDraft);
+    showToast('Token stored', 'Re-syncing with the server…', 'info');
+  };
+
   // Execute single agent step on a specific task
   const executeAgentStep = async (targetTask: Task, activeAgent: Agent) => {
     setIsProcessingStep(true);
     setActiveProcessingTaskId(targetTask.id);
 
     try {
-      const response = await fetch('/api/orchestrate/agent-step', {
+      const response = await apiFetch('/api/orchestrate/agent-step', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -255,7 +275,7 @@ export default function App() {
 
       // Auto Jira / Slack sync if enabled
       if (orchestratorConfig.autoJiraSync) {
-        fetch('/api/integrations/jira/sync', {
+        apiFetch('/api/integrations/jira/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ task: updatedTask, projectKey: integrationConfig.jira.projectKey }),
@@ -274,7 +294,7 @@ export default function App() {
   const handleRunServerCycle = async () => {
     setIsProcessingStep(true);
     try {
-      const res = await fetch('/api/orchestrate/engine/step', { method: 'POST' });
+      const res = await apiFetch('/api/orchestrate/engine/step', { method: 'POST' });
       const data = await res.json();
       if (data.state) {
         setTasks(data.state.tasks);
@@ -298,7 +318,7 @@ export default function App() {
   // Handlers with Centralized Quality Gate Enforcement & Server Sync
   const handleUpdateTaskStatus = async (taskId: string, newStatus: TaskStatus) => {
     try {
-      const res = await fetch(`/api/orchestrate/tasks/${taskId}/transition`, {
+      const res = await apiFetch(`/api/orchestrate/tasks/${taskId}/transition`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus }),
@@ -314,7 +334,7 @@ export default function App() {
 
         showToast('Quality Gate Blocked', `Cannot move to ${newStatus.toUpperCase()}: ${failureDetails}`, 'alert');
         // Refresh server state to ensure UI stays accurate
-        const stateRes = await fetch('/api/orchestrate/state');
+        const stateRes = await apiFetch('/api/orchestrate/state');
         if (stateRes.ok) {
           const fresh = await stateRes.json();
           setTasks(fresh.tasks);
@@ -407,7 +427,7 @@ export default function App() {
 
   const handleDispatchSlack = async (message: string, channel: string): Promise<boolean> => {
     try {
-      const res = await fetch('/api/integrations/slack/dispatch', {
+      const res = await apiFetch('/api/integrations/slack/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -445,6 +465,52 @@ export default function App() {
         </div>
       )}
 
+      {/* Authentication gate: blocks the board while the API refuses the token */}
+      {authRequired && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/90 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+            <div className="flex items-start space-x-3">
+              <Lock className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-sm font-bold text-slate-100">Authentication required</h4>
+                <p className="text-xs text-slate-300 mt-1 leading-snug">
+                  The Dupond API answered 401. Nothing on this board is server state and no edits are being
+                  saved until a valid operator token is provided.
+                </p>
+              </div>
+            </div>
+            <form
+              className="mt-4 space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleConnect();
+              }}
+            >
+              <input
+                type="password"
+                value={tokenDraft}
+                onChange={(e) => setTokenDraft(e.target.value)}
+                placeholder="Operator token"
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={!tokenDraft.trim()}
+                  className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  Connect
+                </button>
+              </div>
+            </form>
+            <p className="mt-3 text-[11px] leading-snug text-slate-500">
+              The token is the server's <code>data/.dupond_auth_token</code> file, or the{' '}
+              <code>DUPOND_API_KEY</code> / <code>DUPOND_AUTH_TOKEN</code> it was started with.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Main Header */}
       <Header
         activeTab={activeTab}
@@ -455,7 +521,16 @@ export default function App() {
           setIsRunningAuto(next);
           try {
             const ep = next ? '/api/orchestrate/engine/start' : '/api/orchestrate/engine/stop';
-            await fetch(ep, { method: 'POST' });
+            const res = await apiFetch(ep, { method: 'POST' });
+            if (!res.ok) {
+              setIsRunningAuto(!next);
+              showToast(
+                'Coordinator Unchanged',
+                `The API refused to ${next ? 'start' : 'stop'} the coordinator (HTTP ${res.status}).`,
+                'alert'
+              );
+              return;
+            }
             showToast(
               next ? 'Server Background Coordinator ACTIVE' : 'Server Coordinator PAUSED',
               next ? 'Autonomous background daemon active. Will continue executing even if browser is closed.' : 'Server coordinator paused.',
