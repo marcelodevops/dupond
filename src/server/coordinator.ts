@@ -562,17 +562,10 @@ class CoordinatorEngine {
         : `Blocked by dependencies: ${failingDependencies.join('; ')}`,
     });
 
-    const subtasks = task.subtasks || [];
-    const uncompletedSubtasks = subtasks.filter((st) => !st.completed);
-    checks.push({
-      rule: 'Acceptance Criteria Subtasks Verified',
-      passed: subtasks.length > 0 && uncompletedSubtasks.length === 0,
-      detail: subtasks.length === 0
-        ? 'No acceptance subtasks defined for this task'
-        : uncompletedSubtasks.length === 0
-        ? `All ${subtasks.length} acceptance criteria subtasks checked and passed`
-        : `${uncompletedSubtasks.length} of ${subtasks.length} subtask(s) still incomplete`,
-    });
+    // Subtask checkbox state is deliberately not evidence and grants nothing:
+    // mutable checkboxes can never authorize acceptance. Criterion coverage is
+    // proven only by passing test assertions in verifyTaskQualityGates (and by
+    // bound verification records for store-backed tasks).
 
     return checks;
   }
