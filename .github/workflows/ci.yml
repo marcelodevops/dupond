@@ -80,6 +80,12 @@ jobs:
       - name: Run End-to-End Acceptance Scenarios
         run: npx tsx tests/e2ePipeline.test.ts
 
+      - name: Run UI Auth Client suite
+        run: npx tsx tests/uiAuthClient.test.ts
+
+      - name: Run UI Auth Gate render suite
+        run: npx tsx tests/uiAuthGate.test.ts
+
       - name: Run Release Policy & Version Consistency suite
         run: npx tsx tests/release.test.ts
 

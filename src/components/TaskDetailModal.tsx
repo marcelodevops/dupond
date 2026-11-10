@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Task, Agent, Epic, TaskStatus, Priority } from '../types';
+import { apiFetch } from '../lib/api';
 import { 
   X, 
   CheckCircle2, 
@@ -101,7 +102,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
     setIsVerifying(true);
     setVerificationResult(null);
     try {
-      const res = await fetch('/api/orchestrate/verify-task', {
+      const res = await apiFetch('/api/orchestrate/verify-task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task }),
