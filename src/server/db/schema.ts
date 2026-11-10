@@ -82,6 +82,13 @@ export interface VerificationRecord {
   criteriaVerified: string[];
   failureReason?: string | null;
   verifiedAt: string;
+  // Evidence binding: the exact content and spec this verification proves.
+  // Null on records written before evidence binding existed, which the
+  // validity gate treats as insufficient (fresh verification required).
+  revisionTreeSha?: string | null;
+  requirementsFingerprint?: string | null;
+  verificationConfigFingerprint?: string | null;
+  evidenceBindingVersion?: string | null;
 }
 
 export interface DeliveryRecord {
@@ -178,7 +185,11 @@ CREATE TABLE IF NOT EXISTS verification_records (
   checks TEXT NOT NULL,
   criteria_verified TEXT NOT NULL,
   failure_reason TEXT,
-  verified_at TEXT NOT NULL
+  verified_at TEXT NOT NULL,
+  revision_tree_sha TEXT,
+  requirements_fingerprint TEXT,
+  verification_config_fingerprint TEXT,
+  evidence_binding_version TEXT
 );
 
 CREATE TABLE IF NOT EXISTS delivery_records (
