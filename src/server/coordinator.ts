@@ -19,6 +19,8 @@ import {
 } from '../types';
 import { StateMutationSchema } from '../types/schemas.js';
 import { taskStore } from './db/database.js';
+import type { TaskRecord } from './db/schema.js';
+import { mergePostedCriteria, promoteChecklistItems } from '../services/acceptanceMapping.js';
 import { defaultLifecycleService } from './lifecycle/lifecycleService.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
 import { WorkspaceManager } from './workspace/workspaceManager.js';
@@ -150,10 +152,12 @@ export class CoordinatorEngine {
   }
 
   /**
-   * Copies authoritative task statuses from the store into the JSON state the
-   * UI renders. Returns the number of entries changed. This is projection only
-   * — it never grants or revokes acceptance; the store already holds the
-   * outcome of the lifecycle service's evidence gates.
+   * Copies authoritative task statuses and acceptance contract fields from the
+   * store into the JSON state the UI renders. Returns the number of entries
+   * changed. This is projection only — it never grants or revokes acceptance;
+   * the store already holds the outcome of the lifecycle service's evidence
+   * gates. The contract is mirrored as well as the status, otherwise the board
+   * keeps displaying requirements that were revoked or never persisted.
    */
   public projectAuthoritativeStatuses(): number {
     let changed = 0;
@@ -161,10 +165,14 @@ export class CoordinatorEngine {
       const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
       if (!dbTask) return task;
       const projected = this.toUiStatus(dbTask.status);
-      if (projected === task.status) return task;
+      const specMirrored = this.mirrorAuthoritativeSpec(task, dbTask);
+      if (projected === task.status) {
+        if (specMirrored !== task) changed += 1;
+        return specMirrored;
+      }
       changed += 1;
       return {
-        ...task,
+        ...specMirrored,
         status: projected,
         lastAgentComment: `Authoritative lifecycle: status projected from persisted record "${dbTask.status}".`,
         lastUpdated: 'Just now',
@@ -175,6 +183,37 @@ export class CoordinatorEngine {
       this.saveStateToDisk();
     }
     return changed;
+  }
+
+  /**
+   * Overlays the persisted acceptance contract on a board entry so the UI can
+   * only ever show the requirements that the evidence gates will enforce.
+   * Returns the entry unchanged when it already matches.
+   */
+  private mirrorAuthoritativeSpec(
+    task: Task,
+    dbTask: TaskRecord | null,
+  ): Task {
+    if (!dbTask) return task;
+    const criteria = dbTask.acceptanceCriteria.map((c) => ({
+      id: c.id,
+      title: c.title,
+      completed: Boolean(c.completed),
+      ...(c.checkCommand ? { checkCommand: c.checkCommand } : {}),
+    }));
+    const unchanged =
+      task.description === (dbTask.description ?? '') &&
+      JSON.stringify(task.acceptanceCriteria ?? []) === JSON.stringify(criteria) &&
+      JSON.stringify(task.verificationCommands ?? []) === JSON.stringify(dbTask.verificationCommands ?? []) &&
+      JSON.stringify(task.protectedPaths ?? []) === JSON.stringify(dbTask.protectedPaths ?? []);
+    if (unchanged) return task;
+    return {
+      ...task,
+      description: dbTask.description ?? '',
+      acceptanceCriteria: criteria,
+      verificationCommands: dbTask.verificationCommands,
+      protectedPaths: dbTask.protectedPaths,
+    };
   }
 
   private ensureDirectories() {
@@ -318,6 +357,11 @@ export class CoordinatorEngine {
 
     const validatedPartial = parseResult.data as Partial<ServerState>;
     const rejectedDoneTasks: string[] = [];
+    // One entry per task key: a rebind and the status clamp are the same
+    // outcome observed twice, and callers read this list as a set.
+    const rejectTask = (key: string) => {
+      if (!rejectedDoneTasks.includes(key)) rejectedDoneTasks.push(key);
+    };
 
     // If incoming tasks are marked as 'done', verify each one strictly
     if (validatedPartial.tasks) {
@@ -332,14 +376,18 @@ export class CoordinatorEngine {
         let requirementsRebound = false;
         const dbTaskForEdit = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
         if (dbTaskForEdit) {
-          // A posted acceptanceCriteria list is authoritative for the mirror.
-          // Without one, subtasks only stand in for criteria when the store
-          // record has none (legacy shape); existing criteria are left alone
-          // rather than silently replaced by subtask ids.
-          const wireCriteria = (task.acceptanceCriteria && task.acceptanceCriteria.length > 0)
-            ? task.acceptanceCriteria
+          // An acceptanceCriteria field that the caller sent is authoritative
+          // for the contract — including when it is sent empty, which means
+          // "no requirements", not "say nothing". Each posted item still
+          // inherits its stored check command unless the caller supplied one,
+          // so rewording a requirement cannot destroy the proof for it. With
+          // no criteria sent, checklist rows only stand in for requirements
+          // when the store record has none (the legacy board shape).
+          const postedCriteria = task.acceptanceCriteria;
+          const wireCriteria = Array.isArray(postedCriteria)
+            ? mergePostedCriteria(postedCriteria, dbTaskForEdit.acceptanceCriteria)
             : (dbTaskForEdit.acceptanceCriteria.length === 0 && (task.subtasks || []).length > 0)
-              ? (task.subtasks || []).map((s) => ({ id: s.id, title: s.title, completed: s.completed, checkCommand: s.checkCommand }))
+              ? promoteChecklistItems(task.subtasks || [])
               : dbTaskForEdit.acceptanceCriteria;
           const updates = {
             description: task.description ?? '',
@@ -361,7 +409,7 @@ export class CoordinatorEngine {
             const outcome = taskStore.updateTaskRequirements(dbTaskForEdit.id, updates, 'ui');
             if (outcome.bindingChanged) {
               requirementsRebound = true;
-              rejectedDoneTasks.push(task.key);
+              rejectTask(task.key);
             }
           }
         }
@@ -373,7 +421,7 @@ export class CoordinatorEngine {
         if (task.status === 'review' || task.status === 'done') {
           const dbTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
           if (dbTask && dbTask.status !== task.status) {
-            rejectedDoneTasks.push(task.key);
+            rejectTask(task.key);
             return {
               ...task,
               status: this.toUiStatus(dbTask.status),
@@ -388,7 +436,7 @@ export class CoordinatorEngine {
           const subtasksChanged = JSON.stringify(existing.subtasks) !== JSON.stringify(task.subtasks);
           const descChanged = existing.description !== task.description;
           if ((subtasksChanged || descChanged) && task.status === 'done' && existing.status !== 'done') {
-            rejectedDoneTasks.push(task.key);
+            rejectTask(task.key);
             return {
               ...task,
               status: 'review' as TaskStatus,
@@ -407,7 +455,7 @@ export class CoordinatorEngine {
           const isAuthoritativelyDone = existing?.status === 'done';
 
           if (!verification.passed || !isAuthoritativelyDone) {
-            rejectedDoneTasks.push(task.key);
+            rejectTask(task.key);
             const failingReasons = !verification.passed
               ? verification.checks
                   .filter((c) => !c.passed)
@@ -433,6 +481,14 @@ export class CoordinatorEngine {
         }
         return task;
       });
+
+      // Whatever the caller posted, the board then displays the contract the
+      // authoritative store actually holds. A requirement that was refused,
+      // revoked, or re-bound cannot keep being shown as if it were granted.
+      validatedPartial.tasks = validatedPartial.tasks.map((task) => this.mirrorAuthoritativeSpec(
+        task,
+        taskStore.getTask(task.id || '') || taskStore.getTask(task.key || ''),
+      ));
     }
 
     // Now that the wire view of integrationConfig is masked, a UI that re-saves

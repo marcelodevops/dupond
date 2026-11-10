@@ -104,6 +104,15 @@ export interface DeliveryRecord {
   ciStatus: 'pending' | 'success' | 'failure' | 'unknown';
   approvalStatus: 'approved' | 'pending_approval' | 'rejected';
   approvedBy?: string | null;
+  // The identity the approval certifies: the contract and candidate revision
+  // that were current when the operator approved, plus the evidence row it
+  // rested on. Null when unapproved or when approval predates binding, which
+  // the lifecycle gate treats as insufficient (fresh approval required).
+  approvalRequirementsFingerprint?: string | null;
+  approvalVerificationConfigFingerprint?: string | null;
+  approvalRevisionSha?: string | null;
+  approvalVerificationId?: string | null;
+  approvalBindingVersion?: string | null;
   deliveredAt: string;
 }
 
@@ -205,6 +214,11 @@ CREATE TABLE IF NOT EXISTS delivery_records (
   ci_status TEXT NOT NULL,
   approval_status TEXT NOT NULL,
   approved_by TEXT,
+  approval_requirements_fingerprint TEXT,
+  approval_verification_config_fingerprint TEXT,
+  approval_revision_sha TEXT,
+  approval_verification_id TEXT,
+  approval_binding_version TEXT,
   delivered_at TEXT NOT NULL
 );
 

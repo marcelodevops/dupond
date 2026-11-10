@@ -4,7 +4,12 @@ import path from 'path';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
 import { DeliveryRecord } from '../db/schema.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
-import { assessEvidenceValidity, verifiedRefForRun } from '../verification/evidenceBinding.js';
+import {
+  ApprovalExpectation,
+  assessEvidenceValidity,
+  computeEvidenceBinding,
+  verifiedRefForRun,
+} from '../verification/evidenceBinding.js';
 import { LifecycleService } from '../lifecycle/lifecycleService.js';
 import { normalizeRepoSlug, isLocalRemoteOrigin, areRepoSlugsCompatible } from '../workspace/targetRepositoryResolver.js';
 
@@ -333,6 +338,32 @@ export class GitHubDeliveryService {
       deliveredCommit = mergedSha;
     }
 
+    // 4b. Approval identity. Everything the operator is being asked to accept —
+    // the candidate revision, the contract (specification, criteria, and
+    // verification configuration), and the evidence row it rests on — is
+    // snapshotted once here and handed to the approval write, which re-validates
+    // it inside its own transaction. Anything that changed while this delivery
+    // was running makes the approval refuse rather than certify a contract that
+    // was never reviewed.
+    const approvalTask = this.store.getTask(task.id);
+    const approvalVerification = this.store.getLatestVerification(run.id);
+    if (!approvalTask || !approvalVerification) {
+      return {
+        success: false,
+        status: 409,
+        blocked: true,
+        error: `Delivery blocked: The task or its evidence for run ${run.id} is no longer recorded; nothing was approved.`,
+      };
+    }
+    const approvalBinding = computeEvidenceBinding(approvalTask);
+    const approvalExpectation: ApprovalExpectation = {
+      revisionSha: deliveredCommit,
+      requirementsFingerprint: approvalBinding.requirementsFingerprint,
+      verificationConfigFingerprint: approvalBinding.verificationConfigFingerprint,
+      verificationId: approvalVerification.id,
+      evidenceBindingVersion: approvalBinding.evidenceBindingVersion,
+    };
+
     // 5. Idempotent Delivery Reconciliation: Check for existing delivery on this branch/run
     let prNumber: number | null = null;
     let prUrl: string = '';
@@ -352,13 +383,24 @@ export class GitHubDeliveryService {
         // the current evidence inside its own transaction.
         let reconciledDelivery = existingDelivery;
         let reapproved = false;
-        if (task.requireApproval && existingDelivery.approvalStatus !== 'approved') {
+        if (task.requireApproval && (existingDelivery.approvalStatus !== 'approved' || options.isApproved === true)) {
           if (options.isApproved === true && options.approvedBy) {
-            const updated = this.store.markDeliveryApproved(existingDelivery.id, options.approvedBy);
-            if (updated) {
-              reconciledDelivery = updated;
-              reapproved = true;
+            const approval = this.store.approveDelivery(existingDelivery.id, options.approvedBy, approvalExpectation);
+            if (!approval.approved || !approval.delivery) {
+              return {
+                success: false,
+                status: 409,
+                blocked: true,
+                approvalRequired: true,
+                deliveryRecord: approval.delivery || existingDelivery,
+                prUrl: existingDelivery.prUrl,
+                branch: existingDelivery.branch,
+                deliveredCommit: existingDelivery.deliveredCommit,
+                error: `Delivery blocked: Approval was refused because it no longer matches the current requirements or evidence — ${approval.detail}`,
+              };
             }
+            reconciledDelivery = approval.delivery;
+            reapproved = true;
           } else {
             return {
               success: false,
@@ -566,7 +608,26 @@ ${task.acceptanceCriteria.map((c) => `- [x] ${c.title}`).join('\n')}
       ciStatus,
       approvalStatus: 'approved',
       approvedBy: options.approvedBy || 'authorized-operator',
-    });
+    }, approvalExpectation);
+
+    if (task.requireApproval && deliveryRecord.approvalStatus !== 'approved') {
+      // The pull request genuinely exists and is kept; only the approval is
+      // refused, so the operator re-approves against current evidence and the
+      // reconcile path reuses this PR instead of opening a second one.
+      return {
+        success: false,
+        status: 409,
+        blocked: true,
+        approvalRequired: true,
+        deliveryRecord,
+        prUrl,
+        branch: run.targetBranch,
+        deliveredCommit,
+        baseCommit: run.baseCommit,
+        ciStatus,
+        error: `Delivery blocked: Pull request ${prUrl} was delivered, but the approval was refused because the requirements or evidence changed while delivery was running. Re-approval against the current evidence is required.`,
+      };
+    }
 
     // Advance task status to done through the authoritative lifecycle service
     // (re-checks evidence binding and the just-recorded approval, applied with

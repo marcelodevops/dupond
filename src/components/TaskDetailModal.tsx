@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Task, Agent, Epic, TaskStatus, Priority } from '../types';
 import { apiFetch } from '../lib/api';
+import { withPromotedChecklistItem } from '../services/acceptanceMapping';
 import { 
   X, 
   CheckCircle2, 
@@ -42,6 +43,8 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
 
   const [activeTab, setActiveTab] = useState<'details' | 'subtasks' | 'deliverables'>('details');
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
+  const [newCriterionTitle, setNewCriterionTitle] = useState('');
+  const [newCriterionCommand, setNewCriterionCommand] = useState('');
 
   const assignee = agents.find((a) => a.id === task.assignedAgentId);
   const epic = epics.find((e) => e.id === task.epicId);
@@ -60,7 +63,8 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
 
   const allDependenciesMet = dependencyDetails.every((d) => d.isDone);
 
-  // Toggle subtask
+  // Toggle subtask — progress only. Completion of a checklist row is never an
+  // acceptance decision, so it writes to subtasks and nothing else.
   const handleToggleSubtask = (subtaskId: string) => {
     const updatedSubtasks = task.subtasks.map((st) =>
       st.id === subtaskId ? { ...st, completed: !st.completed } : st
@@ -79,6 +83,68 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
     };
     onUpdateTask({ ...task, subtasks: [...task.subtasks, newSt] });
     setNewSubtaskTitle('');
+  };
+
+  const criteria = task.acceptanceCriteria || [];
+
+  // Acceptance edits write task.acceptanceCriteria — the contract the
+  // authoritative gates enforce — and post the full list explicitly so the
+  // server can tell an edit from a field that was never sent. Edits are held
+  // as drafts and committed on blur or Enter, because every posted contract
+  // change revokes the evidence bound to the previous one and a keystroke is
+  // not a decision.
+  const postCriteria = (next: typeof criteria) => {
+    onUpdateTask({ ...task, acceptanceCriteria: next });
+  };
+
+  const [criterionDrafts, setCriterionDrafts] = useState<Record<string, { title: string; checkCommand: string }>>({});
+  const draftFor = (criterion: (typeof criteria)[number]) =>
+    criterionDrafts[criterion.id] ?? { title: criterion.title, checkCommand: criterion.checkCommand ?? '' };
+
+  const handleCriterionDraftChange = (id: string, field: 'title' | 'checkCommand', value: string) => {
+    const criterion = criteria.find((c) => c.id === id);
+    if (!criterion) return;
+    setCriterionDrafts((drafts) => ({ ...drafts, [id]: { ...draftFor(criterion), [field]: value } }));
+  };
+
+  const commitCriterionDraft = (id: string) => {
+    const draft = criterionDrafts[id];
+    if (!draft) return;
+    setCriterionDrafts((drafts) => {
+      const rest = { ...drafts };
+      delete rest[id];
+      return rest;
+    });
+    postCriteria(criteria.map((c) => (c.id === id
+      ? { ...c, title: draft.title.trim() || c.title, checkCommand: draft.checkCommand }
+      : c)));
+  };
+
+  const handleAddCriterion = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCriterionTitle.trim()) return;
+    const id = `crit-${Date.now()}`;
+    postCriteria([
+      ...criteria,
+      {
+        id,
+        title: newCriterionTitle.trim(),
+        completed: false,
+        ...(newCriterionCommand.trim() ? { checkCommand: newCriterionCommand.trim() } : {}),
+      },
+    ]);
+    setNewCriterionTitle('');
+    setNewCriterionCommand('');
+  };
+
+  const handleRemoveCriterion = (id: string) => {
+    postCriteria(criteria.filter((c) => c.id !== id));
+  };
+
+  const handlePromoteSubtask = (subtaskId: string) => {
+    const item = task.subtasks.find((st) => st.id === subtaskId);
+    if (!item) return;
+    postCriteria(withPromotedChecklistItem(criteria, item));
   };
 
   const [verificationResult, setVerificationResult] = useState<{
@@ -332,12 +398,97 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
             </div>
           )}
 
-          {/* Subtasks Section */}
+          {/* Acceptance Criteria Section — the authoritative contract */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-1.5">
                 <CheckCircle2 className="w-4 h-4 text-indigo-400" />
-                <span>Acceptance Criteria & Subtasks</span>
+                <span>Acceptance Criteria</span>
+              </h4>
+              <span className="text-xs text-slate-400 font-mono">
+                {criteria.length} requirement{criteria.length === 1 ? '' : 's'}
+              </span>
+            </div>
+
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              These are the requirements the authoritative gates verify. Editing this list re-binds the task's
+              evidence and revokes any granted Review or Done until fresh verification passes.
+            </p>
+
+            <div className="space-y-2">
+              {criteria.length === 0 && (
+                <p className="text-xs text-slate-500 italic bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                  No acceptance requirements recorded. Add one, or promote a checklist item below.
+                </p>
+              )}
+              {criteria.map((criterion) => (
+                <div
+                  key={criterion.id}
+                  className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800/80 space-y-2 text-xs"
+                >
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="text"
+                      value={draftFor(criterion).title}
+                      onChange={(e) => handleCriterionDraftChange(criterion.id, 'title', e.target.value)}
+                      onBlur={() => commitCriterionDraft(criterion.id)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') commitCriterionDraft(criterion.id); }}
+                      className="flex-1 px-2 py-1 bg-slate-900 border border-slate-800 rounded text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveCriterion(criterion.id)}
+                      className="px-2 py-1 text-slate-500 hover:text-rose-300 border border-slate-800 rounded"
+                      title="Remove requirement"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={draftFor(criterion).checkCommand}
+                    onChange={(e) => handleCriterionDraftChange(criterion.id, 'checkCommand', e.target.value)}
+                    onBlur={() => commitCriterionDraft(criterion.id)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') commitCriterionDraft(criterion.id); }}
+                    placeholder="check command (an unproven requirement cannot be accepted)"
+                    className="w-full px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono text-[11px] text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+              ))}
+            </div>
+
+            <form onSubmit={handleAddCriterion} className="space-y-2 pt-1">
+              <input
+                type="text"
+                value={newCriterionTitle}
+                onChange={(e) => setNewCriterionTitle(e.target.value)}
+                placeholder="Add acceptance requirement..."
+                className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={newCriterionCommand}
+                  onChange={(e) => setNewCriterionCommand(e.target.value)}
+                  placeholder="optional check command"
+                  className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+                <button
+                  type="submit"
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg"
+                >
+                  Add
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* Checklist Subtasks — progress only */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-1.5">
+                <Layers className="w-4 h-4 text-slate-400" />
+                <span>Checklist (progress only)</span>
               </h4>
               <span className="text-xs text-slate-400 font-mono">
                 {task.subtasks.filter((s) => s.completed).length}/{task.subtasks.length} Done
@@ -348,18 +499,25 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
               {task.subtasks.map((st) => (
                 <div
                   key={st.id}
-                  onClick={() => handleToggleSubtask(st.id)}
-                  className="flex items-center space-x-2.5 p-2 rounded-lg bg-slate-950/70 border border-slate-800/80 hover:bg-slate-950 cursor-pointer text-xs"
+                  className="flex items-center space-x-2.5 p-2 rounded-lg bg-slate-950/70 border border-slate-800/80 text-xs"
                 >
                   <input
                     type="checkbox"
                     checked={st.completed}
-                    readOnly
-                    className="rounded border-slate-700 bg-slate-900 text-indigo-600 pointer-events-none"
+                    onChange={() => handleToggleSubtask(st.id)}
+                    className="rounded border-slate-700 bg-slate-900 text-indigo-600"
                   />
                   <span className={`flex-1 ${st.completed ? 'line-through text-slate-500' : 'text-slate-200'}`}>
                     {st.title}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => handlePromoteSubtask(st.id)}
+                    className="px-2 py-0.5 text-[10px] text-slate-400 hover:text-indigo-300 border border-slate-800 rounded uppercase tracking-wide"
+                    title="Promote to acceptance requirement"
+                  >
+                    Require
+                  </button>
                 </div>
               ))}
             </div>

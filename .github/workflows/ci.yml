@@ -77,6 +77,9 @@ jobs:
       - name: Run Acceptance Evidence Lifecycle suite
         run: npx tsx tests/acceptanceEvidenceLifecycle.test.ts
 
+      - name: Run Acceptance Mapping & Criteria Editor suite
+        run: npx tsx tests/acceptanceMapping.test.ts
+
       - name: Run Disposable Repository & Base Drift Suite
         run: npx tsx tests/disposableRepo.test.ts
 
