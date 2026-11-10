@@ -1,6 +1,6 @@
 import { TaskRecord, TaskRunRecord, VerificationRecord, DeliveryRecord } from '../db/schema.js';
 import { TaskStore, LifecycleSnapshot, taskStore as defaultTaskStore } from '../db/database.js';
-import { assessEvidenceValidity, EvidenceValidity } from '../verification/evidenceBinding.js';
+import { assessApprovalCurrency, assessEvidenceValidity, EvidenceValidity } from '../verification/evidenceBinding.js';
 
 export type LifecycleStatus = TaskRecord['status'];
 
@@ -186,6 +186,19 @@ export class LifecycleService {
           reason: 'approval-pending',
           detail: `Delivery approval is "${delivery.approvalStatus}"; Done requires an approved delivery.`,
         };
+      }
+      if (task.requireApproval && delivery.approvalStatus === 'approved') {
+        // The approval flag alone is not evidence of consent: it must certify
+        // the contract and revision being accepted now, otherwise an approval
+        // granted for a superseded spec would authorize Done.
+        const currency = assessApprovalCurrency({ task, delivery, verification });
+        if (!currency.accepted) {
+          return {
+            accept: false,
+            reason: currency.reason,
+            detail: `Done requires an approval bound to the current requirements and evidence: ${currency.detail}`,
+          };
+        }
       }
       if (!request.viaDelivery && !DONE_ALLOWED_FROM.includes(status)) {
         return {
