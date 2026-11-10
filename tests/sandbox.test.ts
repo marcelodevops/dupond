@@ -17,12 +17,6 @@ async function main() {
   console.log(`✔ [PASS] Sandbox runtime detected (${avail.mechanism})`);
 
   // Test 2: Git Worktree creation pinned to recorded base commit
-  const headSha = fs.readFileSync(path.resolve(process.cwd(), '.git/HEAD'), 'utf-8').trim();
-  // Resolve current commit SHA
-  const currentCommit = fs.existsSync(path.resolve(process.cwd(), '.git/refs/heads/feat/task-to-pr-pipeline'))
-    ? fs.readFileSync(path.resolve(process.cwd(), '.git/refs/heads/feat/task-to-pr-pipeline'), 'utf-8').trim()
-    : 'HEAD';
-
   const runId = `test-run-${Date.now()}`;
   const testBranch = `test-worktree-branch-${Date.now()}`;
 
