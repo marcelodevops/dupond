@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { StatusReport, Task, Agent, Epic } from '../types';
+import { apiFetch } from '../lib/api';
 import { 
   FileText, 
   Sparkles, 
@@ -40,7 +41,7 @@ export const StakeholderReports: React.FC<StakeholderReportsProps> = ({
     setIsGenerating(true);
     setSlackDispatchedSuccess(false);
     try {
-      const response = await fetch('/api/orchestrate/generate-report', {
+      const response = await apiFetch('/api/orchestrate/generate-report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

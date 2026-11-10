@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { PlanTemplate, Task, Epic, Agent } from '../types';
+import { apiFetch } from '../lib/api';
 import { SAMPLE_PLANS } from '../data/defaultData';
 import { 
   Sparkles, 
@@ -51,7 +52,7 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
     setParsedResult(null);
 
     try {
-      const response = await fetch('/api/orchestrate/parse-plan', {
+      const response = await apiFetch('/api/orchestrate/parse-plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

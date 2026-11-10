@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { OrchestratorConfig, AutonomyMode, ReasoningLevel, RiskTolerance, CustomProvider, Task, Agent } from '../types';
+import { apiFetch } from '../lib/api';
 import { 
   Sliders, 
   Bot, 
@@ -78,7 +79,7 @@ export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
     setIsTerminalSending(true);
 
     try {
-      const response = await fetch('/api/orchestrate/chat', {
+      const response = await apiFetch('/api/orchestrate/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

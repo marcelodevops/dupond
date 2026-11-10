@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { IntegrationConfig, CustomProvider, CommunicationMessage, Task, RepositoryConfig } from '../types';
+import { apiFetch } from '../lib/api';
 import { 
   Share2, 
   Send, 
@@ -92,7 +93,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
         priority: 'high',
       };
 
-      const response = await fetch('/api/integrations/repository/dispatch', {
+      const response = await apiFetch('/api/integrations/repository/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -139,7 +140,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
         priority: 'critical',
       };
 
-      const response = await fetch('/api/integrations/jira/sync', {
+      const response = await apiFetch('/api/integrations/jira/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -166,7 +167,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
     setIsTestingSlack(true);
     setSlackTestResult(null);
     try {
-      const response = await fetch('/api/integrations/slack/dispatch', {
+      const response = await apiFetch('/api/integrations/slack/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -191,7 +192,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
   const handlePingCustomProvider = async (provider: CustomProvider) => {
     setPingingProviderId(provider.id);
     try {
-      const response = await fetch('/api/custom-providers/ping', {
+      const response = await apiFetch('/api/custom-providers/ping', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

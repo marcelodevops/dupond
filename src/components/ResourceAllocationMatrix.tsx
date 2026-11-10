@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Agent, Task } from '../types';
+import { apiFetch } from '../lib/api';
 import { calculateAgentLoad, balanceWorkload } from '../services/workloadBalancer';
 import { 
   Users, 
@@ -43,7 +44,7 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
     if (!selectedAgentForRoleShift) return;
     setIsSuggestingRole(true);
     try {
-      const response = await fetch('/api/orchestrate/suggest-role', {
+      const response = await apiFetch('/api/orchestrate/suggest-role', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -103,7 +104,7 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
   const handleRunAiAllocation = async () => {
     setIsOptimizing(true);
     try {
-      const response = await fetch('/api/orchestrate/allocate-resources', {
+      const response = await apiFetch('/api/orchestrate/allocate-resources', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tasks, agents }),
