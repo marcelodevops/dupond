@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/marcelodevops/dupond/compare/v0.4.1...v0.4.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* **lifecycle:** close six acceptance-lifecycle gaps found in review of 46518be ([d5f8840](https://github.com/marcelodevops/dupond/commit/d5f884023b5884b33bb29f7784704c4506fec5cc))
+* **lifecycle:** unify acceptance authority, re-bind specs, gate dirty candidates, re-approve deliveries ([b137ec0](https://github.com/marcelodevops/dupond/commit/b137ec05186c71050541f3e65880986ec712c502))
+
 ## [0.4.1](https://github.com/marcelodevops/dupond/compare/v0.4.0...v0.4.1) (2026-11-10)
 
 
