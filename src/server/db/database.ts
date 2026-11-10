@@ -11,7 +11,12 @@ import {
   AuditEventRecord,
   DDL_SCHEMA,
 } from './schema.js';
-import { computeEvidenceBinding } from '../verification/evidenceBinding.js';
+import {
+  computeEvidenceBinding,
+  validateApprovalExpectation,
+  type ApprovalAssessment,
+  type ApprovalExpectation,
+} from '../verification/evidenceBinding.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DEFAULT_DB_PATH = process.env.DUPOND_DB_PATH
@@ -64,6 +69,11 @@ export class TaskStore {
       'ALTER TABLE verification_records ADD COLUMN requirements_fingerprint TEXT;',
       'ALTER TABLE verification_records ADD COLUMN verification_config_fingerprint TEXT;',
       'ALTER TABLE verification_records ADD COLUMN evidence_binding_version TEXT;',
+      'ALTER TABLE delivery_records ADD COLUMN approval_requirements_fingerprint TEXT;',
+      'ALTER TABLE delivery_records ADD COLUMN approval_verification_config_fingerprint TEXT;',
+      'ALTER TABLE delivery_records ADD COLUMN approval_revision_sha TEXT;',
+      'ALTER TABLE delivery_records ADD COLUMN approval_verification_id TEXT;',
+      'ALTER TABLE delivery_records ADD COLUMN approval_binding_version TEXT;',
     ]) {
       try {
         this.db.exec(column);
@@ -362,7 +372,13 @@ export class TaskStore {
           const delivery = this.getDeliveryForRun(latestRun.id);
           if (delivery && delivery.approvalStatus === 'approved') {
             this.db
-              .prepare(`UPDATE delivery_records SET approval_status = 'pending_approval', approved_by = NULL WHERE id = ?`)
+              .prepare(`
+                UPDATE delivery_records
+                SET approval_status = 'pending_approval', approved_by = NULL,
+                    approval_requirements_fingerprint = NULL, approval_verification_config_fingerprint = NULL,
+                    approval_revision_sha = NULL, approval_verification_id = NULL, approval_binding_version = NULL
+                WHERE id = ?
+              `)
               .run(delivery.id);
             invalidatedApprovalRunIds.push(latestRun.id);
             this.recordAudit({
@@ -624,39 +640,101 @@ export class TaskStore {
   }
 
   // --- Delivery Records ---
-  public recordDelivery(delivery: Omit<DeliveryRecord, 'id' | 'deliveredAt'> & { id?: string }): DeliveryRecord {
-    const id = delivery.id || `del-${crypto.randomUUID()}`;
-    const now = new Date().toISOString();
-    const record: DeliveryRecord = {
-      ...delivery,
-      id,
-      deliveredAt: now,
-    };
+  /**
+   * Persists a delivery. When the caller requests an approved delivery it must
+   * also pass the identity the operator approved (revision + contract +
+   * evidence): the approval is validated inside this transaction against the
+   * freshly read task and verification rows, and a stale expectation demotes
+   * the row to pending approval instead of recording an approval bound to
+   * nothing.
+   */
+  public recordDelivery(
+    delivery: Omit<DeliveryRecord, 'id' | 'deliveredAt'> & { id?: string },
+    approval?: ApprovalExpectation,
+  ): DeliveryRecord {
+    return this.transaction(() => {
+      const id = delivery.id || `del-${crypto.randomUUID()}`;
+      const now = new Date().toISOString();
+      const taskId = this.getTaskIdForRun(delivery.runId);
 
-    const stmt = this.db.prepare(`
-      INSERT INTO delivery_records (
-        id, run_id, provider, repo_url, base_commit, delivered_commit,
-        branch, pr_number, pr_url, ci_status, approval_status, approved_by, delivered_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+      let identity: ApprovalExpectation | null = null;
+      let approvalStatus = delivery.approvalStatus;
+      let approvedBy = delivery.approvedBy || null;
+      if (approvalStatus === 'approved') {
+        const assessment = approval
+          ? this.assessApprovalAgainstRun(delivery.runId, delivery.deliveredCommit, approval)
+          : {
+              accepted: false as const,
+              reason: 'unbound-approval',
+              detail: 'An approved delivery was recorded without the contract and revision it certifies.',
+            };
+        if (assessment.accepted) {
+          identity = approval!;
+        } else {
+          approvalStatus = 'pending_approval';
+          approvedBy = null;
+          this.recordAudit({
+            taskId: taskId || undefined,
+            runId: delivery.runId,
+            eventType: 'DELIVERY_APPROVAL_REJECTED',
+            actor: delivery.approvedBy || 'unknown',
+            details: {
+              deliveryId: id,
+              deliveredCommit: delivery.deliveredCommit,
+              reason: assessment.reason,
+              detail: assessment.detail,
+              note: 'Delivery recorded, approval refused; the pull request stands and needs explicit approval against current evidence.',
+            },
+          });
+        }
+      }
 
-    stmt.run(
-      record.id,
-      record.runId,
-      record.provider,
-      record.repoUrl,
-      record.baseCommit,
-      record.deliveredCommit,
-      record.branch,
-      record.prNumber || null,
-      record.prUrl || null,
-      record.ciStatus,
-      record.approvalStatus,
-      record.approvedBy || null,
-      record.deliveredAt,
-    );
+      const record: DeliveryRecord = {
+        ...delivery,
+        id,
+        deliveredAt: now,
+        approvalStatus,
+        approvedBy,
+        approvalRequirementsFingerprint: identity?.requirementsFingerprint ?? null,
+        approvalVerificationConfigFingerprint: identity?.verificationConfigFingerprint ?? null,
+        approvalRevisionSha: identity?.revisionSha ?? null,
+        approvalVerificationId: identity?.verificationId ?? null,
+        approvalBindingVersion: identity?.evidenceBindingVersion ?? null,
+      };
 
-    return record;
+      const stmt = this.db.prepare(`
+        INSERT INTO delivery_records (
+          id, run_id, provider, repo_url, base_commit, delivered_commit,
+          branch, pr_number, pr_url, ci_status, approval_status, approved_by,
+          approval_requirements_fingerprint, approval_verification_config_fingerprint,
+          approval_revision_sha, approval_verification_id, approval_binding_version,
+          delivered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      stmt.run(
+        record.id,
+        record.runId,
+        record.provider,
+        record.repoUrl,
+        record.baseCommit,
+        record.deliveredCommit,
+        record.branch,
+        record.prNumber || null,
+        record.prUrl || null,
+        record.ciStatus,
+        record.approvalStatus,
+        record.approvedBy || null,
+        record.approvalRequirementsFingerprint ?? null,
+        record.approvalVerificationConfigFingerprint ?? null,
+        record.approvalRevisionSha ?? null,
+        record.approvalVerificationId ?? null,
+        record.approvalBindingVersion ?? null,
+        record.deliveredAt,
+      );
+
+      return record;
+    });
   }
 
   public getDeliveryForRun(runId: string): DeliveryRecord | null {
@@ -677,32 +755,105 @@ export class TaskStore {
   }
 
   /**
+   * Validates what an approval is claiming against freshly read rows. Called
+   * inside the write transaction that records the approval, so state that
+   * changed while the caller was preparing the approval is caught here instead
+   * of being certified.
+   */
+  private assessApprovalAgainstRun(
+    runId: string,
+    deliveredCommit: string,
+    expectation: ApprovalExpectation,
+  ): ApprovalAssessment {
+    const taskId = this.getTaskIdForRun(runId);
+    const task = taskId ? this.getTask(taskId) : null;
+    if (!task) {
+      return { accepted: false, reason: 'not-found', detail: `Run ${runId} has no task record to approve against.` };
+    }
+    return validateApprovalExpectation({
+      task,
+      verification: this.getLatestVerification(runId),
+      deliveredCommit,
+      expectation,
+    });
+  }
+
+  /**
    * Records an explicit operator approval against an existing delivery without
    * creating a duplicate delivery or a second pull request. Used when a
    * previously delivered commit is re-verified under changed requirements and
    * must be reapproved before the lifecycle can grant Done again.
+   *
+   * The expectation carries the revision and contract the operator actually
+   * reviewed; it is re-validated inside the same transaction that writes the
+   * approval, so a requirements change or newer evidence that lands mid-flight
+   * makes the approval refuse rather than bind to a contract nobody approved.
    */
-  public markDeliveryApproved(deliveryId: string, approvedBy: string): DeliveryRecord | null {
+  public approveDelivery(
+    deliveryId: string,
+    approvedBy: string,
+    expectation: ApprovalExpectation,
+  ): { approved: boolean; delivery: DeliveryRecord | null; reason?: string; detail?: string } {
     return this.transaction(() => {
       const row = this.db.prepare('SELECT * FROM delivery_records WHERE id = ?').get(deliveryId) as any;
-      if (!row) return null;
-      this.db
-        .prepare(`UPDATE delivery_records SET approval_status = 'approved', approved_by = ? WHERE id = ?`)
-        .run(approvedBy, deliveryId);
-      const record = this.mapDeliveryRow(row);
+      if (!row) {
+        return { approved: false, delivery: null, reason: 'not-found', detail: `Delivery record ${deliveryId} does not exist.` };
+      }
+      const current = this.mapDeliveryRow(row);
+      const taskId = this.getTaskIdForRun(current.runId) || undefined;
+
+      const assessment = this.assessApprovalAgainstRun(current.runId, current.deliveredCommit, expectation);
+      if (!assessment.accepted) {
+        this.recordAudit({
+          taskId,
+          runId: current.runId,
+          eventType: 'DELIVERY_APPROVAL_REJECTED',
+          actor: approvedBy,
+          details: {
+            deliveryId: current.id,
+            deliveredCommit: current.deliveredCommit,
+            expectedRequirementsFingerprint: expectation.requirementsFingerprint,
+            expectedRevisionSha: expectation.revisionSha,
+            expectedVerificationId: expectation.verificationId,
+            reason: assessment.reason,
+            detail: assessment.detail,
+          },
+        });
+        return { approved: false, delivery: current, reason: assessment.reason, detail: assessment.detail };
+      }
+
+      this.db.prepare(`
+        UPDATE delivery_records
+        SET approval_status = 'approved', approved_by = ?,
+            approval_requirements_fingerprint = ?, approval_verification_config_fingerprint = ?,
+            approval_revision_sha = ?, approval_verification_id = ?, approval_binding_version = ?
+        WHERE id = ?
+      `).run(
+        approvedBy,
+        expectation.requirementsFingerprint,
+        expectation.verificationConfigFingerprint,
+        expectation.revisionSha,
+        expectation.verificationId,
+        expectation.evidenceBindingVersion,
+        deliveryId,
+      );
       this.recordAudit({
-        taskId: this.getTaskIdForRun(record.runId) || undefined,
-        runId: record.runId,
+        taskId,
+        runId: current.runId,
         eventType: 'DELIVERY_REAPPROVED',
         actor: approvedBy,
         details: {
-          deliveryId: record.id,
-          deliveredCommit: record.deliveredCommit,
-          prUrl: record.prUrl,
+          deliveryId: current.id,
+          deliveredCommit: current.deliveredCommit,
+          prUrl: current.prUrl,
+          requirementsFingerprint: expectation.requirementsFingerprint,
+          verificationConfigFingerprint: expectation.verificationConfigFingerprint,
+          verificationId: expectation.verificationId,
+          evidenceBindingVersion: expectation.evidenceBindingVersion,
           note: 'Explicit operator approval recorded against the existing delivery; no new pull request created.',
         },
       });
-      return this.getDeliveryForRun(record.runId);
+      return { approved: true, delivery: this.getDeliveryForRun(current.runId) };
     });
   }
 
@@ -873,6 +1024,11 @@ export class TaskStore {
       ciStatus: row.ci_status,
       approvalStatus: row.approval_status,
       approvedBy: row.approved_by,
+      approvalRequirementsFingerprint: row.approval_requirements_fingerprint ?? null,
+      approvalVerificationConfigFingerprint: row.approval_verification_config_fingerprint ?? null,
+      approvalRevisionSha: row.approval_revision_sha ?? null,
+      approvalVerificationId: row.approval_verification_id ?? null,
+      approvalBindingVersion: row.approval_binding_version ?? null,
       deliveredAt: row.delivered_at,
     };
   }

@@ -637,6 +637,265 @@ async function main() {
     assert.strictEqual(postRaceReview.reason, 'changed-verification-config');
     connB.getRawDb().close();
     console.log('✔ [PASS] Acceptance validation and commit are atomic against a second connection; committed changes are seen');
+
+    // ------------------------------------------------------------------
+    // Part 14: acceptance edits posted by the board must reach the
+    // authoritative criteria and revoke what the previous contract granted.
+    // Payloads below are the shapes TaskDetailModal sends through
+    // POST /api/orchestrate/state, built from the authoritative record.
+    // ------------------------------------------------------------------
+    const uiTaskBase = (rec: any, over: Record<string, unknown> = {}): any => ({
+      id: rec.id,
+      key: rec.key,
+      title: rec.title,
+      description: rec.description,
+      epicId: 'evidence-epic',
+      status: rec.status,
+      priority: 'high',
+      assignedAgentId: '',
+      estimatedHours: 1,
+      spentHours: 0,
+      dependencies: [],
+      tags: [],
+      subtasks: (rec.acceptanceCriteria || []).map((c: any) => ({ id: c.id, title: c.title, completed: c.completed })),
+      acceptanceCriteria: (rec.acceptanceCriteria || []).map((c: any) => ({
+        id: c.id, title: c.title, completed: c.completed, ...(c.checkCommand ? { checkCommand: c.checkCommand } : {}),
+      })),
+      verificationCommands: rec.verificationCommands,
+      protectedPaths: rec.protectedPaths,
+      ...over,
+    });
+
+    // The SPA posts the whole board; keep the other entries untouched.
+    const postUi = (edited: any[]) => coordinator.updateState({
+      tasks: [...coordinator.getStateView().tasks.filter((t) => !edited.some((e) => e.key === t.key)), ...edited] as any,
+    });
+
+    const taskE = makeTask({ key: 'AEG-9141', requireApproval: false });
+    await runToReview(taskE);
+    assert.strictEqual(store.getTask(taskE.id)!.status, 'review', 'evidence-bound Review established');
+
+    const recE1 = store.getTask(taskE.id)!;
+    const addRes = postUi([uiTaskBase(recE1, {
+      acceptanceCriteria: [
+        ...recE1.acceptanceCriteria.map((c: any) => ({ ...c })),
+        { id: 'c-div', title: '10 divided by 2 is 5', completed: false },
+      ],
+    })]);
+    assert.strictEqual(addRes.success, true, 'UI payload validates');
+    const recE2 = store.getTask(taskE.id)!;
+    assert.deepStrictEqual(
+      recE2.acceptanceCriteria.map((c: any) => c.id), ['c-add', 'c-div'],
+      'the added requirement reached the authoritative criteria',
+    );
+    assert.notStrictEqual(
+      computeEvidenceBinding(recE2).requirementsFingerprint,
+      computeEvidenceBinding(recE1).requirementsFingerprint,
+      'the added requirement re-binds the evidence',
+    );
+    assert.strictEqual(recE2.status, 'in_progress', 'Review granted under the previous contract is revoked');
+    assert.ok(addRes.rejectedDoneTasks.includes(recE1.key), 'revocation is reported to the caller');
+    const reviewAfterAdd = lifecycle.transition({ taskId: taskE.id, to: 'review', actor: 'worker' });
+    assert.strictEqual(reviewAfterAdd.ok, false, 'old evidence cannot certify a requirement it never checked');
+    assert.strictEqual(reviewAfterAdd.reason, 'stale-requirements');
+    const viewE1 = coordinator.getStateView().tasks.find((t) => t.key === recE1.key)!;
+    assert.strictEqual(viewE1.status, 'in_progress', 'the board projection follows the revoked outcome');
+    assert.deepStrictEqual(viewE1.acceptanceCriteria?.map((c: any) => c.id), ['c-add', 'c-div'], 'the board mirrors authoritative criteria');
+
+    // Editing a title must not rewrite identities: the untouched criterion keeps
+    // its check command, and the edited one keeps both its id and its command.
+    const recE3 = store.getTask(taskE.id)!;
+    const editRes = postUi([uiTaskBase(recE3, {
+      status: 'in_progress',
+      acceptanceCriteria: recE3.acceptanceCriteria.map((c: any) => ({ id: c.id, title: c.id === 'c-div' ? '10 ÷ 2 must equal 5' : c.title, completed: c.completed })),
+    })]);
+    assert.strictEqual(editRes.success, true);
+    const recE4 = store.getTask(taskE.id)!;
+    assert.strictEqual(recE4.acceptanceCriteria.find((c: any) => c.id === 'c-add')!.checkCommand, CHECK, 'unchanged criterion kept its check command');
+    assert.strictEqual(recE4.acceptanceCriteria.find((c: any) => c.id === 'c-div')!.title, '10 ÷ 2 must equal 5', 'edited title persisted');
+    assert.strictEqual(recE4.acceptanceCriteria.find((c: any) => c.id === 'c-div')!.checkCommand, undefined, 'no check command invented');
+    assert.deepStrictEqual(recE4.acceptanceCriteria.map((c: any) => c.id), ['c-add', 'c-div'], 'ids preserved across the edit');
+
+    // Removing a requirement is also an acceptance-relevant change.
+    const recE5 = store.getTask(taskE.id)!;
+    postUi([uiTaskBase(recE5, {
+      acceptanceCriteria: recE5.acceptanceCriteria.filter((c: any) => c.id !== 'c-div').map((c: any) => ({ id: c.id, title: c.title, completed: c.completed })),
+    })]);
+    const recE6 = store.getTask(taskE.id)!;
+    assert.deepStrictEqual(recE6.acceptanceCriteria.map((c: any) => c.id), ['c-add'], 'removal reached the store');
+    assert.strictEqual(recE6.acceptanceCriteria[0].checkCommand, CHECK, 'surviving criterion still carries its command');
+    console.log('✔ [PASS] Acceptance add/edit/remove through the UI updates authoritative criteria and revokes granted acceptance');
+
+    // ------------------------------------------------------------------
+    // Part 15: an omitted criteria field means "not stated"; an explicitly
+    // empty list means "no acceptance requirements". They cannot be the same.
+    // ------------------------------------------------------------------
+    const recF1 = store.getTask(taskE.id)!;
+    const bindingF1 = computeEvidenceBinding(recF1);
+    const omittedPayload = uiTaskBase(recF1, { status: 'in_progress' });
+    delete omittedPayload.acceptanceCriteria;
+    const omittedRes = postUi([omittedPayload]);
+    assert.strictEqual(omittedRes.success, true);
+    const recF2 = store.getTask(taskE.id)!;
+    assert.deepStrictEqual(recF2.acceptanceCriteria.map((c: any) => c.id), ['c-add'], 'an omitted field leaves criteria intact');
+    assert.strictEqual(computeEvidenceBinding(recF2).requirementsFingerprint, bindingF1.requirementsFingerprint, 'omission does not re-bind');
+    assert.strictEqual(omittedRes.rejectedDoneTasks.includes(recF1.key), false, 'nothing was revoked because nothing changed');
+
+    const emptyRes = postUi([uiTaskBase(recF2, { status: 'in_progress', acceptanceCriteria: [] })]);
+    assert.strictEqual(emptyRes.success, true);
+    const recF3 = store.getTask(taskE.id)!;
+    assert.deepStrictEqual(recF3.acceptanceCriteria, [], 'an explicit empty list clears the acceptance contract');
+    assert.notStrictEqual(computeEvidenceBinding(recF3).requirementsFingerprint, bindingF1.requirementsFingerprint, 'clearing re-binds the evidence');
+    assert.ok(emptyRes.rejectedDoneTasks.includes(recF1.key), 'the clear is reported to the caller');
+    postUi([uiTaskBase(store.getTask(taskE.id)!, {
+      acceptanceCriteria: [{ id: 'c-add', title: '2+3=5', completed: false, checkCommand: CHECK }],
+    })]);
+    assert.strictEqual(computeEvidenceBinding(store.getTask(taskE.id)!).requirementsFingerprint, bindingF1.requirementsFingerprint, 'restoring the contract restores its identity');
+    console.log('✔ [PASS] Omitted criteria are preserved while an explicitly empty list clears the contract');
+
+    // ------------------------------------------------------------------
+    // Part 16: ticking a box is not acceptance. Checklist state never enters
+    // the evidence binding and a posted completion cannot grant Review.
+    // ------------------------------------------------------------------
+    const recG1 = store.getTask(taskE.id)!;
+    const bindingG1 = computeEvidenceBinding(recG1);
+    const boxedRes = postUi([uiTaskBase(recG1, {
+      status: 'review',
+      subtasks: recG1.acceptanceCriteria.map((c: any) => ({ id: c.id, title: c.title, completed: true })),
+      acceptanceCriteria: recG1.acceptanceCriteria.map((c: any) => ({ ...c, completed: true })),
+    })]);
+    const recG2 = store.getTask(taskE.id)!;
+    assert.strictEqual(computeEvidenceBinding(recG2).requirementsFingerprint, bindingG1.requirementsFingerprint, 'completion flags are outside the binding');
+    assert.strictEqual(recG2.status, 'in_progress', 'checked boxes did not advance the authoritative status');
+    assert.ok(boxedRes.rejectedDoneTasks.includes(recG1.key), 'the posted Review was refused by the lifecycle gate');
+    assert.strictEqual(coordinator.getStateView().tasks.find((t) => t.key === recG1.key)!.status, 'in_progress', 'the board shows the refused outcome');
+
+    // A requirement with no check coverage stays unverified even when the
+    // evidence row is bound to the very spec that introduced it.
+    const taskH = makeTask({ key: 'AEG-9143', requireApproval: false });
+    const runH = await runToReview(taskH);
+    const recH1 = store.getTask(taskH.id)!;
+    postUi([uiTaskBase(recH1, {
+      acceptanceCriteria: [...recH1.acceptanceCriteria.map((c: any) => ({ ...c })), { id: 'c-ratio', title: 'ratio helper exported', completed: false }],
+    })]);
+    const recH2 = store.getTask(taskH.id)!;
+    const bindingH2 = computeEvidenceBinding(recH2);
+    const attemptH = store.listAttempts(runH.id)[0];
+    store.recordVerification({
+      id: `ver-uncovered-${Date.now()}`,
+      runId: runH.id,
+      attemptId: attemptH.id,
+      revisionSha: store.getLatestVerification(runH.id)!.revisionSha,
+      passed: true,
+      checks: [],
+      criteriaVerified: ['c-add'],
+      revisionTreeSha: store.getLatestVerification(runH.id)!.revisionTreeSha || undefined,
+      requirementsFingerprint: bindingH2.requirementsFingerprint,
+      verificationConfigFingerprint: bindingH2.verificationConfigFingerprint,
+      evidenceBindingVersion: bindingH2.evidenceBindingVersion,
+    });
+    const reviewH = lifecycle.transition({ taskId: taskH.id, to: 'review', actor: 'worker' });
+    assert.strictEqual(reviewH.ok, false, 'an unmapped requirement is never credited');
+    assert.strictEqual(reviewH.reason, 'uncovered-criteria', `Got: ${reviewH.reason}`);
+    assert.ok(reviewH.detail?.includes('c-ratio'), `Got: ${reviewH.detail}`);
+    console.log('✔ [PASS] Checkbox completion grants nothing; an unmapped requirement stays unverified');
+
+    // ------------------------------------------------------------------
+    // Part 17: re-approval is bound to the contract and revision it was made
+    // against. A requirements change that lands between evidence validation
+    // and the approval write must not leave an approval that a later,
+    // differently-bound verification can spend.
+    // ------------------------------------------------------------------
+    const taskJ = makeTask({ key: 'AEG-9144', requireApproval: true });
+    const runJ = await runToReview(taskJ);
+    const verJ = store.getLatestVerification(runJ.id)!;
+    wsManager.createWorktree(runJ.id, runJ.targetBranch!, verJ.revisionSha);
+    const dJ1 = await deliveryService.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-j1', disposableRemoteDir: bareRemote });
+    assert.strictEqual(dJ1.success, true, `initial approved delivery: ${dJ1.error}`);
+    const delJ = store.getDeliveryForRun(runJ.id)!;
+    const prUrlJ = delJ.prUrl;
+    const refsJ = git(['for-each-ref', '--format=%(refname)'], bareRemote).split('\n').filter(Boolean).length;
+    assert.ok(delJ.approvalRequirementsFingerprint, 'an approved delivery records the contract it was granted under');
+
+    // Contract B, then back to A: the evidence is current again, but approval
+    // of the old contract was revoked and is never restored implicitly.
+    const criteriaJ = store.getTask(taskJ.id)!.acceptanceCriteria.map((c: any) => ({ ...c }));
+    store.updateTaskRequirements(taskJ.id, {
+      acceptanceCriteria: [...criteriaJ, { id: 'c-edge', title: 'empty input handled', completed: false, checkCommand: CHECK }],
+    }, 'product-owner');
+    const backToA = store.updateTaskRequirements(taskJ.id, { acceptanceCriteria: criteriaJ }, 'product-owner');
+    assert.strictEqual(backToA.bindingChanged, true);
+    assert.strictEqual(store.getTask(taskJ.id)!.status, 'in_progress');
+    assert.strictEqual(store.getDeliveryForRun(runJ.id)!.approvalStatus, 'pending_approval', 'approval revoked with the contract it certified');
+    const reviewJ = lifecycle.transition({ taskId: taskJ.id, to: 'review', actor: 'verifier' });
+    assert.strictEqual(reviewJ.ok, true, `A-era evidence is current again: ${reviewJ.detail}`);
+
+    // The race: the operator's approval is validated against A, and B is
+    // committed in the window before the approval row is written.
+    const connD = new TaskStore(dbFile);
+    const racingStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'approveDelivery') {
+          return (...args: any[]) => {
+            connD.updateTaskRequirements(taskJ.id, {
+              acceptanceCriteria: [...criteriaJ, { id: 'c-race', title: 'requirement added mid-dispatch', completed: false, checkCommand: CHECK }],
+            }, 'racing-editor');
+            return (target as any).approveDelivery(...args);
+          };
+        }
+        const value = (target as any)[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const racingDelivery = new GitHubDeliveryService(racingStore as any, verifier);
+    const dStale = await racingDelivery.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-stale', disposableRemoteDir: bareRemote });
+    assert.strictEqual(dStale.success, false, 'a stale approval must not be recorded against a newer contract');
+    assert.ok(dStale.blocked === true || dStale.approvalRequired === true, `Got: ${JSON.stringify(dStale)}`);
+    const delAfterRace = store.getDeliveryForRun(runJ.id)!;
+    assert.notStrictEqual(delAfterRace.approvalStatus, 'approved', 'no approval was persisted');
+    assert.strictEqual(delAfterRace.approvedBy, null, 'the stale approver is not recorded');
+    assert.strictEqual(store.getTask(taskJ.id)!.status, 'in_progress', 'the newer contract is not accepted');
+
+    // Fresh verification of the same commit under the new contract, then the
+    // explicit approval the operator must give for it.
+    const recJ3 = store.getTask(taskJ.id)!;
+    const bindingJ3 = computeEvidenceBinding(recJ3);
+    store.recordVerification({
+      id: `ver-race-${Date.now()}`,
+      runId: runJ.id,
+      attemptId: store.listAttempts(runJ.id)[0].id,
+      revisionSha: delJ.deliveredCommit,
+      passed: true,
+      checks: [],
+      criteriaVerified: recJ3.acceptanceCriteria.map((c: any) => c.id),
+      revisionTreeSha: git(['rev-parse', `${delJ.deliveredCommit}^{tree}`], baseRepo),
+      requirementsFingerprint: bindingJ3.requirementsFingerprint,
+      verificationConfigFingerprint: bindingJ3.verificationConfigFingerprint,
+      evidenceBindingVersion: bindingJ3.evidenceBindingVersion,
+    });
+    const reviewJ2 = lifecycle.transition({ taskId: taskJ.id, to: 'review', actor: 'verifier' });
+    assert.strictEqual(reviewJ2.ok, true, `current evidence for the new contract: ${reviewJ2.detail}`);
+    assert.strictEqual(store.getDeliveryForRun(runJ.id)!.approvalStatus, 'pending_approval', 'the refused approval is still outstanding');
+
+    const dFresh = await deliveryService.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-j2', disposableRemoteDir: bareRemote });
+    assert.strictEqual(dFresh.success, true, `explicit reapproval: ${dFresh.error}`);
+    assert.ok(dFresh.message?.includes('Existing pull request reconciled'), `Got: ${dFresh.message}`);
+    assert.strictEqual(dFresh.prUrl, prUrlJ, 'the PR is reused, not duplicated');
+    const delJ2 = store.getDeliveryForRun(runJ.id)!;
+    assert.strictEqual(delJ2.id, delJ.id, 'same delivery record carries the fresh approval');
+    assert.strictEqual(delJ2.approvalStatus, 'approved');
+    assert.strictEqual(delJ2.approvedBy, 'op-j2');
+    assert.strictEqual(delJ2.approvalRequirementsFingerprint, bindingJ3.requirementsFingerprint, 'approval bound to the contract it certified');
+    assert.strictEqual(delJ2.approvalRevisionSha, delJ.deliveredCommit, 'approval bound to the exact candidate revision');
+    assert.strictEqual(store.getTask(taskJ.id)!.status, 'done', 'Done granted on the freshly bound approval');
+    assert.strictEqual(
+      git(['for-each-ref', '--format=%(refname)'], bareRemote).split('\n').filter(Boolean).length,
+      refsJ, 'no extra refs from the refused attempt or the reconcile');
+    const auditsJ = store.listAuditEvents(taskJ.id);
+    assert.ok(auditsJ.some((a: any) => a.eventType === 'DELIVERY_APPROVAL_REJECTED'), 'the refused approval is audited');
+    assert.ok(auditsJ.some((a: any) => a.eventType === 'DELIVERY_REAPPROVED'), 'the granted approval is audited');
+    connD.getRawDb().close();
+    console.log('✔ [PASS] Reapproval is atomically bound to the current contract and revision; stale approvals are refused');
   } finally {
     try {
       const leftover = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: baseRepo, encoding: 'utf-8' })
