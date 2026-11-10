@@ -34,6 +34,7 @@ if (geminiApiKey) {
 }
 
 import { coordinator, isMaskedSecret } from './src/server/coordinator.js';
+import { defaultLifecycleService } from './src/server/lifecycle/lifecycleService.js';
 import { balanceWorkload, calculateAgentLoad, buildGeminiOptimizerPrompt } from './src/services/workloadBalancer.js';
 import { handleRepositoryDispatch } from './src/server/deliveryHandler.js';
 import { safeRequest, EgressBlockedError } from './src/server/egress.js';
@@ -344,10 +345,54 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
     try {
       // Execute the real worker step through the central coordinator
       const workerResult = await coordinator.executeWorkerStep(task, agent);
+
+      // Store-backed tasks advance only through the authoritative lifecycle
+      // service: Review requires evidence bound to the current spec, and Done
+      // waits for a recorded delivery (plus approval when the task requires
+      // it). The posted task blob cannot grant either.
+      const dbTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+      if (dbTask) {
+        let fresh = dbTask;
+        if (dbTask.status !== 'review') {
+          const transition = defaultLifecycleService.transition({
+            taskId: dbTask.id,
+            to: 'review',
+            actor: 'api',
+            reason: 'Worker step executed via orchestration API',
+          });
+          fresh = taskStore.getTask(dbTask.id) || dbTask;
+          if (!transition.ok) {
+            return res.status(400).json({
+              success: false,
+              blocked: true,
+              error: `Lifecycle service did not grant Review for ${task.key}: ${transition.detail || transition.reason}`,
+              authoritativeStatus: fresh.status,
+              evidence: transition.evidence,
+            });
+          }
+        }
+        const nextStatus = fresh.status;
+        return res.json({
+          success: true,
+          runId: workerResult.runId,
+          roleAssumed: `${agent.role} (Assumed for ${task.key})`,
+          reasoning: `Inspected workspace and executed verified work for ${task.key}. Authoritative status is ${String(nextStatus).toUpperCase()}. ${nextStatus === 'review' ? 'Done requires a recorded delivery and approval, not an agent step.' : ''}`,
+          actionTaken: workerResult.actionTaken,
+          deliverableOutput: workerResult.deliverableContent,
+          nextStatus,
+          subtasksCompleted: workerResult.subtasksCompleted,
+          communicationMessage: {
+            content: `Executed worker step for ${task.key} (${task.title}). Authoritative status: ${String(nextStatus).toUpperCase()}.`,
+            messageType: 'status_update',
+          },
+        });
+      }
+
       const isDone = task.status === 'review';
       const nextStatus = isDone ? 'done' : task.status === 'in_progress' ? 'review' : 'in_progress';
 
-      // Enforce centralized quality gate and dependency verification before advancing to 'done'
+      // Legacy JSON-only tasks: centralized artifact-based quality gate before
+      // advancing to 'done'.
       if (nextStatus === 'done') {
         const taskForVerification = {
           ...task,
@@ -752,6 +797,9 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
           repoUrl: repoConfig?.repoUrl,
           targetBaseBranch: repoConfig?.defaultBranch || 'main',
         });
+        // Delivery may have granted Done (or revoked acceptance) in the
+        // authoritative store; project that outcome into the UI state.
+        coordinator.projectAuthoritativeStatuses();
         return res.status(deliveryResult.status).json(deliveryResult);
       }
     }
@@ -775,6 +823,7 @@ app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
       repoUrl,
       targetBaseBranch,
     });
+    coordinator.projectAuthoritativeStatuses();
     return res.status(result.status).json(result);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Delivery dispatch failed' });

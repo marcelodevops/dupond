@@ -298,6 +298,7 @@ export class RepairCoordinator {
           verificationCommands: task.verificationCommands,
           protectedPaths: task.protectedPaths,
           acceptanceCriteria: task.acceptanceCriteria,
+          description: task.description,
           runId,
           abortSignal: abortController.signal,
         });

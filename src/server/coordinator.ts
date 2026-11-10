@@ -120,7 +120,7 @@ export interface VerificationResult {
   sha256?: string;
 }
 
-class CoordinatorEngine {
+export class CoordinatorEngine {
   private state: ServerState;
   private daemonTimer: NodeJS.Timeout | null = null;
   private isProcessingTick = false;
@@ -128,6 +128,53 @@ class CoordinatorEngine {
   constructor() {
     this.ensureDirectories();
     this.state = this.loadStateFromDisk();
+    // On boot the store is the source of truth for lifecycle outcomes that
+    // happened in a previous process (delivered work, revocations, restarts
+    // that interrupted a run). Reconcile abandoned runs, then project the
+    // persisted statuses into the UI before anyone reads the JSON blob.
+    try {
+      taskStore.reconcileOnRestart();
+      this.projectAuthoritativeStatuses();
+    } catch (err) {
+      console.warn('Startup lifecycle reconciliation unavailable:', err);
+    }
+  }
+
+  /**
+   * The JSON board has no "blocked" column; a blocked store record projects to
+   * todo with the blocking context carried in the comment. Never invents an
+   * acceptance-bearing status.
+   */
+  private toUiStatus(status: string): TaskStatus {
+    return (status === 'blocked' ? 'todo' : status) as TaskStatus;
+  }
+
+  /**
+   * Copies authoritative task statuses from the store into the JSON state the
+   * UI renders. Returns the number of entries changed. This is projection only
+   * — it never grants or revokes acceptance; the store already holds the
+   * outcome of the lifecycle service's evidence gates.
+   */
+  public projectAuthoritativeStatuses(): number {
+    let changed = 0;
+    const nextTasks = this.state.tasks.map((task) => {
+      const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
+      if (!dbTask) return task;
+      const projected = this.toUiStatus(dbTask.status);
+      if (projected === task.status) return task;
+      changed += 1;
+      return {
+        ...task,
+        status: projected,
+        lastAgentComment: `Authoritative lifecycle: status projected from persisted record "${dbTask.status}".`,
+        lastUpdated: 'Just now',
+      };
+    });
+    if (changed > 0) {
+      this.state.tasks = nextTasks;
+      this.saveStateToDisk();
+    }
+    return changed;
   }
 
   private ensureDirectories() {
@@ -278,6 +325,47 @@ class CoordinatorEngine {
       validatedPartial.tasks = validatedPartial.tasks.map((task) => {
         const existing = existingTasks.find((t) => t.id === task.id || t.key === task.key);
 
+        // Acceptance-relevant edits arriving through this supported API must
+        // reach the authoritative task: updateTaskRequirements recomputes the
+        // evidence binding and, when it changed, transactionally revokes the
+        // Review/Done acceptance that the old spec authorized.
+        let requirementsRebound = false;
+        const dbTaskForEdit = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+        if (dbTaskForEdit) {
+          // A posted acceptanceCriteria list is authoritative for the mirror.
+          // Without one, subtasks only stand in for criteria when the store
+          // record has none (legacy shape); existing criteria are left alone
+          // rather than silently replaced by subtask ids.
+          const wireCriteria = (task.acceptanceCriteria && task.acceptanceCriteria.length > 0)
+            ? task.acceptanceCriteria
+            : (dbTaskForEdit.acceptanceCriteria.length === 0 && (task.subtasks || []).length > 0)
+              ? (task.subtasks || []).map((s) => ({ id: s.id, title: s.title, completed: s.completed, checkCommand: s.checkCommand }))
+              : dbTaskForEdit.acceptanceCriteria;
+          const updates = {
+            description: task.description ?? '',
+            acceptanceCriteria: wireCriteria.map((c) => ({
+              id: String(c.id),
+              title: String(c.title ?? ''),
+              completed: Boolean(c.completed),
+              ...(c.checkCommand ? { checkCommand: String(c.checkCommand) } : {}),
+            })),
+            verificationCommands: (task.verificationCommands ?? dbTaskForEdit.verificationCommands) as typeof dbTaskForEdit.verificationCommands,
+            protectedPaths: task.protectedPaths ?? dbTaskForEdit.protectedPaths,
+          };
+          const requirementsChanged =
+            updates.description !== (dbTaskForEdit.description ?? '') ||
+            JSON.stringify(updates.acceptanceCriteria) !== JSON.stringify(dbTaskForEdit.acceptanceCriteria) ||
+            JSON.stringify(updates.verificationCommands) !== JSON.stringify(dbTaskForEdit.verificationCommands) ||
+            JSON.stringify(updates.protectedPaths) !== JSON.stringify(dbTaskForEdit.protectedPaths);
+          if (requirementsChanged) {
+            const outcome = taskStore.updateTaskRequirements(dbTaskForEdit.id, updates, 'ui');
+            if (outcome.bindingChanged) {
+              requirementsRebound = true;
+              rejectedDoneTasks.push(task.key);
+            }
+          }
+        }
+
         // Projection rule: for tasks registered in the authoritative store,
         // acceptance-bearing statuses are owned by the lifecycle service and
         // its evidence gates. A posted state blob is clamped to the persisted
@@ -288,7 +376,7 @@ class CoordinatorEngine {
             rejectedDoneTasks.push(task.key);
             return {
               ...task,
-              status: dbTask.status as TaskStatus,
+              status: this.toUiStatus(dbTask.status),
               lastAgentComment: `Authoritative lifecycle: "${task.status}" is granted only by evidence-bound transitions, not by posted state. Showing persisted status "${dbTask.status}".`,
               lastUpdated: 'Just now',
             };
@@ -335,6 +423,13 @@ class CoordinatorEngine {
               lastUpdated: 'Just now',
             };
           }
+        }
+        if (requirementsRebound) {
+          return {
+            ...task,
+            lastAgentComment: 'Requirements rebound: acceptance-relevant fields changed, so prior verification evidence and any granted Review/Done acceptance were revoked. Fresh verification is required.',
+            lastUpdated: 'Just now',
+          };
         }
         return task;
       });
@@ -653,8 +748,15 @@ class CoordinatorEngine {
     const codeFilePath = path.resolve(taskArtifactDir, 'implementation.js');
     const testFilePath = path.resolve(taskArtifactDir, 'spec.test.js');
 
-    // Check if pre-existing static artifact files exist on disk (for backward-compatible test suites)
-    const hasStaticArtifacts = isPathLexicallyContained(ARTIFACTS_DIR, taskArtifactDir) &&
+    let storeTask = taskStore.getTask(task.key) || taskStore.getTask(task.id);
+
+    // Pre-existing static artifact files are a legacy deliverable format used by
+    // tasks that live only in the JSON state. Once a task is registered in the
+    // authoritative store its evidence must come from real worktree
+    // verification; a mutable `.dupond_artifacts` snippet on disk can never
+    // substitute for it.
+    const hasStaticArtifacts = !storeTask &&
+      isPathLexicallyContained(ARTIFACTS_DIR, taskArtifactDir) &&
       readTextIfExists(codeFilePath) !== null &&
       readTextIfExists(testFilePath) !== null;
 
@@ -701,7 +803,6 @@ ${implementationCode.slice(0, 500)}...
       };
     }
 
-    let storeTask = taskStore.getTask(task.key) || taskStore.getTask(task.id);
     if (!storeTask) {
       const configuredRepo = task.targetRepo ||
         this.state.integrationConfig?.repository?.repoUrl ||
@@ -862,9 +963,14 @@ ${implementationCode.slice(0, 500)}...
     this.isProcessingTick = true;
 
     try {
+      // The persisted lifecycle outcome always wins over the JSON entry before
+      // any decision: after a delivery, a revocation, or a refused Review the
+      // store holds the truth and the tick must not act on a stale status.
+      this.projectAuthoritativeStatuses();
       const { tasks, agents } = this.state;
 
-      // 1. Check tasks in 'in_progress' -> advance to 'review' by running real coding worker
+      // 1. Check tasks in 'in_progress' -> run the real coding worker; Review
+      // is then granted only by the authoritative lifecycle service.
       const inProgressTask = tasks.find((t) => t.status === 'in_progress');
       if (inProgressTask) {
         const agent = agents.find((a) => a.id === inProgressTask.assignedAgentId) || agents[1];
@@ -877,13 +983,36 @@ ${implementationCode.slice(0, 500)}...
         }));
         const updatedDeliverables = [...(inProgressTask.deliverables || []), workerResult.deliverableContent];
 
+        // Store-backed work: the repair loop already routed the Review attempt
+        // through the lifecycle service against bound evidence. If it did not
+        // grant Review, the daemon must not either.
+        const dbTwin = taskStore.getTask(inProgressTask.id) || taskStore.getTask(inProgressTask.key);
+        let projectedStatus: TaskStatus = 'review';
+        let refusalDetail = '';
+        if (dbTwin) {
+          let fresh = taskStore.getTask(dbTwin.id) || dbTwin;
+          if (fresh.status !== 'review') {
+            const outcome = defaultLifecycleService.transition({
+              taskId: fresh.id,
+              to: 'review',
+              actor: 'daemon',
+              reason: 'Autonomous worker step completed',
+            });
+            fresh = taskStore.getTask(fresh.id) || fresh;
+            projectedStatus = outcome.ok ? 'review' : this.toUiStatus(fresh.status);
+            if (!outcome.ok) refusalDetail = outcome.detail || outcome.reason || 'refused';
+          }
+        }
+
         const updatedTask: Task = {
           ...inProgressTask,
-          status: 'review',
+          status: projectedStatus,
           subtasks: updatedSubtasks,
           deliverables: updatedDeliverables,
           spentHours: (inProgressTask.spentHours || 0) + 4,
-          lastAgentComment: `${agent.name}: Generated real code & tests (${workerResult.fileSize}B, SHA: ${workerResult.sha256.slice(0, 8)}). Ready for Quality Gate.`,
+          lastAgentComment: projectedStatus === 'review'
+            ? `${agent.name}: Generated real code & tests (${workerResult.fileSize}B, SHA: ${workerResult.sha256.slice(0, 8)}). Ready for Quality Gate.`
+            : `${agent.name}: Worker finished, but the lifecycle service did not grant Review: ${refusalDetail}`,
           lastUpdated: 'Just now',
         };
 
@@ -894,18 +1023,29 @@ ${implementationCode.slice(0, 500)}...
           senderName: agent.name,
           senderRole: agent.role,
           recipientId: 'all',
-          content: `Generated code deliverable for ${inProgressTask.key} at ${workerResult.artifactFilePath}. Advanced to REVIEW stage.`,
-          messageType: 'deliverable',
+          content: projectedStatus === 'review'
+            ? `Generated code deliverable for ${inProgressTask.key} at ${workerResult.artifactFilePath}. Advanced to REVIEW stage.`
+            : `Worker step for ${inProgressTask.key} completed without Review: ${refusalDetail}. Status projected from the authoritative store ("${projectedStatus.toUpperCase()}").`,
+          messageType: projectedStatus === 'review' ? 'deliverable' : 'blocker',
           taskId: inProgressTask.key,
         });
 
         this.state.cycleCount += 1;
         this.saveStateToDisk();
-        return { advanced: true, targetTask: updatedTask, action: 'advanced_to_review' };
+        return {
+          advanced: true,
+          targetTask: updatedTask,
+          action: projectedStatus === 'review' ? 'advanced_to_review' : 'review_refused_by_lifecycle',
+        };
       }
 
-      // 2. Check tasks in 'review' -> run STRICT verification gates
-      const reviewTask = tasks.find((t) => t.status === 'review');
+      // 2. Legacy JSON-only tasks in 'review' -> run STRICT verification gates.
+      // Store-backed verified work is deliberately excluded: it waits in
+      // Review until the delivery and approval conditions are satisfied, and
+      // Done is granted only by the lifecycle service after a recorded,
+      // approved delivery. No artifact-based gate may certify it here.
+      const reviewTask = tasks.find((t) =>
+        t.status === 'review' && !(taskStore.getTask(t.id) || taskStore.getTask(t.key)));
       if (reviewTask) {
         const verification = await this.verifyTaskQualityGates(reviewTask);
 
@@ -977,6 +1117,32 @@ ${implementationCode.slice(0, 500)}...
 
       if (todoTask) {
         const agent = agents.find((a) => a.id === todoTask.assignedAgentId) || agents[1];
+
+        // Store-backed tasks may only start through the lifecycle service so a
+        // revocation, unmet dependency, or open claim cannot be bypassed by a
+        // direct JSON status write.
+        const dbTodo = taskStore.getTask(todoTask.id) || taskStore.getTask(todoTask.key);
+        if (dbTodo) {
+          const outcome = defaultLifecycleService.transition({
+            taskId: dbTodo.id,
+            to: 'in_progress',
+            actor: 'daemon',
+            reason: 'Dependencies verified clear; daemon claimed task for execution',
+          });
+          if (!outcome.ok) {
+            const fresh = taskStore.getTask(dbTodo.id);
+            const updatedTask: Task = {
+              ...todoTask,
+              status: this.toUiStatus(fresh?.status ?? dbTodo.status),
+              lastAgentComment: `Lifecycle service refused the claim: ${outcome.detail || outcome.reason}`,
+              lastUpdated: 'Just now',
+            };
+            this.state.tasks = tasks.map((t) => (t.id === todoTask.id ? updatedTask : t));
+            this.saveStateToDisk();
+            return { advanced: true, targetTask: updatedTask, action: 'claim_refused_by_lifecycle' };
+          }
+        }
+
         const updatedTask: Task = {
           ...todoTask,
           status: 'in_progress',

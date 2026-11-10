@@ -248,12 +248,18 @@ async function main() {
   console.log('✔ [PASS] Modifying protected acceptance checks fails authoritative integrity verification');
 
   // Test 5: Criteria lacking explicit checkCommand are not automatically credited when general checks pass
+  // Run inside a clean, freshly created workspace: the authoritative verifier
+  // refuses any worktree with uncommitted changes before executing commands,
+  // so pointing it at the shared checkout would fail for the wrong reason.
+  const fallbackRunId = `fallback-check-${Date.now()}`;
+  const fallbackWorktree = workspaceManager.createWorktree(fallbackRunId, `test/${fallbackRunId}`, 'HEAD');
   const fallbackCheck = await verifier.verify({
-    worktreePath: process.cwd(),
-    baseCommit: 'HEAD',
+    worktreePath: fallbackWorktree.worktreePath,
+    baseCommit: fallbackWorktree.baseCommit,
     verificationCommands: ['echo "general build check passed"'],
     acceptanceCriteria: [{ id: 'unmapped-crit', title: 'Unmapped Acceptance Criterion' }],
   });
+  workspaceManager.cleanupWorktree(fallbackWorktree.worktreePath, fallbackWorktree.branch);
   assert.strictEqual(fallbackCheck.passed, false, 'Verification must fail when criteria lack explicit check evidence');
   assert.strictEqual(fallbackCheck.criteriaVerified.includes('unmapped-crit'), false, 'Unchecked criterion must not be credited');
   assert.ok(fallbackCheck.failureReason?.includes('unmapped-crit'), 'Failure reason must mention unmet criterion');

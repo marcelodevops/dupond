@@ -46,7 +46,7 @@ async function main() {
     verifiedRefForRun,
     EVIDENCE_BINDING_VERSION,
   } = await import('../src/server/verification/evidenceBinding.ts');
-  const { coordinator } = await import('../src/server/coordinator.ts');
+  const { coordinator, CoordinatorEngine } = await import('../src/server/coordinator.ts');
   const { taskStore: prodStore } = await import('../src/server/db/database.ts');
 
   const store = new TaskStore(dbFile);
@@ -319,6 +319,12 @@ async function main() {
       taskId: task5.id, expectedFrom: ['todo'], to: 'done', actor: 'stale-worker',
     });
     assert.strictEqual(lost, false);
+    // Fail-closed contract: an acceptance-granting CAS is refused even when
+    // the status expectation matches, unless it carries a revalidating guard.
+    const noGuardGrant = otherConnection.transitionTaskCas({
+      taskId: task5.id, expectedFrom: ['review'], to: 'done', actor: 'stale-worker',
+    });
+    assert.strictEqual(noGuardGrant, false, 'guard-less Review/Done CAS must not grant acceptance');
     assert.strictEqual(store.getTask(task5.id)!.status, 'review');
     const casAudits = store.listAuditEvents(task5.id).filter((a) => a.eventType === 'TASK_LIFECYCLE_TRANSITION');
     assert.strictEqual(casAudits.length, 1, 'only the winning transition is audited');
@@ -326,10 +332,11 @@ async function main() {
     console.log('✔ [PASS] Concurrent transitions are serialized by compare-and-swap with transactional audit');
 
     // ------------------------------------------------------------------
-    // Part 7: restart persistence — a reopened store keeps bound evidence
-    // and statuses; reconcile does not rewrite verified history.
+    // Part 7: restart persistence — a second connection re-reads the same
+    // file and keeps bound evidence and statuses; reconcile does not rewrite
+    // verified history. (The original handle stays open for the scenarios
+    // that follow; the reopened connection proves disk durability.)
     // ------------------------------------------------------------------
-    store.getRawDb().close();
     const reopened = new TaskStore(dbFile);
     const persistedVer = reopened.getLatestVerification(run1.id)!;
     assert.strictEqual(persistedVer.requirementsFingerprint, ver1.requirementsFingerprint, 'binding survives restart');
@@ -341,7 +348,7 @@ async function main() {
       true,
       'the fresh post-change evidence is still valid after restart',
     );
-    assert.strictEqual(reopened.getTask(task2.id)!.status, 'review', 'lifecycle status survives restart');
+    assert.strictEqual(reopened.getTask(task2.id)!.status, 'in_progress', 'revoked acceptance stays revoked across restart');
     const reconciliation = reopened.reconcileOnRestart();
     assert.ok(reconciliation.reconciledRuns >= 0 && reconciliation.unclaimedTasks >= 0);
     console.log('✔ [PASS] Evidence binding and lifecycle status survive process restart');
@@ -402,6 +409,234 @@ async function main() {
     assert.strictEqual(doneAttempt.success, false, 'Done additionally requires a recorded delivery');
     assert.ok(doneAttempt.error?.includes('delivery'), `Got: ${doneAttempt.error}`);
     console.log('✔ [PASS] UI/JSON state is a projection: acceptance statuses require the authoritative lifecycle service');
+
+    // ------------------------------------------------------------------
+    // Part 9: a description-only change is an acceptance-relevant change.
+    // The specification is folded into the requirements fingerprint, and an
+    // edit arriving through the supported UI write path must update the
+    // authoritative task and revoke the acceptance the old spec granted.
+    // ------------------------------------------------------------------
+    const taskD = makeTask({ key: 'EVID-9', requireApproval: false });
+    const runD = await runToReview(taskD);
+    const verD = store.getLatestVerification(runD.id)!;
+    assert.strictEqual(store.getTask(taskD.id)!.status, 'review');
+
+    const specChange = store.updateTaskRequirements(taskD.id, {
+      description: store.getTask(taskD.id)!.description + ' — wording only, same commands and criteria',
+    }, 'product-owner');
+    assert.strictEqual(specChange.bindingChanged, true, 'description alone re-binds the evidence');
+    assert.strictEqual(specChange.revokedAcceptanceFrom, 'review', 'granted Review is revoked by the rebind');
+    assert.strictEqual(store.getTask(taskD.id)!.status, 'in_progress', 'demoted out of Review');
+    const auditsD = store.listAuditEvents(taskD.id);
+    assert.ok(auditsD.some((a) => a.eventType === 'TASK_ACCEPTANCE_REVOKED'), 'revocation audited');
+    assert.strictEqual(store.getLatestVerification(runD.id)!.id, verD.id, 'historical evidence row preserved for audit');
+    const staleAfterDesc = lifecycle.transition({ taskId: taskD.id, to: 'review', actor: 'worker' });
+    assert.strictEqual(staleAfterDesc.ok, false);
+    assert.strictEqual(staleAfterDesc.reason, 'stale-requirements');
+    console.log('✔ [PASS] Description-only specification change re-binds evidence and revokes granted Review');
+
+    // The UI write path (coordinator.updateState) must not be able to edit
+    // acceptance-relevant fields without the authoritative store noticing.
+    const twinBefore = prodStore.getTask(dbTwin.id)!;
+    const bindingBefore9b = computeEvidenceBinding(twinBefore);
+    const editedBlob = coordinator.getStateView().tasks.map((t) => t.key === seedTask.key
+      ? {
+          ...t,
+          description: 'Clarified specification wording only',
+          acceptanceCriteria: twinBefore.acceptanceCriteria.map((c) => ({ ...c })),
+          verificationCommands: [...twinBefore.verificationCommands],
+          protectedPaths: [...twinBefore.protectedPaths],
+        }
+      : t);
+    const editResult = coordinator.updateState({ tasks: editedBlob });
+    assert.strictEqual(editResult.success, true);
+    const twinAfter9b = prodStore.getTask(dbTwin.id)!;
+    assert.strictEqual(twinAfter9b.description, 'Clarified specification wording only', 'edit reached the authoritative task');
+    const bindingAfter9b = computeEvidenceBinding(twinAfter9b);
+    assert.notStrictEqual(bindingAfter9b.requirementsFingerprint, bindingBefore9b.requirementsFingerprint, 'spec change re-binds requirements');
+    assert.strictEqual(bindingAfter9b.verificationConfigFingerprint, bindingBefore9b.verificationConfigFingerprint, 'config alone was not touched');
+    assert.strictEqual(twinAfter9b.status, 'in_progress', 'Review on the twin was revoked through the UI edit path');
+    assert.ok(editResult.rejectedDoneTasks.includes(seedTask.key), 'revocation surfaces to the caller');
+    const clamped9b = coordinator.getStateView().tasks.find((t) => t.key === seedTask.key)!;
+    assert.strictEqual(clamped9b.status, 'in_progress', 'UI projection shows the revoked status, not the posted one');
+    console.log('✔ [PASS] Supported editing paths update the authoritative task and invalidate its evidence');
+
+    // ------------------------------------------------------------------
+    // Part 10: same-commit re-approval after revocation. A delivery for an
+    // already-PR'd commit must not silently restore approval: fresh explicit
+    // operator approval is required, the PR is reused without duplication,
+    // and Done is applied through the lifecycle service.
+    // ------------------------------------------------------------------
+    const ver1b = store.getLatestVerification(run1b.id)!;
+    // Recreate the run worktree at the verified revision: delivery resolves
+    // the delivered commit from the run's workspace HEAD.
+    wsManager.createWorktree(run1b.id, run1b.targetBranch!, ver1b.revisionSha);
+    const d1 = await deliveryService.dispatchDelivery({
+      runId: run1b.id, isApproved: true, approvedBy: 'op-1', disposableRemoteDir: bareRemote,
+    });
+    assert.strictEqual(d1.success, true, `First delivery should succeed: ${d1.error}`);
+    assert.strictEqual(store.getTask(task1.id)!.status, 'done');
+    const del1 = store.getDeliveryForRun(run1b.id)!;
+
+    const refCountAfterD1 = git(['for-each-ref', '--format=%(refname)'], bareRemote).split('\n').filter(Boolean).length;
+
+    const rebind10 = store.updateTaskRequirements(task1.id, { description: 're-approved under tightened wording' }, 'product-owner');
+    assert.strictEqual(rebind10.bindingChanged, true);
+    assert.strictEqual(rebind10.revokedAcceptanceFrom, 'done');
+    assert.strictEqual(store.getTask(task1.id)!.status, 'in_progress');
+    assert.strictEqual(store.getDeliveryForRun(run1b.id)!.approvalStatus, 'pending_approval');
+
+    // Fresh verification of the *same* commit under the new binding.
+    const att1b = store.listAttempts(run1b.id)[store.listAttempts(run1b.id).length - 1];
+    const binding10 = computeEvidenceBinding(store.getTask(task1.id)!);
+    store.recordVerification({
+      runId: run1b.id,
+      attemptId: att1b.id,
+      revisionSha: del1.deliveredCommit!,
+      passed: true,
+      checks: [],
+      criteriaVerified: ['c-add', 'c-add2'],
+      revisionTreeSha: git(['rev-parse', `${del1.deliveredCommit}^{tree}`], baseRepo),
+      requirementsFingerprint: binding10.requirementsFingerprint,
+      verificationConfigFingerprint: binding10.verificationConfigFingerprint,
+      evidenceBindingVersion: binding10.evidenceBindingVersion,
+    });
+    const reReview = lifecycle.transition({ taskId: task1.id, to: 'review', actor: 'verifier' });
+    assert.strictEqual(reReview.ok, true, `Same commit re-verified under the new spec: ${reReview.detail}`);
+
+    // Without explicit fresh approval the reused PR stays blocked.
+    const d2 = await deliveryService.dispatchDelivery({ runId: run1b.id, isApproved: false, disposableRemoteDir: bareRemote });
+    assert.strictEqual(d2.success, false, 'reused delivery must never self-restore approval');
+    assert.strictEqual(d2.approvalRequired, true);
+    assert.strictEqual(store.getTask(task1.id)!.status, 'review', 'still waiting for the operator');
+
+    const d3 = await deliveryService.dispatchDelivery({
+      runId: run1b.id, isApproved: true, approvedBy: 'op-2', disposableRemoteDir: bareRemote,
+    });
+    assert.strictEqual(d3.success, true, `Re-approval delivery: ${d3.error}`);
+    assert.ok(d3.message?.includes('Existing pull request reconciled'), `Got: ${d3.message}`);
+    assert.ok(d3.message?.includes('fresh operator approval'), `Got: ${d3.message}`);
+    assert.strictEqual(d3.prUrl, del1.prUrl, 'existing PR reused, none duplicated');
+    const refCountAfterD3 = git(['for-each-ref', '--format=%(refname)'], bareRemote).split('\n').filter(Boolean).length;
+    assert.strictEqual(refCountAfterD3, refCountAfterD1, 'no new branch or PR was created by the reconcile');
+    const del3 = store.getDeliveryForRun(run1b.id)!;
+    assert.strictEqual(del3.id, del1.id, 'same delivery record carries the fresh approval');
+    assert.strictEqual(del3.approvalStatus, 'approved');
+    assert.strictEqual(del3.approvedBy, 'op-2');
+    assert.strictEqual(store.getTask(task1.id)!.status, 'done', 'Done applied through the lifecycle service on re-approval');
+    const audits10 = store.listAuditEvents(task1.id);
+    assert.ok(audits10.some((a) => a.eventType === 'DELIVERY_REAPPROVED'), 're-approval audited');
+    assert.ok(audits10.some((a) => a.eventType === 'TASK_ACCEPTANCE_REVOKED'), 'revocation audited');
+    console.log('✔ [PASS] Same-commit redelivery requires explicit fresh approval, reuses the PR, and re-applies Done');
+
+    // ------------------------------------------------------------------
+    // Part 11: exact-content gates — a dirty candidate is refused before
+    // any command runs, and verification commands that mutate the worktree
+    // or move HEAD invalidate their own evidence.
+    // ------------------------------------------------------------------
+    const wt11 = wsManager.createWorktree(`evid11-${Date.now()}`, `dupond/evid11-${Date.now()}`, 'HEAD');
+    // Local git tooling on some machines drops an untracked .gitignore into
+    // new worktrees; the exact-content gates are the point of this part, so
+    // normalize the candidate to its revision before probing.
+    git(['clean', '-fdx'], wt11.worktreePath);
+    const OK_CMD = 'node -e "process.exit(0)"';
+    const base11 = {
+      worktreePath: wt11.worktreePath,
+      baseCommit: wt11.baseCommit,
+      verificationCommands: [OK_CMD],
+      acceptanceCriteria: [{ id: 'c-ok', title: 'ok', completed: false, checkCommand: OK_CMD }],
+      protectedPaths: [] as string[],
+    };
+    fs.writeFileSync(path.join(wt11.worktreePath, 'draft.txt'), 'uncommitted draft');
+    const dirtyRefused = await verifier.verify(base11);
+    assert.strictEqual(dirtyRefused.passed, false, 'dirty worktree cannot be certified');
+    assert.ok(dirtyRefused.failureReason?.includes('Candidate not deliverable'), `Got: ${dirtyRefused.failureReason}`);
+    fs.rmSync(path.join(wt11.worktreePath, 'draft.txt'));
+
+    const cleanPass = await verifier.verify(base11);
+    assert.strictEqual(cleanPass.passed, true, `Clean candidate with passing checks verifies: ${cleanPass.failureReason}`);
+
+    const MUT_CMD = `node -e "require('fs').writeFileSync('made-by-check.tmp','x')"`;
+    const mutated = await verifier.verify({
+      ...base11,
+      verificationCommands: [MUT_CMD],
+      acceptanceCriteria: [{ id: 'c-ok', title: 'ok', checkCommand: MUT_CMD }],
+    });
+    assert.strictEqual(mutated.passed, false, 'checks that dirty the candidate must not certify it');
+    assert.ok(mutated.failureReason?.includes('altered the candidate'), `Got: ${mutated.failureReason}`);
+    wsManager.cleanupWorktree(wt11.worktreePath, wt11.branch);
+    console.log('✔ [PASS] Dirty candidates are refused pre-flight; verification-command mutations invalidate evidence');
+
+    // ------------------------------------------------------------------
+    // Part 12: restart projection — persisted lifecycle outcomes (including
+    // "blocked", which has no board column) are projected into the UI, and
+    // a freshly constructed coordinator projects before anyone reads it.
+    // ------------------------------------------------------------------
+    assert.strictEqual(
+      prodStore.transitionTaskCas({ taskId: dbTwin.id, expectedFrom: ['in_progress'], to: 'blocked', actor: 'test' }),
+      true, 'simulated blocked outcome persisted',
+    );
+    const projectedCount = coordinator.projectAuthoritativeStatuses();
+    assert.ok(projectedCount >= 1, 'projection reports the change');
+    const blockedView = coordinator.getStateView().tasks.find((t) => t.key === seedTask.key)!;
+    assert.strictEqual(blockedView.status, 'todo', 'blocked projects onto the board as todo with context in the comment');
+    assert.ok(blockedView.lastAgentComment?.includes('blocked'), `Got: ${blockedView.lastAgentComment}`);
+
+    // Persist an acceptance-bearing outcome (as delivery would apply it),
+    // leaving the JSON entry stale, then simulate a process restart.
+    assert.strictEqual(
+      prodStore.transitionTaskCas({
+        taskId: dbTwin.id, expectedFrom: ['blocked'], to: 'review', actor: 'test',
+        guard: () => ({ accept: true }),
+      }),
+      true, 'guarded CAS applies the persisted outcome',
+    );
+    assert.strictEqual(coordinator.getStateView().tasks.find((t) => t.key === seedTask.key)!.status, 'todo', 'running coordinator still stale');
+    const restarted = new CoordinatorEngine();
+    assert.strictEqual(
+      restarted.getStateView().tasks.find((t) => t.key === seedTask.key)!.status,
+      'review',
+      'constructor projects persisted statuses into the UI on restart',
+    );
+    console.log('✔ [PASS] Persisted lifecycle outcomes (including blocked) are projected into the UI after restart');
+
+    // ------------------------------------------------------------------
+    // Part 13: two-connection race — requirements changes cannot interleave
+    // between evidence validation and the status write, and a change that
+    // commits before the next transition is seen inside that transaction.
+    // ------------------------------------------------------------------
+    const taskR = makeTask({ key: 'EVID-13', requireApproval: false });
+    await runToReview(taskR);
+    const connB = new TaskStore(dbFile);
+    let racedWrite: string | null = null;
+    const racedApplied = store.transitionTaskCas({
+      taskId: taskR.id,
+      expectedFrom: ['in_progress'],
+      to: 'done',
+      actor: 'racer',
+      guard: (snapshot) => {
+        try {
+          connB.updateTaskRequirements(taskR.id, { description: 'changed mid-transaction' });
+        } catch (err: any) {
+          racedWrite = String(err?.message || err);
+        }
+        return { accept: false, reason: 'test-hold', detail: 'guard holds the lock; the outcome is asserted' };
+      },
+    });
+    assert.strictEqual(racedApplied, false);
+    assert.ok(racedWrite && /locked/i.test(racedWrite), `concurrent requirements write must serialize behind the acceptance transaction; got ${racedWrite}`);
+    assert.strictEqual(store.getTask(taskR.id)!.description, taskR.description, 'racing write never interleaved');
+
+    // The serial ordering: a committed change is re-evaluated by the next
+    // transition's in-transaction validation instead of granting acceptance.
+    const afterRace = connB.updateTaskRequirements(taskR.id, { verificationCommands: ['echo "post-race rotate"'] });
+    assert.strictEqual(afterRace.bindingChanged, true);
+    assert.strictEqual(afterRace.revokedAcceptanceFrom, 'review', 'granted Review revoked by the committed change');
+    const postRaceReview = lifecycle.transition({ taskId: taskR.id, to: 'review', actor: 'worker' });
+    assert.strictEqual(postRaceReview.ok, false);
+    assert.strictEqual(postRaceReview.reason, 'changed-verification-config');
+    connB.getRawDb().close();
+    console.log('✔ [PASS] Acceptance validation and commit are atomic against a second connection; committed changes are seen');
   } finally {
     try {
       const leftover = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: baseRepo, encoding: 'utf-8' })
