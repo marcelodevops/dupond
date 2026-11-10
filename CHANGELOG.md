@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/marcelodevops/dupond/compare/v0.3.0...v0.4.0) (2026-11-10)
+
+
+### Features
+
+* version acceptance evidence and unify authoritative lifecycle transitions ([05c9cb4](https://github.com/marcelodevops/dupond/commit/05c9cb401ecb4538dc6a29cbb896edcb6015ac57))
+* versioned acceptance evidence and one authoritative lifecycle ([7490f07](https://github.com/marcelodevops/dupond/commit/7490f07164fff6c24eb67e5081e35d6bc8f73ae8))
+
 ## [0.3.0](https://github.com/marcelodevops/dupond/compare/v0.2.3...v0.3.0) (2026-11-09)
 
 
