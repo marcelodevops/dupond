@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.0](https://github.com/marcelodevops/dupond/compare/v0.5.0...v0.6.0) (2026-11-11)
+
+
+### Features
+
+* **project:** define shared project contract and API types ([53eab7f](https://github.com/marcelodevops/dupond/commit/53eab7f39e7160b6b6fdf8930ada884480243401))
+* **project:** implement centralized project API adapter and session context ([f682d82](https://github.com/marcelodevops/dupond/commit/f682d82efc21d0eca020858128a0b3e4b9968be0))
+* **ui:** implement project switcher, creation wizard, and workspace lifecycle ([9916f37](https://github.com/marcelodevops/dupond/commit/9916f37738ac6efd4ae47291787bdd4a9902743b))
+* **ui:** implement project switcher, creation wizard, lifecycle modal, and empty board view ([f9080eb](https://github.com/marcelodevops/dupond/commit/f9080eb886e04113f2d1f7519d70eaa9b1ede741))
+
 ## [0.5.0](https://github.com/marcelodevops/dupond/compare/v0.4.5...v0.5.0) (2026-11-11)
 
 
