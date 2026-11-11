@@ -90,5 +90,22 @@ function seed(): void {
   );
 }
 
+function seedArtifacts(): void {
+  const repoRoot = path.resolve(import.meta.dirname, '..');
+  const artifactDir = path.join(repoRoot, '.dupond_artifacts', 'AEG-104');
+  const fixtureDir = path.join(repoRoot, 'tests', 'fixtures', 'aeg104-artifacts');
+  if (fs.existsSync(fixtureDir)) {
+    fs.mkdirSync(artifactDir, { recursive: true });
+    for (const artifactFile of ['implementation.js', 'spec.test.js']) {
+      const src = path.join(fixtureDir, artifactFile);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, path.join(artifactDir, artifactFile));
+      }
+    }
+  }
+}
+
 seed();
+seedArtifacts();
 process.env.DUPOND_STATE_FILE = STATE_FILE;
+process.env.DUPOND_DB_PATH = path.join(STATE_DIR, 'dupond.db');

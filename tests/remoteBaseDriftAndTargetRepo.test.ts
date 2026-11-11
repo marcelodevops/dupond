@@ -104,14 +104,15 @@ async function main() {
     // ------------------------------------------------------------------------
     console.log('\n--- Setting up Bare Remote and Dual Clones ---');
 
-    // 1. Create bare remote
+    // 1. Create bare remote with explicit default branch and symbolic HEAD
     fs.mkdirSync(bareRemoteDir, { recursive: true });
-    execFileSync('git', ['init', '--bare'], { cwd: bareRemoteDir });
+    execFileSync('git', ['init', '--bare', '--initial-branch=main'], { cwd: bareRemoteDir });
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: bareRemoteDir });
     execFileSync('git', ['--git-dir', bareRemoteDir, 'config', 'receive.shallowUpdate', 'true']);
 
     // 2. Setup Clone 1 (Dupond's target workspace repository)
     fs.mkdirSync(clone1Dir, { recursive: true });
-    execFileSync('git', ['init'], { cwd: clone1Dir });
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: clone1Dir });
     execFileSync('git', ['config', 'user.name', 'Dupond Clone 1'], { cwd: clone1Dir });
     execFileSync('git', ['config', 'user.email', 'dupond1@example.com'], { cwd: clone1Dir });
     execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: clone1Dir });
@@ -127,12 +128,14 @@ async function main() {
     execFileSync('git', ['commit', '-m', 'initial commit in target repo'], { cwd: clone1Dir });
     execFileSync('git', ['branch', '-M', 'main'], { cwd: clone1Dir });
     execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: clone1Dir });
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: bareRemoteDir });
 
     const initialBaseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: clone1Dir, encoding: 'utf-8' }).trim();
     console.log(`[Setup] Base commit initialized on bare remote: ${initialBaseCommit}`);
 
     // 3. Setup Clone 2 (Independent clone representing remote base advancement)
-    execFileSync('git', ['clone', bareRemoteDir, clone2Dir]);
+    execFileSync('git', ['clone', '--branch', 'main', bareRemoteDir, clone2Dir]);
+    execFileSync('git', ['checkout', 'main'], { cwd: clone2Dir });
     execFileSync('git', ['config', 'user.name', 'Second Clone Dev'], { cwd: clone2Dir });
     execFileSync('git', ['config', 'user.email', 'second@example.com'], { cwd: clone2Dir });
     execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: clone2Dir });
@@ -392,7 +395,7 @@ async function main() {
     // be mistaken for a test stand-in. The exemption is transport, not vocabulary.
     const mirrorDir = path.join(tmpBase, 'mirror-with-remote-name');
     fs.mkdirSync(mirrorDir, { recursive: true });
-    execFileSync('git', ['init'], { cwd: mirrorDir });
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: mirrorDir });
     execFileSync('git', ['config', 'user.name', 'Mirror Repo'], { cwd: mirrorDir });
     execFileSync('git', ['config', 'user.email', 'mirror@example.com'], { cwd: mirrorDir });
     execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: mirrorDir });
