@@ -14,6 +14,7 @@ import {
   Activity,
   Layers
 } from 'lucide-react';
+import { ProjectSwitcher } from './ProjectSwitcher';
 
 const dupondLogo = new URL('../../resources/dupond-logo.png', import.meta.url).href;
 
@@ -75,13 +76,13 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-white via-slate-100 to-indigo-200 bg-clip-text text-transparent">
                   Dupond Orchestrator
                 </span>
-                <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                <span className="hidden sm:inline-flex px-2 py-0.5 text-xs font-semibold rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                   Autonomous v2.4
                 </span>
               </div>
-              <p className="text-xs text-slate-400 truncate max-w-xs sm:max-w-md">
-                Project: <span className="text-slate-200 font-medium">{projectTitle}</span>
-              </p>
+              <div className="mt-1 flex items-center space-x-2">
+                <ProjectSwitcher />
+              </div>
             </div>
           </div>
 

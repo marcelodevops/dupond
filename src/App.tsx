@@ -29,10 +29,24 @@ import { TaskDetailModal } from './components/TaskDetailModal';
 import { AddTaskModal } from './components/AddTaskModal';
 import { Sparkles, Bot, AlertCircle, CheckCircle, Bell, Lock } from 'lucide-react';
 import { apiFetch, getApiToken, isAuthRequired, onAuthStateChange, setApiToken } from './lib/api';
+import { ProjectProvider, useProject } from './context/ProjectContext';
+import { ProjectWizardModal } from './components/ProjectWizardModal';
+import { ProjectLifecycleModal } from './components/ProjectLifecycleModal';
+import { getActiveProjectId } from './lib/projectApi';
 
-export default function App() {
+function AppWorkspace() {
+  const {
+    currentProject,
+    isArchived,
+    isSwitchingProject,
+    openResetModal,
+    isCreateWizardOpen,
+    setIsCreateWizardOpen,
+  } = useProject();
+
   const [activeTab, setActiveTab] = useState<string>('kanban');
-  const [projectTitle, setProjectTitle] = useState<string>(SAMPLE_PLANS[0].title);
+  const [customPlanTitle, setCustomPlanTitle] = useState<string | null>(null);
+  const projectTitle = customPlanTitle || currentProject?.name || SAMPLE_PLANS[0].title;
   const [cycleCount, setCycleCount] = useState<number>(5);
   const [isRunningAuto, setIsRunningAuto] = useState<boolean>(false);
   const [isProcessingStep, setIsProcessingStep] = useState<boolean>(false);
@@ -95,18 +109,23 @@ export default function App() {
 
   // Server-authoritative state synchronization (survives browser close)
   useEffect(() => {
+    let isCancelled = false;
     const fetchServerState = async () => {
       if (isAuthRequired()) return;
+      const capturedProjectId = currentProject?.id || getActiveProjectId();
       try {
         const res = await apiFetch('/api/orchestrate/state');
         if (res.ok) {
           const data = await res.json();
-          if (data.tasks && data.tasks.length > 0) setTasks(data.tasks);
-          if (data.agents && data.agents.length > 0) setAgents(data.agents);
-          if (data.epics && data.epics.length > 0) setEpics(data.epics);
-          if (data.communications && data.communications.length > 0) setCommunications(data.communications);
-          if (typeof data.daemonRunning === 'boolean') setIsRunningAuto(data.daemonRunning);
-          if (typeof data.cycleCount === 'number') setCycleCount(data.cycleCount);
+          // Verify response is not stale and still belongs to the currently active project
+          if (!isCancelled && capturedProjectId === (currentProject?.id || getActiveProjectId())) {
+            if (Array.isArray(data.tasks)) setTasks(data.tasks);
+            if (Array.isArray(data.agents)) setAgents(data.agents);
+            if (Array.isArray(data.epics)) setEpics(data.epics);
+            if (Array.isArray(data.communications)) setCommunications(data.communications);
+            if (typeof data.daemonRunning === 'boolean') setIsRunningAuto(data.daemonRunning);
+            if (typeof data.cycleCount === 'number') setCycleCount(data.cycleCount);
+          }
         }
       } catch (err) {
         console.warn('Server state sync error:', err);
@@ -115,11 +134,18 @@ export default function App() {
 
     fetchServerState();
     const syncInterval = setInterval(fetchServerState, 3500);
-    return () => clearInterval(syncInterval);
-  }, []);
+    return () => {
+      isCancelled = true;
+      clearInterval(syncInterval);
+    };
+  }, [currentProject?.id]);
 
   // Push local updates to server-authoritative state
   const syncToServer = async (partialState: any) => {
+    if (isArchived) {
+      showToast('Project is Archived', 'Archived projects are read-only. Task modifications cannot be saved.', 'alert');
+      return;
+    }
     try {
       const res = await apiFetch('/api/orchestrate/state', {
         method: 'POST',
@@ -292,6 +318,10 @@ export default function App() {
 
   // Single-step execution on the server engine (Next Cycle)
   const handleRunServerCycle = async () => {
+    if (isArchived) {
+      showToast('Project is Archived', 'Cannot run automated engine cycles on an archived project.', 'alert');
+      return;
+    }
     setIsProcessingStep(true);
     try {
       const res = await apiFetch('/api/orchestrate/engine/step', { method: 'POST' });
@@ -317,6 +347,10 @@ export default function App() {
 
   // Handlers with Centralized Quality Gate Enforcement & Server Sync
   const handleUpdateTaskStatus = async (taskId: string, newStatus: TaskStatus) => {
+    if (isArchived) {
+      showToast('Project is Archived', 'Archived projects are read-only. Task status cannot be modified.', 'alert');
+      return;
+    }
     try {
       const res = await apiFetch(`/api/orchestrate/tasks/${taskId}/transition`, {
         method: 'POST',
@@ -366,7 +400,7 @@ export default function App() {
   const handleAdoptPlan = (newEpics: Epic[], newTasks: Task[], planSummary: string) => {
     setEpics(newEpics);
     setTasks(newTasks);
-    setProjectTitle(planSummary.slice(0, 50));
+    setCustomPlanTitle(planSummary.slice(0, 50));
     setCycleCount(1);
     syncToServer({ epics: newEpics, tasks: newTasks });
     showToast('Plan Adopted', `Generated ${newTasks.length} tasks across ${newEpics.length} epics.`, 'success');
@@ -517,6 +551,10 @@ export default function App() {
         setActiveTab={setActiveTab}
         isRunningAuto={isRunningAuto}
         onToggleAuto={async () => {
+          if (isArchived) {
+            showToast('Project is Archived', 'Cannot run automated engine on an archived project.', 'alert');
+            return;
+          }
           const next = !isRunningAuto;
           setIsRunningAuto(next);
           try {
@@ -548,6 +586,29 @@ export default function App() {
         cycleCount={cycleCount}
       />
 
+      {/* Archived Read-Only Banner */}
+      {isArchived && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+          <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-800/60 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2 shadow-sm">
+            <div className="flex items-center space-x-2.5">
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Archived Project
+              </span>
+              <span>
+                <strong>{currentProject?.name}</strong> is in read-only audit mode. Task modifications and autonomous execution cycles are disabled.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => openResetModal()}
+              className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-slate-300 hover:text-white text-[11px] font-semibold transition-colors"
+            >
+              Reset Workspace
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Workspace Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-5">
         {activeTab === 'kanban' && (
@@ -557,7 +618,15 @@ export default function App() {
             epics={epics}
             onTaskClick={(task) => setSelectedTaskForModal(task)}
             onUpdateTaskStatus={handleUpdateTaskStatus}
-            onOpenAddTaskModal={() => setIsAddTaskModalOpen(true)}
+            onOpenAddTaskModal={() => {
+              if (isArchived) {
+                showToast('Project is Archived', 'Cannot add tasks to an archived project.', 'alert');
+                return;
+              }
+              setIsAddTaskModalOpen(true);
+            }}
+            onOpenIngestModal={() => setIsIngestModalOpen(true)}
+            onOpenIntegrations={() => setActiveTab('integrations')}
             activeProcessingTaskId={activeProcessingTaskId}
           />
         )}
@@ -647,6 +716,23 @@ export default function App() {
         epics={epics}
         existingTasksCount={tasks.length}
       />
+
+      {/* Project Wizard Modal */}
+      <ProjectWizardModal
+        isOpen={isCreateWizardOpen}
+        onClose={() => setIsCreateWizardOpen(false)}
+      />
+
+      {/* Project Lifecycle Management Modal (Reset & Archive) */}
+      <ProjectLifecycleModal />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ProjectProvider>
+      <AppWorkspace />
+    </ProjectProvider>
   );
 }
