@@ -10,11 +10,11 @@
 [![Node.js: 22+](https://img.shields.io/badge/Node.js-22.5%2B-green.svg)](https://nodejs.org/)
 [![TypeScript: 5+](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 [![Coding Workers: Gemini & OpenAI](https://img.shields.io/badge/Workers-Gemini%20%7C%20OpenAI-4285F4.svg)](docs/providers.md)
-[![Version: 0.1.0-experimental](https://img.shields.io/badge/version-0.1.0--experimental-orange.svg)](CHANGELOG.md)
+[![Version: 0.4.5](https://img.shields.io/badge/version-0.4.5-orange.svg)](CHANGELOG.md)
 
 Dupond (also referred to as **Dupond Orchestrator**) is an autonomous, server-authoritative **task-to-Pull-Request system**. It takes structured task specifications with explicit acceptance criteria, prepares isolated Git worktrees, dispatches provider-independent coding workers (supporting Google Gemini and OpenAI), authoritatively executes test checks inside an OS sandbox, and delivers verified changes as reviewable GitHub Pull Requests under human operator approval.
 
-> **Experimental Release Notice (v0.1.0)**: Dupond v0.1.0 is an experimental release designed for supervised execution on disposable or dedicated development repositories. It does not provide microVM hardware virtualization, multi-tenant RBAC, or unmonitored production automation. All delivered Pull Requests require human review before merging.
+> **Supervised Execution Notice**: Dupond is designed for supervised execution on disposable or dedicated development repositories. It does not provide microVM hardware virtualization, multi-tenant RBAC, or unmonitored production automation. All delivered Pull Requests require human review before merging.
 
 ---
 
@@ -105,7 +105,8 @@ cp .env.example .env
 
 | Variable | Required | Default | Description |
 | :--- | :---: | :--- | :--- |
-| `DUPOND_AUTH_TOKEN` | Yes* | *(ephemeral random)* | Bearer token required for API access. If omitted in dev, a random token is generated and logged at startup. |
+| `DUPOND_API_KEY` | Optional* | *(none)* | Bearer token required for API access. Takes highest precedence over `DUPOND_AUTH_TOKEN`. |
+| `DUPOND_AUTH_TOKEN` | Optional* | *(persisted token)* | Bearer token required for API access (used if `DUPOND_API_KEY` is unset). If neither is set, Dupond generates a random token (`dp_<hex>`) and persists it to `data/.dupond_auth_token` with `0600` permissions. |
 | `GEMINI_API_KEY` | Optional* | *(none)* | Google GenAI API key for Gemini coding workers. Required if using Gemini. |
 | `GEMINI_MODEL` | No | `gemini-3.5-flash` | Default Gemini model identifier (`gemini-3.5-flash` or `gemini-3.8-flash`). |
 | `OPENAI_API_KEY` | Optional* | *(none)* | OpenAI API key for OpenAI coding workers. Required if using OpenAI. |
@@ -114,6 +115,7 @@ cp .env.example .env
 | `DUPOND_DB_PATH` | No | `./data/dupond.db` | File path for SQLite task and execution history database. |
 | `DUPOND_STATE_FILE` | No | `./data/dupond_state.json` | File path for JSON sprint and UI telemetry state. |
 | `DUPOND_SANDBOX_IMAGE` | No | `node:22-bookworm` | Container image used for Linux sandbox execution. |
+| `DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS` | No | `false` | When true, permits custom providers targeting local/LAN hosts. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | No | *(system keyring)* | GitHub token for headless CI delivery. |
 
 ---
@@ -129,10 +131,12 @@ npm install
 
 ### 2. Start the Application Server
 ```bash
-export DUPOND_AUTH_TOKEN="your_operator_secret_token"
+export DUPOND_API_KEY="your_operator_secret_token"  # or export DUPOND_AUTH_TOKEN="..."
 export GEMINI_API_KEY="AIzaSy..."
 npm start
 ```
+> If neither `DUPOND_API_KEY` nor `DUPOND_AUTH_TOKEN` is set, Dupond generates an instance token and stores it in `data/.dupond_auth_token` (`chmod 600`). API requests must provide it via `Authorization: Bearer <token>` or `X-Dupond-Token: <token>`.
+
 Verify server health:
 ```bash
 curl -s http://localhost:3000/api/health
@@ -167,14 +171,17 @@ For detailed architecture diagrams, Seatbelt rules, and isolation limits, see [A
 
 ## 🧪 Testing & Verification
 
-Dupond contains 11 automated test suites covering security guardrails, sandbox isolation, database transactions, worker tool dispatch, repair loops, and end-to-end acceptance scenarios:
+Dupond contains 18 automated test suites covering security guardrails, sandbox isolation, database transactions, worker tool dispatch, repair loops, delivery drift reconciliation, acceptance evidence lifecycle, release automation, and end-to-end acceptance scenarios:
 
 ```bash
-# Run the complete automated test suite
+# Run the complete automated test suite (18 test suites)
 npm test
 
 # Run TypeScript type check
 npm run lint
+
+# Check release metadata consistency
+npm run release:check
 
 # Pre-pull container image for Linux sandbox
 npm run prepare:sandbox
@@ -188,12 +195,13 @@ npm run prepare:sandbox
 
 ## 📚 Documentation Index
 
+- [Acceptance Evidence & Approval Contract](docs/acceptance-evidence.md): Authoritative verification, evidence fingerprinting, base drift protocol, and operator approval gates.
 - [Provider-Independent Coding Workers](docs/providers.md): Architecture, Gemini/OpenAI configuration, platform billing prerequisites, and live parity audit.
 - [Practical API Walkthrough](docs/walkthrough.md): Step-by-step API guide with concrete `curl` requests.
 - [Architecture & Sandbox Guide](docs/architecture-and-sandbox.md): Deep-dive into worktree management, Seatbelt profiles, Linux containers, and persistence schemas.
 - [Troubleshooting Guide](docs/troubleshooting.md): Solutions for missing credentials, rate limits, Linux Podman timeouts, and base drift conflicts.
 - [Live Demonstration Audit](docs/live-demonstration.md): Full analysis of live demonstrations in `marcelodevops/dupond-live-demo`.
-- [Release Changelog](CHANGELOG.md): Notes for the experimental v0.1.0 release.
+- [Release Changelog](CHANGELOG.md): Notes and release history across versions.
 
 ---
 
