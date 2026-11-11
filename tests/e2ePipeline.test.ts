@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
@@ -614,7 +615,4 @@ async function runAcceptanceSuite() {
   }
 }
 
-runAcceptanceSuite().catch((err) => {
-  console.error('Acceptance suite failed:', err);
-  process.exit(1);
-});
+test('suite', runAcceptanceSuite);

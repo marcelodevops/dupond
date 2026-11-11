@@ -7,7 +7,9 @@
 import assert from 'assert';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { test } from 'vitest';
 
+test('UI auth gate render suite', async () => {
 console.log('=== RUNNING UI AUTH GATE RENDER SUITE ===\n');
 
 const storage = new Map<string, string>();
@@ -58,3 +60,4 @@ assert.ok(!openHtml.includes('Authentication required'), 'gate disappears when a
 console.log('✔ [PASS] 401 renders an authentication gate; an authorized sync renders the board');
 
 console.log('\n=== UI AUTH GATE RENDER SUITE PASSED ===');
+});

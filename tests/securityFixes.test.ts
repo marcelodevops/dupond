@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import { coordinator, isMaskedSecret } from '../src/server/coordinator.ts';
 import { validateAuthToken, getExpectedToken, requireAuth } from '../src/server/auth.ts';
@@ -126,7 +127,4 @@ async function main() {
   console.log('\n=== ALL SECURITY & CORRECTNESS TESTS PASSED ===');
 }
 
-main().catch((err) => {
-  console.error('Test suite failed:', err);
-  process.exit(1);
-});
+test('suite', main);

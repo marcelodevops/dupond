@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
@@ -174,7 +175,4 @@ async function main() {
   console.log('\n=== ALL DELIVERY & RECONCILIATION TESTS PASSED CLEANLY ===');
 }
 
-main().catch((err) => {
-  console.error('Delivery test failed:', err);
-  process.exit(1);
-});
+test('suite', main);

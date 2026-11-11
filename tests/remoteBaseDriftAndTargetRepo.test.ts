@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import os from 'os';
@@ -564,7 +565,4 @@ async function main() {
   console.log('===============================================================');
 }
 
-main().catch((err) => {
-  console.error('Target drift test failed:', err);
-  process.exit(1);
-});
+test('suite', main);

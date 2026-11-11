@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 /**
  * Dupond Orchestrator - Guardrails & Delivery Fail-Closed Regression Suite
  * 
@@ -413,7 +414,4 @@ async function executeSuite() {
   console.log(`\n=== REGRESSION SUITE COMPLETE: ${passedTests}/${totalTests} TESTS PASSED CLEANLY ===`);
 }
 
-executeSuite().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+test('suite', executeSuite);
