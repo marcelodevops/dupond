@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.5](https://github.com/marcelodevops/dupond/compare/v0.4.4...v0.4.5) (2026-11-11)
+
+
+### Bug Fixes
+
+* **delivery:** capture approval identity from the validated dispatch … ([150ea39](https://github.com/marcelodevops/dupond/commit/150ea3937fbe76db32187d98a25b021c33c7a73f))
+* **delivery:** capture approval identity from the validated dispatch context ([8eb2e04](https://github.com/marcelodevops/dupond/commit/8eb2e04db1cda82078cab6ed9ce3b6e26e18ae9f))
+
 ## [0.4.4](https://github.com/marcelodevops/dupond/compare/v0.4.3...v0.4.4) (2026-11-10)
 
 
