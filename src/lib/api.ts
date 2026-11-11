@@ -14,6 +14,12 @@ let apiToken: string | null = readStoredToken();
 let authRequired = false;
 const listeners = new Set<AuthListener>();
 
+let projectHeaderProvider: (() => string | null) | null = null;
+
+export function registerProjectHeaderProvider(provider: () => string | null): void {
+  projectHeaderProvider = provider;
+}
+
 function setAuthRequired(next: boolean) {
   if (authRequired === next) return;
   authRequired = next;
@@ -56,6 +62,13 @@ export function setApiToken(token: string | null): void {
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   if (apiToken && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${apiToken}`);
+
+  if (projectHeaderProvider && !headers.has('X-Dupond-Project-Id')) {
+    const currentProjectId = projectHeaderProvider();
+    if (currentProjectId) {
+      headers.set('X-Dupond-Project-Id', currentProjectId);
+    }
+  }
 
   const response = await fetch(input, { ...init, headers });
   setAuthRequired(response.status === 401);
