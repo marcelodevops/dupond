@@ -1,3 +1,4 @@
+import { DomainError } from '../utils/errors';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'fs';
 import path from 'path';
@@ -488,7 +489,7 @@ export class TaskStore {
 
   public updateRun(id: string, updates: Partial<TaskRunRecord>): void {
     const current = this.getRun(id);
-    if (!current) throw new Error(`Run ${id} not found`);
+    if (!current) throw new DomainError(`Run ${id} not found`);
 
     const now = new Date().toISOString();
     const updated: TaskRunRecord = {

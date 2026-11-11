@@ -1,3 +1,4 @@
+import { DomainError } from '../utils/errors';
 import { spawn, spawnSync, ChildProcess } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
@@ -287,7 +288,7 @@ ${networkRule}
   public async execute(options: SandboxOptions): Promise<SandboxExecutionResult> {
     const availability = this.isAvailable();
     if (!availability.available) {
-      throw new Error(`Execution blocked: ${availability.error}`);
+      throw new DomainError(`Execution blocked: ${availability.error}`);
     }
 
     if (options.abortSignal?.aborted) {
@@ -326,7 +327,7 @@ ${networkRule}
       if (!SandboxExecutor.imagePrepared) {
         const imageOk = await this.ensureImage('node:22-bookworm', 300000);
         if (!imageOk) {
-          throw new Error('Sandbox container preparation failed: could not pull node:22-bookworm within preparation timeout');
+          throw new DomainError('Sandbox container preparation failed: could not pull node:22-bookworm within preparation timeout');
         }
       }
 
@@ -362,7 +363,7 @@ ${networkRule}
         '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim(),
       ];
     } else {
-      throw new Error('Restricted execution sandbox unavailable: Host lacks required container runtime (podman or docker) on Linux. Refusing to run untrusted code on host.');
+      throw new DomainError('Restricted execution sandbox unavailable: Host lacks required container runtime (podman or docker) on Linux. Refusing to run untrusted code on host.');
     }
 
     return new Promise<SandboxExecutionResult>((resolve) => {

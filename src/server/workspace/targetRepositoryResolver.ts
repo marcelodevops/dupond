@@ -1,3 +1,4 @@
+import { DomainError } from '../utils/errors';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
@@ -150,7 +151,7 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
 
   // 1. Fail closed if neither targetRepo nor targetRepoPath is specified
   if (!configuredTargetRepo && !configuredTargetRepoPath) {
-    throw new Error(
+    throw new DomainError(
       'Target repository configuration failed: No target repository configured. Explicit target configuration (targetRepo or targetRepoPath) is required. Refusing to silently select the orchestrator repository.'
     );
   }
@@ -161,12 +162,12 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
   if (configuredTargetRepoPath) {
     const absPath = path.resolve(configuredTargetRepoPath);
     if (!fs.existsSync(absPath)) {
-      throw new Error(
+      throw new DomainError(
         `Target repository configuration failed: Specified target repository path "${configuredTargetRepoPath}" does not exist. A valid local checkout is required.`
       );
     }
     if (!isValidGitRepo(absPath)) {
-      throw new Error(
+      throw new DomainError(
         `Target repository configuration failed: Path "${configuredTargetRepoPath}" exists but is not a valid Git repository.`
       );
     }
@@ -180,7 +181,7 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
       // If targetRepo is an existing local filesystem directory
       const absPath = path.resolve(configuredTargetRepo);
       if (!isValidGitRepo(absPath)) {
-        throw new Error(
+        throw new DomainError(
           `Target repository configuration failed: Path "${configuredTargetRepo}" is not a valid Git repository.`
         );
       }
@@ -199,14 +200,14 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
       resolvedPath = fs.realpathSync(managedCheckout);
     } else {
       // Remote-only target without local checkout: explain that local checkout is required
-      throw new Error(
+      throw new DomainError(
         `Target repository configuration failed: Target repository "${configuredTargetRepo}" is a remote reference with no local checkout. A valid local checkout is required (specify targetRepoPath or prepare the workspace repository).`
       );
     }
   }
 
   if (!resolvedPath) {
-    throw new Error(
+    throw new DomainError(
       `Target repository configuration failed: Could not resolve repository for target "${configuredTargetRepo || configuredTargetRepoPath}".`
     );
   }
@@ -221,7 +222,7 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
     // Only allow if targetRepo explicitly names this repository and caller explicitly permits it
     const explicitlyTargetsOrchestrator = expectedSlug && orchestratorSlug && areRepoSlugsCompatible(expectedSlug, orchestratorSlug);
     if (!explicitlyTargetsOrchestrator && !options.allowOrchestratorRepo) {
-      throw new Error(
+      throw new DomainError(
         `Target repository mismatch: Configured target repository "${configuredTargetRepo || 'unspecified'}" resolved to the orchestrator workspace at "${orchestratorPath}". Never silently select the orchestrator repository.`
       );
     }
@@ -232,7 +233,7 @@ export function resolveTargetRepository(options: ResolveTargetOptions): Resolved
   // no network identity to compare, so it is exempted by transport.
   if (expectedSlug && targetOriginSlug && !isLocalRemoteOrigin(targetOrigin)) {
     if (!areRepoSlugsCompatible(targetOriginSlug, expectedSlug)) {
-      throw new Error(
+      throw new DomainError(
         `Target repository mismatch: Workspace repository origin "${targetOriginSlug}" does not match configured target "${expectedSlug}". Refusing to execute on mismatched repository.`
       );
     }
