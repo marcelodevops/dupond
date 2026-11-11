@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 /**
  * Track A — execution isolation, path containment, SSRF and credential tests.
  *
@@ -443,11 +444,7 @@ async function main() {
 
   console.log(`\n=== TRACK A SUITE: ${passed}/${total} PASSED ===`);
   fs.rmSync(STATE_DIR, { recursive: true, force: true });
-  if (passed !== total) process.exitCode = 1;
+  if (passed !== total) throw new Error(`Track A suite: ${passed}/${total} tests passed`);
 }
 
-main().catch((err) => {
-  console.error('Track A suite crashed:', err);
-  fs.rmSync(STATE_DIR, { recursive: true, force: true });
-  process.exitCode = 1;
-});
+test('suite', main);

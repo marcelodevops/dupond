@@ -4,7 +4,9 @@ import {
   buildGeminiOptimizerPrompt, 
   balanceWorkload 
 } from '../../src/services/workloadBalancer.js';
+import { test } from 'vitest';
 
+test('AEG-104 workload balancer suite', async () => {
 console.log('--- RUNNING INDEPENDENT TESTS FOR AEG-104 ---');
 
 // Test 1: Acceptance Criterion 1 - Exact Load Percentage Calculation
@@ -103,3 +105,4 @@ console.log('--- RUNNING INDEPENDENT TESTS FOR AEG-104 ---');
 }
 
 console.log('--- ALL 4 INDEPENDENT TEST SUITES PASSED CLEANLY ---');
+});
