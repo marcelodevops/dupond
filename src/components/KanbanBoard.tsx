@@ -34,6 +34,7 @@ interface KanbanBoardProps {
   onOpenIngestModal?: () => void;
   onOpenIntegrations?: () => void;
   activeProcessingTaskId?: string;
+  isLoading?: boolean;
 }
 
 const COLUMNS: { id: TaskStatus; label: string; color: string; badgeBg: string }[] = [
@@ -54,6 +55,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   onOpenIngestModal,
   onOpenIntegrations,
   activeProcessingTaskId,
+  isLoading = false,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState<string>('all');
@@ -202,8 +204,14 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
         </div>
       </div>
 
-      {/* 5-Column Responsive Board or Empty Workspace State */}
-      {tasks.length === 0 ? (
+      {/* 5-Column Responsive Board, Loading State, or Empty Workspace State */}
+      {isLoading ? (
+        <div className="flex flex-col items-center justify-center p-16 rounded-2xl border border-slate-800 bg-slate-900/40 text-center min-h-[400px]">
+          <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-3" />
+          <h3 className="text-sm font-semibold text-slate-200">Loading workspace state…</h3>
+          <p className="text-xs text-slate-400 mt-1">Synchronizing tasks with the active project.</p>
+        </div>
+      ) : tasks.length === 0 ? (
         <EmptyProjectView
           onOpenAddTaskModal={onOpenAddTaskModal}
           onOpenIngestModal={onOpenIngestModal}

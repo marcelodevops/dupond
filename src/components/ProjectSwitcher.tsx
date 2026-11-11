@@ -22,6 +22,7 @@ export const ProjectSwitcher: React.FC = () => {
     archivedProjects,
     isSwitchingProject,
     isArchived,
+    projectError,
     switchProject,
     setIsCreateWizardOpen,
     openResetModal,
@@ -138,6 +139,17 @@ export const ProjectSwitcher: React.FC = () => {
               />
             </div>
           </div>
+
+          {/* Backend Error / Missing Endpoints Notice */}
+          {projectError && (
+            <div className="p-2.5 m-2 rounded-lg bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-snug">
+              <div className="flex items-center space-x-1.5 font-semibold text-amber-200 mb-0.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Awaiting Backend Integration</span>
+              </div>
+              <p className="text-[10px] text-amber-300/80">{projectError}</p>
+            </div>
+          )}
 
           {/* Project Lists */}
           <div className="max-h-72 overflow-y-auto p-2 space-y-1 divide-y divide-slate-800/40">

@@ -32,13 +32,16 @@ import { apiFetch, getApiToken, isAuthRequired, onAuthStateChange, setApiToken }
 import { ProjectProvider, useProject } from './context/ProjectContext';
 import { ProjectWizardModal } from './components/ProjectWizardModal';
 import { ProjectLifecycleModal } from './components/ProjectLifecycleModal';
-import { getActiveProjectId } from './lib/projectApi';
+import { getActiveProjectId, PROJECT_HEADER } from './lib/projectApi';
 
 function AppWorkspace() {
   const {
     currentProject,
     isArchived,
     isSwitchingProject,
+    isLoadingProjects,
+    projectError,
+    boardRefreshTrigger,
     openResetModal,
     isCreateWizardOpen,
     setIsCreateWizardOpen,
@@ -51,6 +54,12 @@ function AppWorkspace() {
   const [isRunningAuto, setIsRunningAuto] = useState<boolean>(false);
   const [isProcessingStep, setIsProcessingStep] = useState<boolean>(false);
   const [activeProcessingTaskId, setActiveProcessingTaskId] = useState<string | undefined>(undefined);
+  const [isBoardLoading, setIsBoardLoading] = useState<boolean>(false);
+
+  // Epoch & in-flight tracking to prevent cross-project state leaking
+  const lastProjectIdRef = useRef<string | null>(null);
+  const stateFetchEpochRef = useRef(0);
+  const abortStateFetchRef = useRef<AbortController | null>(null);
 
   // Load state from localStorage or default
   const [tasks, setTasks] = useState<Task[]>(() => {
@@ -110,15 +119,41 @@ function AppWorkspace() {
   // Server-authoritative state synchronization (survives browser close)
   useEffect(() => {
     let isCancelled = false;
+    const capturedProjectId = currentProject?.id || getActiveProjectId();
+
+    // Invalidate prior fetch and abort in-flight network calls
+    stateFetchEpochRef.current += 1;
+    const currentEpoch = stateFetchEpochRef.current;
+    if (abortStateFetchRef.current) {
+      abortStateFetchRef.current.abort();
+    }
+    const abortCtrl = new AbortController();
+    abortStateFetchRef.current = abortCtrl;
+
+    // If project changed, immediately clear tasks and enter loading state to prevent leakage
+    if (lastProjectIdRef.current !== capturedProjectId) {
+      lastProjectIdRef.current = capturedProjectId;
+      if (capturedProjectId) {
+        setTasks([]);
+        setIsBoardLoading(true);
+      }
+    }
+
     const fetchServerState = async () => {
       if (isAuthRequired()) return;
-      const capturedProjectId = currentProject?.id || getActiveProjectId();
       try {
-        const res = await apiFetch('/api/orchestrate/state');
+        const res = await apiFetch('/api/orchestrate/state', {
+          headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
+          signal: abortCtrl.signal,
+        });
         if (res.ok) {
           const data = await res.json();
-          // Verify response is not stale and still belongs to the currently active project
-          if (!isCancelled && capturedProjectId === (currentProject?.id || getActiveProjectId())) {
+          // Verify response is not stale and still belongs to the currently active project and epoch
+          if (
+            !isCancelled &&
+            currentEpoch === stateFetchEpochRef.current &&
+            capturedProjectId === (currentProject?.id || getActiveProjectId())
+          ) {
             if (Array.isArray(data.tasks)) setTasks(data.tasks);
             if (Array.isArray(data.agents)) setAgents(data.agents);
             if (Array.isArray(data.epics)) setEpics(data.epics);
@@ -127,8 +162,14 @@ function AppWorkspace() {
             if (typeof data.cycleCount === 'number') setCycleCount(data.cycleCount);
           }
         }
-      } catch (err) {
-        console.warn('Server state sync error:', err);
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.warn('Server state sync error:', err);
+        }
+      } finally {
+        if (!isCancelled && currentEpoch === stateFetchEpochRef.current) {
+          setIsBoardLoading(false);
+        }
       }
     };
 
@@ -137,19 +178,28 @@ function AppWorkspace() {
     return () => {
       isCancelled = true;
       clearInterval(syncInterval);
+      abortCtrl.abort();
     };
-  }, [currentProject?.id]);
+  }, [currentProject?.id, boardRefreshTrigger]);
 
   // Push local updates to server-authoritative state
   const syncToServer = async (partialState: any) => {
+    if (isSwitchingProject || isLoadingProjects) {
+      showToast('Workspace Switching', 'Cannot save modifications while project switch is in progress.', 'alert');
+      return;
+    }
     if (isArchived) {
       showToast('Project is Archived', 'Archived projects are read-only. Task modifications cannot be saved.', 'alert');
       return;
     }
+    const capturedProjectId = currentProject?.id || getActiveProjectId();
     try {
       const res = await apiFetch('/api/orchestrate/state', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {}),
+        },
         body: JSON.stringify(partialState),
       });
       if (!res.ok) {
@@ -192,13 +242,21 @@ function AppWorkspace() {
 
   // Execute single agent step on a specific task
   const executeAgentStep = async (targetTask: Task, activeAgent: Agent) => {
+    if (isSwitchingProject) {
+      showToast('Workspace Switching', 'Cannot execute agent steps while project switch is in progress.', 'alert');
+      return;
+    }
+    const capturedProjectId = currentProject?.id || getActiveProjectId();
     setIsProcessingStep(true);
     setActiveProcessingTaskId(targetTask.id);
 
     try {
       const response = await apiFetch('/api/orchestrate/agent-step', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {}),
+        },
         body: JSON.stringify({
           task: targetTask,
           agent: activeAgent,
@@ -215,6 +273,16 @@ function AppWorkspace() {
           'Execution Blocked',
           result.error || `Task execution blocked: No capable worker or quality gate failed for ${targetTask.key}.`,
           'alert'
+        );
+        return;
+      }
+
+      // Check if project switched during execution: do NOT mutate active project if switched
+      if (capturedProjectId !== (currentProject?.id || getActiveProjectId())) {
+        showToast(
+          'Background Run Finished',
+          `Task ${targetTask.key} finished in background project ${capturedProjectId || 'workspace'}. Active project remains untouched.`,
+          'info'
         );
         return;
       }
@@ -318,19 +386,29 @@ function AppWorkspace() {
 
   // Single-step execution on the server engine (Next Cycle)
   const handleRunServerCycle = async () => {
+    if (isSwitchingProject) {
+      showToast('Workspace Switching', 'Cannot run engine cycle while project switch is in progress.', 'alert');
+      return;
+    }
     if (isArchived) {
       showToast('Project is Archived', 'Cannot run automated engine cycles on an archived project.', 'alert');
       return;
     }
+    const capturedProjectId = currentProject?.id || getActiveProjectId();
     setIsProcessingStep(true);
     try {
-      const res = await apiFetch('/api/orchestrate/engine/step', { method: 'POST' });
+      const res = await apiFetch('/api/orchestrate/engine/step', {
+        method: 'POST',
+        headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
+      });
       const data = await res.json();
-      if (data.state) {
-        setTasks(data.state.tasks);
-        setAgents(data.state.agents);
-        setCommunications(data.state.communications);
-        setCycleCount(data.state.cycleCount);
+      if (capturedProjectId === (currentProject?.id || getActiveProjectId())) {
+        if (data.state) {
+          setTasks(data.state.tasks);
+          setAgents(data.state.agents);
+          setCommunications(data.state.communications);
+          setCycleCount(data.state.cycleCount);
+        }
       }
       if (data.result?.action) {
         showToast('Cycle Executed', `Coordinator step: ${data.result.action.replace(/_/g, ' ')}`, 'success');
@@ -347,14 +425,22 @@ function AppWorkspace() {
 
   // Handlers with Centralized Quality Gate Enforcement & Server Sync
   const handleUpdateTaskStatus = async (taskId: string, newStatus: TaskStatus) => {
+    if (isSwitchingProject) {
+      showToast('Workspace Switching', 'Cannot modify task while project switch is in progress.', 'alert');
+      return;
+    }
     if (isArchived) {
       showToast('Project is Archived', 'Archived projects are read-only. Task status cannot be modified.', 'alert');
       return;
     }
+    const capturedProjectId = currentProject?.id || getActiveProjectId();
     try {
       const res = await apiFetch(`/api/orchestrate/tasks/${taskId}/transition`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {}),
+        },
         body: JSON.stringify({ status: newStatus }),
       });
 
@@ -368,16 +454,20 @@ function AppWorkspace() {
 
         showToast('Quality Gate Blocked', `Cannot move to ${newStatus.toUpperCase()}: ${failureDetails}`, 'alert');
         // Refresh server state to ensure UI stays accurate
-        const stateRes = await apiFetch('/api/orchestrate/state');
-        if (stateRes.ok) {
+        const stateRes = await apiFetch('/api/orchestrate/state', {
+          headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
+        });
+        if (stateRes.ok && capturedProjectId === (currentProject?.id || getActiveProjectId())) {
           const fresh = await stateRes.json();
           setTasks(fresh.tasks);
         }
         return;
       }
 
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
-      showToast('Task Status Updated', `${data.task.key} moved to ${newStatus.toUpperCase()}`, 'success');
+      if (capturedProjectId === (currentProject?.id || getActiveProjectId())) {
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+        showToast('Task Status Updated', `${data.task.key} moved to ${newStatus.toUpperCase()}`, 'success');
+      }
     } catch (err: any) {
       showToast('Status Update Error', err.message || 'Failed to update status', 'alert');
     }
@@ -609,6 +699,22 @@ function AppWorkspace() {
         </div>
       )}
 
+      {/* Backend Integration Status Banner (when backend routes are missing or failing) */}
+      {projectError && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-amber-800/60 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2 shadow-sm">
+            <div className="flex items-center space-x-2.5">
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Awaiting Backend Integration
+              </span>
+              <span>
+                Multi-project API endpoints are not mounted on this server ({projectError}). Operating in single-workspace mode.
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Workspace Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-5">
         {activeTab === 'kanban' && (
@@ -616,11 +722,16 @@ function AppWorkspace() {
             tasks={tasks}
             agents={agents}
             epics={epics}
+            isLoading={isBoardLoading || isSwitchingProject}
             onTaskClick={(task) => setSelectedTaskForModal(task)}
             onUpdateTaskStatus={handleUpdateTaskStatus}
             onOpenAddTaskModal={() => {
               if (isArchived) {
                 showToast('Project is Archived', 'Cannot add tasks to an archived project.', 'alert');
+                return;
+              }
+              if (isSwitchingProject) {
+                showToast('Workspace Switching', 'Cannot add tasks while switching projects.', 'alert');
                 return;
               }
               setIsAddTaskModalOpen(true);
