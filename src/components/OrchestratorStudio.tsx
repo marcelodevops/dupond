@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { OrchestratorConfig, AutonomyMode, ReasoningLevel, RiskTolerance, CustomProvider, Task, Agent } from '../types';
 import { apiFetch } from '../lib/api';
+import { AgentAvatar } from './AgentAvatar';
 import { 
   Sliders, 
   Bot, 
@@ -353,8 +354,15 @@ export const OrchestratorStudio: React.FC<OrchestratorStudioProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
-                  <span className="font-bold">
-                    {log.sender === 'user' ? 'Operator' : 'Dupond Core'}
+                  <span className="font-bold flex items-center space-x-1.5">
+                    {log.sender === 'user' ? (
+                      'Operator'
+                    ) : (
+                      <>
+                        <AgentAvatar role="coordinator" size={16} />
+                        <span>Dupond Core</span>
+                      </>
+                    )}
                   </span>
                   <span>{log.time}</span>
                 </div>
