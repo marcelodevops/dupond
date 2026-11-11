@@ -180,3 +180,6 @@ export interface PlanTemplate {
   description: string;
   planContent: string;
 }
+
+export * from './projectContract';
+
