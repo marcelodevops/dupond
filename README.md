@@ -18,6 +18,27 @@ Dupond (also referred to as **Dupond Orchestrator**) is an autonomous, server-au
 
 ---
 
+## 👥 Meet the Team
+
+Dupond frames its server-authoritative pipeline through the concept of a classic detective—**Dupond**—directing a specialized crew of friendly robot specialists. Each character symbolizes a clear operational responsibility across task preparation, implementation, sandboxed verification, and delivery:
+
+| <img src="resources/agents/coordinator.png" width="96" height="96" alt="Dupond — Bowler-hatted Detective Coordinator"><br>**Dupond**<br>*(Coordinator)* | <img src="resources/agents/planner.png" width="96" height="96" alt="Planner robot holding a parchment map"><br>**Planner**<br>*(Task & Spec Prep)* | <img src="resources/agents/coding-worker.png" width="96" height="96" alt="Coding Worker robot behind a laptop"><br>**Coding Worker**<br>*(Implementation)* |
+| :---: | :---: | :---: |
+| Orchestrates the sprint lifecycle, pins ephemeral worktrees to base commits, and manages state transitions. | Structures task specifications into explicit acceptance criteria, verification commands, and protected paths. | Executes multi-turn tool calling (file inspection, code edits, shell commands) in an isolated Git worktree. |
+| <img src="resources/agents/verifier.png" width="96" height="96" alt="Verifier robot inspecting clues with a magnifying glass"><br>**Verifier**<br>*(Authoritative Checks)* | <img src="resources/agents/reviewer.png" width="96" height="96" alt="Reviewer robot reading a document dossier"><br>**Reviewer**<br>*(Audit & Inspection)* | <img src="resources/agents/delivery.png" width="96" height="96" alt="Delivery robot holding a slate-blue briefcase"><br>**Delivery Agent**<br>*(PR Dispatch)* |
+| Authoritatively runs test commands inside OS sandboxes; strictly enforces worktree cleanliness and protected paths. | Collates verified diffs, token logs, and check results to prepare comprehensive evidence for human review. | Reconciles remote base drift, re-verifies integrated commits, and delivers pull requests via the GitHub CLI (`gh`). |
+
+> [!NOTE]
+> **Workflow Roles vs. Implemented Architecture**:
+> - **Operational Responsibilities**: These characters represent pipeline stages, not six independent running LLM agents.
+> - **Authoritative OS Sandboxing**: The **Verifier** represents deterministic execution in an isolated OS sandbox (Apple Seatbelt or Linux container) with command exit code checks—not an LLM self-evaluating code.
+> - **Mandatory Operator Gate**: The **Reviewer** prepares evidence for human review; it does **not** replace required human operator approval. Every pull request delivery requires explicit operator sign-off.
+> - **Provider Independence**: Character identity is separate from AI model providers. The **Coding Worker** operates with whichever LLM backend is configured (e.g. Google Gemini or OpenAI).
+>
+> For full visual guidelines, palette specifications, and UI integration rules, see the [Visual Identity Guide](docs/visual-identity.md).
+
+---
+
 ## 🎯 What Dupond Does
 
 ```
@@ -201,6 +222,7 @@ npm run prepare:sandbox
 - [Architecture & Sandbox Guide](docs/architecture-and-sandbox.md): Deep-dive into worktree management, Seatbelt profiles, Linux containers, and persistence schemas.
 - [Troubleshooting Guide](docs/troubleshooting.md): Solutions for missing credentials, rate limits, Linux Podman timeouts, and base drift conflicts.
 - [Live Demonstration Audit](docs/live-demonstration.md): Full analysis of live demonstrations in `marcelodevops/dupond-live-demo`.
+- [Visual Identity Guide](docs/visual-identity.md): Character-to-role mappings, ligne claire design system, palette specifications, and UI integration rules.
 - [Release Changelog](CHANGELOG.md): Notes and release history across versions.
 
 ---

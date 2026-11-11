@@ -6,6 +6,9 @@ This document defines the authoritative acceptance, verification, approval, and 
 
 ## 🏛️ 1. Core Philosophy: Zero-Trust Server Authoritativeness
 
+> [!NOTE]
+> **Visual Roles in the Pipeline**: In Dupond's [Visual Identity](visual-identity.md), the **Verifier** robot symbolizes authoritative sandboxed check execution, while the **Reviewer** robot collates diffs and telemetry for human inspection. As detailed below, the Reviewer never acts as an autonomous approver: approval strictly requires an authorized human operator.
+
 Dupond rejects all forms of worker self-attestation. An autonomous coding worker (whether powered by Google Gemini or OpenAI) cannot mark acceptance criteria as passed, declare a task complete, or approve a pull request:
 1. **External Verification**: All acceptance criteria are verified independently by Dupond executing operator-configured test commands inside an isolated OS sandbox (macOS Apple Seatbelt or Linux rootless container).
 2. **Cryptographic Revision & Specification Binding**: Verification evidence is bound directly to an exact Git commit SHA (`revisionSha`), its Git tree SHA (`revisionTreeSha`), a requirements fingerprint (`requirementsFingerprint`), a verification configuration fingerprint (`verificationConfigFingerprint`), and a protocol version (`evidenceBindingVersion`). It is never bound to abstract task keys or branch names.
