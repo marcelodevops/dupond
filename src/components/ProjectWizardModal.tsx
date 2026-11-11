@@ -69,17 +69,23 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
   const [jiraTemplates, setJiraTemplates] = useState<JiraTemplateOption[]>([]);
   const [jiraIssueTypes, setJiraIssueTypes] = useState<JiraIssueTypeOption[]>([]);
   const [confirmRemoteCreation, setConfirmRemoteCreation] = useState(false);
+  const [jiraMetadataError, setJiraMetadataError] = useState<string | null>(null);
 
   // Fetch Jira metadata on open
   useEffect(() => {
     if (isOpen) {
-      projectApi.fetchJiraMetadata().then((meta) => {
-        setJiraTemplates(meta.templates || []);
-        setJiraIssueTypes(meta.issueTypes || []);
-        if (meta.defaultTemplateKey) setSelectedTemplateKey(meta.defaultTemplateKey);
-        const epicType = meta.issueTypes?.find((t) => t.isEpic);
-        if (epicType) setSelectedIssueType(epicType.name);
-      });
+      setJiraMetadataError(null);
+      projectApi.fetchJiraMetadata()
+        .then((meta) => {
+          setJiraTemplates(meta.templates || []);
+          setJiraIssueTypes(meta.issueTypes || []);
+          if (meta.defaultTemplateKey) setSelectedTemplateKey(meta.defaultTemplateKey);
+          const epicType = meta.issueTypes?.find((t) => t.isEpic);
+          if (epicType) setSelectedIssueType(epicType.name);
+        })
+        .catch((err: any) => {
+          setJiraMetadataError(err.message || 'Remote Jira metadata unavailable.');
+        });
     }
   }, [isOpen]);
 
@@ -147,18 +153,20 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
       localWriteMode,
     };
 
+    // Unambiguous responsibilities: project creation establishes the local workspace shell.
+    // Remote Jira project/epic creation is explicitly owned by the subsequent provisionJira call,
+    // preventing remote resources from ever being provisioned twice.
     const projectPayload: CreateProjectRequest = {
       name: name.trim(),
       description: description.trim(),
       repository,
-      jira: {
-        mode: jiraMode,
-        projectKey: jiraProjectKey.trim().toUpperCase() || undefined,
-        projectName: jiraProjectName.trim() || undefined,
-        epicKey: jiraEpicKey.trim().toUpperCase() || undefined,
-        epicSummary: jiraEpicSummary.trim() || undefined,
-        templateKey: selectedTemplateKey || undefined,
-      },
+      jira: jiraMode === 'link_existing'
+        ? {
+            mode: 'link_existing',
+            projectKey: jiraProjectKey.trim().toUpperCase(),
+            epicKey: jiraEpicKey.trim().toUpperCase() || undefined,
+          }
+        : { mode: 'none' },
     };
 
     try {
@@ -597,7 +605,7 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
                         </div>
                       </div>
 
-                      {jiraTemplates.length > 0 && (
+                      {jiraTemplates.length > 0 ? (
                         <div>
                           <label className="text-xs font-semibold text-slate-300 block mb-1">
                             Jira Project Template
@@ -614,7 +622,11 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
                             ))}
                           </select>
                         </div>
-                      )}
+                      ) : jiraMetadataError ? (
+                        <div className="text-[11px] text-amber-300/80 font-medium bg-amber-950/30 p-2 rounded border border-amber-900/40">
+                          Template metadata unavailable ({jiraMetadataError}). Default project template will be used.
+                        </div>
+                      ) : null}
 
                       <div className="p-3 rounded-lg bg-amber-950/40 border border-amber-800/50 text-amber-200 text-xs">
                         <label className="flex items-start space-x-2 cursor-pointer">
