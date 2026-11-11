@@ -22,6 +22,7 @@ import {
   Tag
 } from 'lucide-react';
 import { AgentAvatar } from './AgentAvatar';
+import { EmptyProjectView } from './EmptyProjectView';
 
 interface KanbanBoardProps {
   tasks: Task[];
@@ -30,6 +31,8 @@ interface KanbanBoardProps {
   onTaskClick: (task: Task) => void;
   onUpdateTaskStatus: (taskId: string, newStatus: TaskStatus) => void;
   onOpenAddTaskModal: () => void;
+  onOpenIngestModal?: () => void;
+  onOpenIntegrations?: () => void;
   activeProcessingTaskId?: string;
 }
 
@@ -48,6 +51,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   onTaskClick,
   onUpdateTaskStatus,
   onOpenAddTaskModal,
+  onOpenIngestModal,
+  onOpenIntegrations,
   activeProcessingTaskId,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -197,9 +202,16 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
         </div>
       </div>
 
-      {/* 5-Column Responsive Board */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3.5 items-start">
-        {COLUMNS.map((col) => {
+      {/* 5-Column Responsive Board or Empty Workspace State */}
+      {tasks.length === 0 ? (
+        <EmptyProjectView
+          onOpenAddTaskModal={onOpenAddTaskModal}
+          onOpenIngestModal={onOpenIngestModal}
+          onOpenIntegrations={onOpenIntegrations}
+        />
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3.5 items-start">
+          {COLUMNS.map((col) => {
           const colTasks = filteredTasks.filter((t) => t.status === col.id);
           const totalColHours = colTasks.reduce((sum, t) => sum + (t.estimatedHours || 0), 0);
 
@@ -423,6 +435,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           );
         })}
       </div>
+      )}
     </div>
   );
 };
