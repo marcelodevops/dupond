@@ -234,6 +234,13 @@ export function validateApprovalExpectation(params: {
       detail: `The evidence this approval rested on (${expectation.verificationId}) is no longer the latest verification for this run.`,
     };
   }
+  if (verification.revisionSha !== expectation.revisionSha) {
+    return {
+      accepted: false,
+      reason: 'evidence-revision-mismatch',
+      detail: `The evidence this approval rested on (${verification.id}) attests revision ${verification.revisionSha}, but the approval certifies ${expectation.revisionSha}. Fresh verification and approval for the delivered revision are required.`,
+    };
+  }
   const validity = assessEvidenceValidity(task, verification);
   if (!validity.valid) {
     return { accepted: false, reason: validity.reason, detail: validity.detail };
