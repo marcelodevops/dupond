@@ -15,9 +15,18 @@ let authRequired = false;
 const listeners = new Set<AuthListener>();
 
 let projectHeaderProvider: (() => string | null) | null = null;
+let apiBaseUrl = '';
 
 export function registerProjectHeaderProvider(provider: () => string | null): void {
   projectHeaderProvider = provider;
+}
+
+export function setApiBaseUrl(url: string): void {
+  apiBaseUrl = url.replace(/\/$/, '');
+}
+
+export function getApiBaseUrl(): string {
+  return apiBaseUrl;
 }
 
 function setAuthRequired(next: boolean) {
@@ -70,7 +79,11 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     }
   }
 
-  const response = await fetch(input, { ...init, headers });
+  const targetUrl = apiBaseUrl && input.startsWith('/')
+    ? `${apiBaseUrl}${input}`
+    : input;
+
+  const response = await fetch(targetUrl, { ...init, headers });
   setAuthRequired(response.status === 401);
   return response;
 }

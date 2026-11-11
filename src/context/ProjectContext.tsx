@@ -25,6 +25,8 @@ interface ProjectContextValue {
   isSwitchingProject: boolean;
   projectError: string | null;
   isArchived: boolean;
+  boardRefreshTrigger: number;
+  triggerBoardRefresh: () => void;
   switchProject: (projectId: string) => Promise<void>;
   refreshProjects: () => Promise<void>;
   createProject: (req: CreateProjectRequest) => Promise<Project>;
@@ -51,6 +53,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
   const [isSwitchingProject, setIsSwitchingProject] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
+  const [boardRefreshTrigger, setBoardRefreshTrigger] = useState(0);
 
   // Modals state
   const [isCreateWizardOpen, setIsCreateWizardOpen] = useState(false);
@@ -62,6 +65,10 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const switchEpochRef = useRef(0);
   const abortCtrlRef = useRef<AbortController | null>(null);
 
+  const triggerBoardRefresh = useCallback(() => {
+    setBoardRefreshTrigger((prev) => prev + 1);
+  }, []);
+
   const refreshProjects = useCallback(async () => {
     setIsLoadingProjects(true);
     setProjectError(null);
@@ -71,25 +78,36 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       // Determine active project if none or if current is missing
       const activeId = getActiveProjectId();
-      const targetId = activeId || (list.length > 0 ? list[0].id : 'default');
+      const targetId = activeId || (list.length > 0 ? list[0].id : null);
 
-      if (!activeId && targetId) {
-        setActiveProjectId(targetId);
-      }
-
-      // Fetch full details of target project
-      try {
-        const full = await projectApi.getProject(targetId);
-        setCurrentProject(full);
-      } catch (err: any) {
-        if (list.length > 0) {
-          const fallback = await projectApi.getProject(list[0].id);
-          setActiveProjectId(list[0].id);
-          setCurrentProject(fallback);
+      if (targetId) {
+        if (!activeId) {
+          setActiveProjectId(targetId);
         }
+        try {
+          const full = await projectApi.getProject(targetId);
+          setCurrentProject(full);
+        } catch (err: any) {
+          if (list.length > 0 && list[0].id !== targetId) {
+            try {
+              const fallback = await projectApi.getProject(list[0].id);
+              setActiveProjectId(list[0].id);
+              setCurrentProject(fallback);
+            } catch {
+              setCurrentProject(null);
+            }
+          } else {
+            setCurrentProject(null);
+            setProjectError(err.message || `Failed to load project ${targetId}`);
+          }
+        }
+      } else {
+        setCurrentProject(null);
       }
     } catch (err: any) {
-      setProjectError(err.message || 'Failed to load projects');
+      setProjects([]);
+      setCurrentProject(null);
+      setProjectError(err.message || 'Failed to load projects from server.');
     } finally {
       setIsLoadingProjects(false);
     }
@@ -115,6 +133,9 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // 2. Update client session storage
     setActiveProjectId(targetProjectId);
 
+    // 3. Immediately trigger board reload/clearing so previous project state is not leaked
+    triggerBoardRefresh();
+
     try {
       const full = await projectApi.getProject(targetProjectId, abortCtrl.signal);
       // Verify we are still in the same epoch
@@ -131,7 +152,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setIsSwitchingProject(false);
       }
     }
-  }, [currentProject?.id]);
+  }, [currentProject?.id, triggerBoardRefresh]);
 
   // Initial load
   useEffect(() => {
@@ -162,28 +183,42 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const res = await projectApi.archiveProject(projectId);
     await refreshProjects();
     if (currentProject?.id === projectId) {
-      const updated = await projectApi.getProject(projectId);
-      setCurrentProject(updated);
+      try {
+        const updated = await projectApi.getProject(projectId);
+        setCurrentProject(updated);
+      } catch {
+        // Project list already updated
+      }
     }
     return res;
   }, [currentProject?.id, refreshProjects]);
 
   const resetProject = useCallback(async (projectId: string, req: ResetProjectRequest): Promise<ResetProjectResponse> => {
     const res = await projectApi.resetProject(projectId, req);
+    // Force immediate board invalidation and reload
+    triggerBoardRefresh();
     await refreshProjects();
     if (currentProject?.id === projectId) {
-      const updated = await projectApi.getProject(projectId);
-      setCurrentProject(updated);
+      try {
+        const updated = await projectApi.getProject(projectId);
+        setCurrentProject(updated);
+      } catch {
+        // Project list already refreshed
+      }
     }
     return res;
-  }, [currentProject?.id, refreshProjects]);
+  }, [currentProject?.id, refreshProjects, triggerBoardRefresh]);
 
   const provisionJira = useCallback(async (projectId: string, req: ProvisionJiraRequest): Promise<ProvisionJiraResponse> => {
     const res = await projectApi.provisionJira(projectId, req);
     await refreshProjects();
     if (currentProject?.id === projectId) {
-      const updated = await projectApi.getProject(projectId);
-      setCurrentProject(updated);
+      try {
+        const updated = await projectApi.getProject(projectId);
+        setCurrentProject(updated);
+      } catch {
+        // Project list already refreshed
+      }
     }
     return res;
   }, [currentProject?.id, refreshProjects]);
@@ -215,6 +250,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isSwitchingProject,
         projectError,
         isArchived,
+        boardRefreshTrigger,
+        triggerBoardRefresh,
         switchProject,
         refreshProjects,
         createProject,
