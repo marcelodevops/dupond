@@ -19,5 +19,14 @@ coverage/
 .dupond_worktrees/
 data/*.db
 data/*.db-*
+data/*.db-*
 data/.dupond_auth_token
 .qoder/
+
+# Local runtime state and debug scratch
+data/*_state.json
+.scratch/
+.aegis_artifacts/
+.dupond_artifacts/
+graphify-out/
+.remember/
