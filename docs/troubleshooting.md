@@ -9,15 +9,20 @@ This guide covers common errors, causes, and solutions when configuring and runn
 ### Error: `401 Unauthorized` on API requests
 - **Cause**: Dupond enforces Bearer token authentication across all API endpoints (except public `/api/health`).
 - **Solution**:
-  1. Ensure `DUPOND_AUTH_TOKEN` is set when starting the server:
+  1. Ensure `DUPOND_API_KEY` (or `DUPOND_AUTH_TOKEN`) is set when starting the server (`DUPOND_API_KEY` takes precedence):
      ```bash
-     export DUPOND_AUTH_TOKEN="your_operator_secret_token"
+     export DUPOND_API_KEY="your_operator_secret_token"
+     # or: export DUPOND_AUTH_TOKEN="your_operator_secret_token"
      ```
-  2. Include the header in your requests:
+  2. Include the header in your requests (`Authorization: Bearer <token>` or `X-Dupond-Token: <token>`):
      ```bash
      -H "Authorization: Bearer your_operator_secret_token"
+     # or: -H "X-Dupond-Token: your_operator_secret_token"
      ```
-  3. If `DUPOND_AUTH_TOKEN` was not set, check the server startup log for the ephemeral token generated for that session.
+  3. If neither `DUPOND_API_KEY` nor `DUPOND_AUTH_TOKEN` is set, Dupond automatically generates a secure token and persists it to `data/.dupond_auth_token` with `0600` file permissions. Read the token from disk:
+     ```bash
+     cat data/.dupond_auth_token
+     ```
 
 ### Error: `Prerequisite missing: GEMINI_API_KEY is not set`
 - **Cause**: The coding worker is configured for `gemini` but lacks an API key.
