@@ -16,10 +16,10 @@ This walkthrough demonstrates the complete operational flow of Dupond v0.1.0 usi
 
 ## 1. Starting the Server
 
-Set your environment variables and start Dupond:
+Set your environment variables and start Dupond (`DUPOND_API_KEY` takes precedence over `DUPOND_AUTH_TOKEN`; if neither is set, Dupond persists a generated token to `data/.dupond_auth_token`):
 
 ```bash
-export DUPOND_AUTH_TOKEN="your_secure_operator_token"
+export DUPOND_API_KEY="your_secure_operator_token"  # or export DUPOND_AUTH_TOKEN="..."
 export GEMINI_API_KEY="your_gemini_api_key"
 export GEMINI_MODEL="gemini-3.5-flash"  # or gemini-3.8-flash
 export PORT=3000
