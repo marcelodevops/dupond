@@ -1,4 +1,5 @@
 import { DomainError } from './utils/errors';
+import { GEMINI_MODEL } from './gemini';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -924,7 +925,7 @@ ${implementationCode.slice(0, 500)}...
         protectedPaths: protectedPaths,
         verificationCommands: verificationCommands.length > 0 ? verificationCommands : ['npm test'],
         acceptanceCriteria: criteria,
-        workerConfig: task.workerConfig || { provider: 'gemini', model: 'gemini-3.8-flash' },
+        workerConfig: task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
         maxAttempts: task.maxAttempts || 3,
         timeoutSeconds: task.timeoutSeconds || 300,
         requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
