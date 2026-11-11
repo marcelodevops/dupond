@@ -15,6 +15,8 @@ import {
   Layers
 } from 'lucide-react';
 
+const dupondLogo = new URL('../../resources/dupond-logo.png', import.meta.url).href;
+
 interface HeaderProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
@@ -56,8 +58,12 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Brand & Project Info */}
           <div className="flex items-center space-x-3">
             <div className="relative flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 via-purple-600 to-cyan-500 p-[2px] shadow-lg shadow-indigo-500/20">
-              <div className="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center">
-                <Bot className="w-5 h-5 text-indigo-400 animate-pulse" />
+              <div className="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center overflow-hidden">
+                <img
+                  src={dupondLogo}
+                  alt="Dupond logo"
+                  className="w-full h-full object-contain p-0.5 rounded-[8px]"
+                />
               </div>
               <span className="absolute -top-1 -right-1 flex h-3 w-3">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
