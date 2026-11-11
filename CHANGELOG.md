@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/marcelodevops/dupond/compare/v0.4.5...v0.5.0) (2026-11-11)
+
+
+### Features
+
+* **ui:** add brand logo to header and coordinator avatar to directives terminal ([e048dbe](https://github.com/marcelodevops/dupond/commit/e048dbe680413c1875d6e70d4867fd5eef3c3038))
+* **ui:** add reusable AgentAvatar component and role-to-asset mapping ([381f0a2](https://github.com/marcelodevops/dupond/commit/381f0a27b468ba8d8640efa694048bd6644e016e))
+* **ui:** integrate character avatars across kanban, modals, matrix, diagrams, and activity feed ([3014ecc](https://github.com/marcelodevops/dupond/commit/3014ecc7598668066f0a581d5bccb58ee8773524))
+* **ui:** integrate Dupond character avatars across application ([b391273](https://github.com/marcelodevops/dupond/commit/b3912736a97de985ff88e503c197765c57a610e9))
+
+
+### Bug Fixes
+
+* **tests:** prevent task key collision in guardrails regression test ([ada2907](https://github.com/marcelodevops/dupond/commit/ada29075cc9a012b9f86fa192fb85adffc4683e6))
+
 ## [0.4.5](https://github.com/marcelodevops/dupond/compare/v0.4.4...v0.4.5) (2026-11-11)
 
 
