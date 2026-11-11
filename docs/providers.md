@@ -2,6 +2,11 @@
 
 Dupond features a **provider-independent coding worker architecture**. An operator can select Google Gemini or OpenAI (with an explicit model) on a per-task basis. Both providers share the exact same controlled workspace tools, execution sandbox, protected-path boundaries, authoritative verification, human approval gate, and delivery pipeline.
 
+<p align="center">
+  <img src="../resources/agents/coding-worker.png" alt="Coding Worker Robot" width="88" height="88"><br>
+  <em>The Coding Worker specialist executes tool-calling in isolated worktrees, independently of whether Google Gemini or OpenAI is configured. See the <a href="visual-identity.md">Visual Identity Guide</a>.</em>
+</p>
+
 ---
 
 ## 🏛️ Architecture Overview

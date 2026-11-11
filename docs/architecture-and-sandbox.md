@@ -1,6 +1,9 @@
 # Architecture, Storage & Execution Sandbox
 
-This document outlines the architecture, persistence layers, isolation mechanisms, and security boundaries implemented in Dupond v0.1.0.
+This document outlines the architecture, persistence layers, isolation mechanisms, and security boundaries implemented in Dupond.
+
+> [!NOTE]
+> **Visual Roles in System Architecture**: In Dupond's [Visual Identity](visual-identity.md), the **Coordinator** (Dupond) orchestrates the task state and worktree lifecycles, while the **Verifier** robot executes authoritative test commands inside the OS sandbox.
 
 ---
 
