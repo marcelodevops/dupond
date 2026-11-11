@@ -6,8 +6,7 @@ import { safeRequest, EgressBlockedError } from '../egress.js';
  * fail-closed; a deployment that genuinely serves local models opts in.
  */
 export const ALLOW_PRIVATE_PROVIDER_HOSTS =
-  process.env.DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS === 'true' ||
-  process.env.AEGIS_ALLOW_PRIVATE_PROVIDER_HOSTS === 'true';
+  process.env.DUPOND_ALLOW_PRIVATE_PROVIDER_HOSTS === 'true';
 
 export function isBlockedError(error: any): boolean {
   return error instanceof EgressBlockedError;
