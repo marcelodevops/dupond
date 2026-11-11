@@ -96,6 +96,30 @@ When `/api/delivery/dispatch` is invoked ([src/server/delivery/githubDelivery.ts
 5. **Criteria Exhaustion**: Every criterion defined in `task.acceptanceCriteria` must be present in `verification.criteriaVerified`. If any criterion is missing, returns HTTP 400.
 6. **Evidence Currency & Binding Validity**: `assessEvidenceValidity(task, verification)` must return `valid: true`. Fails closed if requirements or verification config changed, if criteria remain uncovered, or if evidence predates binding (`legacy-evidence`).
 
+### 2.4 Pre- and Post-Execution Worktree Cleanliness Checks
+Evidence certifies an exact commit revision, which means test commands must execute against strictly that commit's committed tree. `AuthoritativeVerifier` ([src/server/verification/authoritativeVerifier.ts](../src/server/verification/authoritativeVerifier.ts)) authoritatively enforces worktree cleanliness at both ends of execution:
+1. **Pre-Execution Cleanliness Check**: Before executing any verification command, the verifier invokes `git status --porcelain --untracked-files=all`. If any tracked modifications or untracked files are present, verification fails closed immediately (`Candidate not deliverable: worktree has N uncommitted change(s)`). Verification never tests working tree changes that differ from the recorded commit revision.
+2. **Post-Execution Cleanliness & HEAD Invariance Check**: After all verification commands complete, the verifier re-checks `git status --porcelain --untracked-files=all` and verifies that `git rev-parse HEAD` did not advance. If commands modified files, created untracked output, or advanced HEAD, verification fails closed (`Verification commands altered the candidate`). Passing evidence is only granted if the worktree remains clean and committed.
+
+### 2.5 Transactional Approval Binding & Dispatch Snapshot Protection
+Approval in Dupond is not a loose boolean flag. It is cryptographically bound to an exact contract and revision identity tuple ([src/server/verification/evidenceBinding.ts](../src/server/verification/evidenceBinding.ts)):
+
+```typescript
+export interface ApprovalExpectation {
+  revisionSha: string;
+  requirementsFingerprint: string;
+  verificationConfigFingerprint: string;
+  verificationId: string;
+  evidenceBindingVersion: string;
+}
+```
+
+This approval identity is persisted directly in SQLite columns on `delivery_records` (`approval_requirements_fingerprint`, `approval_verification_config_fingerprint`, `approval_revision_sha`, `approval_verification_id`, `approval_binding_version`).
+
+1. **Dispatch Snapshot Protection**: When `/api/delivery/dispatch` executes ([src/server/delivery/githubDelivery.ts](../src/server/delivery/githubDelivery.ts)), the candidate revision, contract (specification, criteria, and verification commands), and verification evidence row are captured from the validated dispatch context. Everything the operator accepts is derived from this snapshot and never re-read from unbounded ambient state, preventing race conditions where mid-dispatch contract edits could be certified by an approval intended for an earlier contract.
+2. **Transactional Approval Validation**: Both `store.recordDelivery(record, approvalExpectation)` and `store.approveDelivery(id, approvedBy, approvalExpectation)` execute `validateApprovalExpectation` *inside an immediate SQLite write transaction* ([src/server/db/database.ts](../src/server/db/database.ts)). If requirements changed, newer evidence landed, or candidate revisions drifted between preparation and database write, the approval refuses fail-closed (`stale-approval`, `approval-revision-mismatch`, etc.) and the delivery remains at `pending_approval`.
+3. **Atomic Lifecycle Re-Validation**: When `LifecycleService.transition({ to: 'done' })` executes, it evaluates the fresh in-transaction `LifecycleSnapshot` and enforces `validateRecordedApprovalCurrency(task, verification, delivery)`. Any divergence between the recorded approval and current contract blocks transition to `done`.
+
 ---
 
 ## 🔄 3. Invalidation, Drift Reconciliation & Re-Approval
@@ -196,10 +220,8 @@ When a task is retried after a restart, `WorkspaceManager.createWorktree(runId, 
 ## 🔭 6. Remaining Areas for Architectural Hardening
 
 The following items are identified for subsequent milestones:
-1. **Worktree Cleanliness Check (`git status --porcelain`)**:
-   `AuthoritativeVerifier` should assert that the worktree is strictly clean before and after verification command execution, guaranteeing that tests ran against the exact committed `HEAD^{tree}` and did not leave dirty modifications.
-2. **Durable Worktree Recovery at Delivery**:
+1. **Durable Worktree Recovery at Delivery**:
    `GitHubDeliveryService` should automatically re-provision a worktree from `refs/dupond/verified/<runId>` if the ephemeral worktree was pruned prior to operator delivery dispatch.
-3. **Unified Single-Store UI API**:
+2. **Unified Single-Store UI API**:
    Completely retire `dupond_state.json` so all UI views read reactively from SQLite `TaskStore`, eliminating the dual-state projection gap entirely.
 
