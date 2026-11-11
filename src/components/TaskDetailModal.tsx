@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Task, Agent, Epic, TaskStatus, Priority } from '../types';
 import { apiFetch } from '../lib/api';
 import { withPromotedChecklistItem } from '../services/acceptanceMapping';
+import { AgentAvatar } from './AgentAvatar';
 import { 
   X, 
   CheckCircle2, 
@@ -272,17 +273,20 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
               <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
                 Assigned Specialist
               </label>
-              <select
-                value={task.assignedAgentId}
-                onChange={(e) => onUpdateTask({ ...task, assignedAgentId: e.target.value })}
-                className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              >
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({a.role.split(' ')[0]})
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center space-x-2">
+                {assignee && <AgentAvatar agent={assignee} size={28} />}
+                <select
+                  value={task.assignedAgentId}
+                  onChange={(e) => onUpdateTask({ ...task, assignedAgentId: e.target.value })}
+                  className="flex-1 min-w-0 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  {agents.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} ({a.role.split(' ')[0]})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           </div>
 
@@ -571,11 +575,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
           <div className="flex items-center space-x-2">
             {assignee && (
               <div className="flex items-center space-x-2 text-xs text-slate-300">
-                <img
-                  src={assignee.avatar}
-                  alt={assignee.name}
-                  className="w-5 h-5 rounded-full object-cover border border-slate-700"
-                />
+                <AgentAvatar agent={assignee} size={24} />
                 <span className="font-medium">{assignee.name}</span>
                 <span className="text-[10px] text-indigo-400 bg-indigo-950 px-1 rounded">
                   {assignee.role}
