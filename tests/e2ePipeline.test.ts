@@ -601,7 +601,7 @@ async function runAcceptanceSuite() {
     const ciContent = fs.readFileSync(path.resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf-8');
     assert.ok(ciContent.includes('npm run lint'));
     assert.ok(ciContent.includes('npm run build'));
-    assert.ok(ciContent.includes('tests/e2ePipeline.test.ts'));
+    assert.ok(ciContent.includes('npm test'));
     passScenario(13, 'Dupond CI workflow present and configured for all verification stages');
 
     console.log(`\n===============================================================`);
