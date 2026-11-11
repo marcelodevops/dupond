@@ -2,7 +2,7 @@
  * Import this BEFORE anything that touches the coordinator: it points the
  * server state file at a throwaway directory and seeds it with credentials that
  * are obviously fake, so the credential tests can assert on real values without
- * writing a token-shaped string into data/aegis_state.json.
+ * writing a token-shaped string into data/dupond_state.json.
  */
 
 import fs from 'fs';
@@ -33,9 +33,7 @@ export const SENTINEL_SECRETS: string[] = [
 
 function seed(): void {
   const repoRoot = path.resolve(import.meta.dirname, '..');
-  const shippedPath = fs.existsSync(path.join(repoRoot, 'data', 'dupond_state.json'))
-    ? path.join(repoRoot, 'data', 'dupond_state.json')
-    : path.join(repoRoot, 'data', 'aegis_state.json');
+  const shippedPath = path.join(repoRoot, 'data', 'dupond_state.json');
 
   // Start from the shipped shape when present so the section-missing case is
   // exercised too, otherwise fall back to a hand-built config.
@@ -92,6 +90,22 @@ function seed(): void {
   );
 }
 
+function seedArtifacts(): void {
+  const repoRoot = path.resolve(import.meta.dirname, '..');
+  const artifactDir = path.join(repoRoot, '.dupond_artifacts', 'AEG-104');
+  const fixtureDir = path.join(repoRoot, 'tests', 'fixtures', 'aeg104-artifacts');
+  if (fs.existsSync(fixtureDir)) {
+    fs.mkdirSync(artifactDir, { recursive: true });
+    for (const artifactFile of ['implementation.js', 'spec.test.js']) {
+      const src = path.join(fixtureDir, artifactFile);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, path.join(artifactDir, artifactFile));
+      }
+    }
+  }
+}
+
 seed();
+seedArtifacts();
 process.env.DUPOND_STATE_FILE = STATE_FILE;
-process.env.AEGIS_STATE_FILE = STATE_FILE;
+process.env.DUPOND_DB_PATH = path.join(STATE_DIR, 'dupond.db');

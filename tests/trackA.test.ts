@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 /**
  * Track A — execution isolation, path containment, SSRF and credential tests.
  *
@@ -39,9 +40,7 @@ const TRAVERSAL_KEYS = ['../outside', '../../tmp/evil', '..', 'AEG-104/../../sec
 async function main() {
   console.log('=== TRACK A: ISOLATION, CONTAINMENT, SSRF, CREDENTIALS ===\n');
 
-  const ARTIFACTS_ROOT = fs.existsSync(path.resolve(import.meta.dirname, '../.dupond_artifacts'))
-    ? path.resolve(import.meta.dirname, '../.dupond_artifacts')
-    : path.resolve(import.meta.dirname, '../.aegis_artifacts');
+  const ARTIFACTS_ROOT = path.resolve(import.meta.dirname, '../.dupond_artifacts');
 
   await runTest('final acceptance rejects completed criteria without passing test evidence', async () => {
     const task = {
@@ -99,7 +98,7 @@ async function main() {
     // A naive startsWith(base) check passes for this path, which is exactly how
     // the original bug stayed hidden.
     const sneaky = path.resolve(ARTIFACTS_ROOT, '../outside/implementation.js');
-    assert.ok(sneaky.startsWith(path.resolve(ARTIFACTS_ROOT).replace(/\.(dupond|aegis)_artifacts$/, '')));
+    assert.ok(sneaky.startsWith(path.resolve(ARTIFACTS_ROOT).replace(/\.dupond_artifacts$/, '')));
     assert.strictEqual(isPathLexicallyContained(ARTIFACTS_ROOT, sneaky), false);
     assert.strictEqual(isPathLexicallyContained(ARTIFACTS_ROOT, path.resolve(ARTIFACTS_ROOT, 'AEG-104')), true);
   });
@@ -443,11 +442,7 @@ async function main() {
 
   console.log(`\n=== TRACK A SUITE: ${passed}/${total} PASSED ===`);
   fs.rmSync(STATE_DIR, { recursive: true, force: true });
-  if (passed !== total) process.exitCode = 1;
+  if (passed !== total) throw new Error(`Track A suite: ${passed}/${total} tests passed`);
 }
 
-main().catch((err) => {
-  console.error('Track A suite crashed:', err);
-  fs.rmSync(STATE_DIR, { recursive: true, force: true });
-  process.exitCode = 1;
-});
+test('suite', main);

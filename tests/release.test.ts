@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import os from 'os';
@@ -482,7 +483,4 @@ async function main() {
   console.log('\n=== ALL RELEASE AUTOMATION TESTS PASSED ===');
 }
 
-main().catch((err) => {
-  console.error('Release automation test failed:', err);
-  process.exit(1);
-});
+test('suite', main);

@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
@@ -349,7 +350,4 @@ async function main() {
   console.log('\n=== ALL DISPOSABLE REPOSITORY WORKSPACE & DELIVERY PROOFS PASSED ===');
 }
 
-main().catch((err) => {
-  console.error('Disposable repo test suite failed:', err);
-  process.exit(1);
-});
+test('suite', main);

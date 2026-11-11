@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
@@ -1029,7 +1030,4 @@ async function main() {
   console.log('\n=== ALL ACCEPTANCE EVIDENCE & LIFECYCLE TESTS PASSED CLEANLY ===');
 }
 
-main().catch((err) => {
-  console.error('Acceptance evidence test failed:', err);
-  process.exit(1);
-});
+test('suite', main);

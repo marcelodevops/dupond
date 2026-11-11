@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 /**
  * Dupond Orchestrator - Guardrails & Delivery Fail-Closed Regression Suite
  * 
@@ -9,10 +10,18 @@ import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { coordinator } from '../src/server/coordinator.js';
-import { handleRepositoryDispatch, isPathContained } from '../src/server/deliveryHandler.js';
-import { calculateAgentLoad } from '../src/services/workloadBalancer.js';
-import { taskStore } from '../src/server/db/database.js';
+
+// Isolate the authoritative store and state file so the suite cannot observe
+// (or corrupt) the developer's live data/dupond.db and data/dupond_state.json.
+// Must run before the server modules are imported: they resolve their paths
+// from the environment at module load.
+process.env.DUPOND_DB_PATH = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-guardrails-db-')) + '/guardrails.db';
+process.env.DUPOND_STATE_FILE = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-guardrails-state-')) + '/state.json';
+
+const { coordinator } = await import('../src/server/coordinator.js');
+const { handleRepositoryDispatch, isPathContained } = await import('../src/server/deliveryHandler.js');
+const { calculateAgentLoad } = await import('../src/services/workloadBalancer.js');
+const { taskStore } = await import('../src/server/db/database.js');
 
 console.log('=== RUNNING DUPOND GUARDRAILS & LIVE DELIVERY REGRESSION SUITE ===\n');
 
@@ -37,6 +46,15 @@ async function runTest(name: string, fn: () => void | Promise<void>) {
 async function executeSuite() {
   // Temporary directory fixture for live tests
   const testBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-guardrails-'));
+
+  // Seed the verified AEG-104 deliverable artifact from the tracked fixture:
+  // the artifact store is runtime-local (gitignored), so a fresh checkout
+  // would otherwise leave the AEG-104 worker step with nothing to verify.
+  const artifactDir = path.resolve(import.meta.dirname, '../.dupond_artifacts/AEG-104');
+  fs.mkdirSync(artifactDir, { recursive: true });
+  for (const artifactFile of ['implementation.js', 'spec.test.js']) {
+    fs.copyFileSync(path.resolve(import.meta.dirname, 'fixtures/aeg104-artifacts', artifactFile), path.join(artifactDir, artifactFile));
+  }
 
   const aeg104Task = {
     id: 'task-104',
@@ -413,7 +431,4 @@ async function executeSuite() {
   console.log(`\n=== REGRESSION SUITE COMPLETE: ${passedTests}/${totalTests} TESTS PASSED CLEANLY ===`);
 }
 
-executeSuite().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+test('suite', executeSuite);

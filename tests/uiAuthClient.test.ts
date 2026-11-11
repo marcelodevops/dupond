@@ -6,7 +6,9 @@
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
+import { test } from 'vitest';
 
+test('UI auth client regression suite', async () => {
 console.log('=== RUNNING UI AUTH CLIENT REGRESSION SUITE ===\n');
 
 const SEED_TOKEN = 'dp_seed_token';
@@ -92,3 +94,4 @@ for (const file of clientFiles) {
 console.log(`✔ [PASS] ${clientFiles.length - 1} client modules keep API calls authenticated`);
 
 console.log('\n=== UI AUTH CLIENT REGRESSION SUITE PASSED ===');
+});

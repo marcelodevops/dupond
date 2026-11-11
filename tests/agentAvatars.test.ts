@@ -8,7 +8,9 @@ import {
   CHARACTER_ROLE_DETAILS,
   CharacterRole,
 } from '../src/lib/agentAvatars.ts';
+import { test } from 'vitest';
 
+test('agent avatar & role mapping suite', async () => {
 console.log('=== RUNNING AGENT AVATAR & ROLE MAPPING TESTS ===\n');
 
 // 1. Asset file verification
@@ -148,3 +150,4 @@ console.log('✔ [PASS] Role details metadata is complete and accessible');
 console.log('\n===============================================================');
 console.log('=== ALL AGENT AVATAR & ROLE MAPPING TESTS PASSED CLEANLY ===');
 console.log('===============================================================');
+});

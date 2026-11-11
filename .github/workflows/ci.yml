@@ -53,47 +53,8 @@ jobs:
       - name: Pre-pull sandbox container image
         run: npm run prepare:sandbox
 
-      - name: Run Guardrails & Delivery regression suite
-        run: npx tsx tests/guardrails.test.ts
-
-      - name: Run Isolation, Containment, SSRF & Security suite
-        run: npx tsx tests/trackA.test.ts
-
-      - name: Run Database & Transactional Store suite
-        run: npx tsx tests/db.test.ts
-
-      - name: Run Workspace & Sandbox Isolation suite
-        run: npx tsx tests/sandbox.test.ts
-
-      - name: Run Coding Worker Adapter suite
-        run: npx tsx tests/workerAdapter.test.ts
-
-      - name: Run Repair Loop & Authoritative Verification suite
-        run: npx tsx tests/repairLoop.test.ts
-
-      - name: Run GitHub Delivery & PR Reconciliation suite
-        run: npx tsx tests/delivery.test.ts
-
-      - name: Run Acceptance Evidence Lifecycle suite
-        run: npx tsx tests/acceptanceEvidenceLifecycle.test.ts
-
-      - name: Run Acceptance Mapping & Criteria Editor suite
-        run: npx tsx tests/acceptanceMapping.test.ts
-
-      - name: Run Disposable Repository & Base Drift Suite
-        run: npx tsx tests/disposableRepo.test.ts
-
-      - name: Run End-to-End Acceptance Scenarios
-        run: npx tsx tests/e2ePipeline.test.ts
-
-      - name: Run UI Auth Client suite
-        run: npx tsx tests/uiAuthClient.test.ts
-
-      - name: Run UI Auth Gate render suite
-        run: npx tsx tests/uiAuthGate.test.ts
-
-      - name: Run Release Policy & Version Consistency suite
-        run: npx tsx tests/release.test.ts
+      - name: Run automated test suite (vitest)
+        run: npm test
 
       - name: Check release version metadata and policy
         run: npm run release:check

@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import os from 'os';
@@ -498,7 +499,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('\n✖ [TEST SUITE FAILED]:', err);
-  process.exit(1);
-});
+test('suite', main);

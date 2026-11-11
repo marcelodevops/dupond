@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 /**
  * Dupond Project Management, API Adapter & Lifecycle Test Suite
  * 
@@ -290,7 +291,4 @@ async function executeSuite() {
   console.log('===============================================================');
 }
 
-executeSuite().catch((err) => {
-  console.error('\nFAILED TEST SUITE:', err);
-  process.exit(1);
-});
+test('suite', executeSuite);
