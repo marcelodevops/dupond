@@ -43,6 +43,7 @@ async function main() {
   const {
     computeEvidenceBinding,
     assessEvidenceValidity,
+    validateApprovalExpectation,
     verifiedRefForRun,
     EVIDENCE_BINDING_VERSION,
   } = await import('../src/server/verification/evidenceBinding.ts');
@@ -896,6 +897,124 @@ async function main() {
     assert.ok(auditsJ.some((a: any) => a.eventType === 'DELIVERY_REAPPROVED'), 'the granted approval is audited');
     connD.getRawDb().close();
     console.log('✔ [PASS] Reapproval is atomically bound to the current contract and revision; stale approvals are refused');
+
+    // ------------------------------------------------------------------
+    // Part 17b: dispatch must never rebuild consent from re-read rows.
+    // Reproduction of the approval-identity race: dispatch validates
+    // contract A and evidence A; another connection lands contract B plus
+    // fresh passing evidence B on the same commit strictly BEFORE the
+    // approval identity is constructed (not merely before the write). The
+    // expectation must still certify A, so the transactional validation
+    // at the approval write refuses; pre-fix, re-reading the task and
+    // evidence at identity-construction time made the original operator
+    // silently approve B.
+    // ------------------------------------------------------------------
+    const taskK = makeTask({ key: 'AEG-9145', description: 'contract A: the spec the operator reviewed' });
+    const runK = await runToReview(taskK);
+    const verK = store.getLatestVerification(runK.id)!;
+    wsManager.createWorktree(runK.id, runK.targetBranch!, verK.revisionSha);
+    const dK1 = await deliveryService.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k1', disposableRemoteDir: bareRemote });
+    assert.strictEqual(dK1.success, true, `baseline approved delivery: ${dK1.error}`);
+    const delK = store.getDeliveryForRun(runK.id)!;
+    const prUrlK = delK.prUrl;
+    const revisionK = delK.deliveredCommit;
+    const refsK = git(['for-each-ref', '--format=%(refname)'], bareRemote).split('\n').filter(Boolean).length;
+
+    const connK = new TaskStore(dbFile);
+    let kRaceInjected = false;
+    const racingStoreK = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'getLatestVerification') {
+          return (...args: any[]) => {
+            const result = (target as any).getLatestVerification(...args);
+            // Inject once, right after dispatch's opening evidence read —
+            // the window before the approval identity snapshot is built.
+            if (!kRaceInjected && args[0] === runK.id) {
+              kRaceInjected = true;
+              connK.updateTaskRequirements(taskK.id, {
+                description: 'contract B: rewritten mid-dispatch',
+              }, 'racing-editor');
+              const recB = connK.getTask(taskK.id)!;
+              const bindingB = computeEvidenceBinding(recB);
+              connK.recordVerification({
+                id: `ver-race-B-${Date.now()}`,
+                runId: runK.id,
+                attemptId: store.listAttempts(runK.id)[0].id,
+                revisionSha: revisionK,
+                passed: true,
+                checks: [],
+                criteriaVerified: recB.acceptanceCriteria.map((c: any) => c.id),
+                revisionTreeSha: git(['rev-parse', `${revisionK}^{tree}`], baseRepo),
+                requirementsFingerprint: bindingB.requirementsFingerprint,
+                verificationConfigFingerprint: bindingB.verificationConfigFingerprint,
+                evidenceBindingVersion: bindingB.evidenceBindingVersion,
+              });
+            }
+            return result;
+          };
+        }
+        const value = (target as any)[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    assert.strictEqual(kRaceInjected, false, 'injection must not fire outside a dispatch');
+
+    const racingDeliveryK = new GitHubDeliveryService(racingStoreK as any, verifier);
+    const dStaleK = await racingDeliveryK.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k-stale', disposableRemoteDir: bareRemote });
+    assert.strictEqual(kRaceInjected, true, 'the racing edit landed before approval identity construction');
+    assert.strictEqual(dStaleK.success, false, 'consent rebuilt from newer rows must be refused, not recorded');
+    assert.ok(dStaleK.blocked === true || dStaleK.approvalRequired === true, `Got: ${JSON.stringify(dStaleK)}`);
+    const delStaleK = store.getDeliveryForRun(runK.id)!;
+    assert.notStrictEqual(delStaleK.approvalStatus, 'approved', 'the mid-dispatch contract rewrite did not get certified by the original operator');
+    assert.ok(store.listAuditEvents(taskK.id).some((a: any) => a.eventType === 'DELIVERY_APPROVAL_REJECTED' && a.actor === 'op-k-stale'), 'the refused stale approval is audited');
+    assert.strictEqual(store.getTask(taskK.id)!.status, 'in_progress', 'the task is not marked Done on a refused approval');
+    assert.strictEqual(store.getTask(taskK.id)!.description, 'contract B: rewritten mid-dispatch', 'the racing edit stands as the current contract');
+    assert.strictEqual(
+      git(['for-each-ref', '--format=%(refname)'], bareRemote).split('\n').filter(Boolean).length,
+      refsK, 'the refused dispatch created no second PR');
+
+    // A separate, fresh approval against contract B succeeds and reuses the
+    // same PR — the refused request did not duplicate the delivery.
+    const recK2 = store.getTask(taskK.id)!;
+    const bindingK2 = computeEvidenceBinding(recK2);
+    assert.strictEqual(store.getLatestVerification(runK.id)!.requirementsFingerprint, bindingK2.requirementsFingerprint, 'racing evidence is bound to contract B');
+    const reviewK = lifecycle.transition({ taskId: taskK.id, to: 'review', actor: 'verifier' });
+    assert.strictEqual(reviewK.ok, true, `current evidence for contract B: ${reviewK.detail}`);
+    const dFreshK = await deliveryService.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k-fresh', disposableRemoteDir: bareRemote });
+    assert.strictEqual(dFreshK.success, true, `explicit fresh approval against contract B: ${dFreshK.error}`);
+    assert.strictEqual(dFreshK.prUrl, prUrlK, 'the PR is reused, not duplicated');
+    const delK2 = store.getDeliveryForRun(runK.id)!;
+    assert.strictEqual(delK2.id, delK.id, 'the same delivery record carries the fresh approval');
+    assert.strictEqual(delK2.approvalStatus, 'approved');
+    assert.strictEqual(delK2.approvedBy, 'op-k-fresh');
+    assert.strictEqual(delK2.approvalRequirementsFingerprint, bindingK2.requirementsFingerprint, 'the fresh approval certifies the contract read at its own dispatch start');
+    assert.strictEqual(delK2.approvalVerificationId, store.getLatestVerification(runK.id)!.id, 'the fresh approval binds the evidence it rested on');
+    assert.strictEqual(delK2.approvalRevisionSha, revisionK);
+    assert.strictEqual(store.getTask(taskK.id)!.status, 'done', 'Done granted only on the freshly bound approval');
+    assert.strictEqual(
+      git(['for-each-ref', '--format=%(refname)'], bareRemote).split('\n').filter(Boolean).length,
+      refsK, 'the fresh approval reconciled the existing PR');
+
+    // validateApprovalExpectation itself refuses evidence that attests a
+    // different revision than the approval certifies, even when the id and
+    // fingerprints line up.
+    const forgedVer = { ...store.getLatestVerification(runK.id)!, revisionSha: 'f'.repeat(40) };
+    const revRefusal = validateApprovalExpectation({
+      task: store.getTask(taskK.id)!,
+      verification: forgedVer,
+      deliveredCommit: revisionK,
+      expectation: {
+        revisionSha: revisionK,
+        requirementsFingerprint: bindingK2.requirementsFingerprint,
+        verificationConfigFingerprint: bindingK2.verificationConfigFingerprint,
+        verificationId: forgedVer.id,
+        evidenceBindingVersion: bindingK2.evidenceBindingVersion,
+      },
+    });
+    assert.strictEqual(revRefusal.accepted, false, 'evidence for a different revision never certifies this approval');
+    assert.strictEqual((revRefusal as any).reason, 'evidence-revision-mismatch', `Got: ${JSON.stringify(revRefusal)}`);
+    connK.getRawDb().close();
+    console.log('✔ [PASS] Approval identity is captured from the original dispatch context; mid-flight contract rewrites are refused, fresh approval reuses the PR');
   } finally {
     try {
       const leftover = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: baseRepo, encoding: 'utf-8' })
