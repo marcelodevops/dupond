@@ -21,6 +21,7 @@ import {
   Link2,
   Tag
 } from 'lucide-react';
+import { AgentAvatar } from './AgentAvatar';
 
 interface KanbanBoardProps {
   tasks: Task[];
@@ -357,11 +358,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           <div className="flex items-center space-x-1.5 min-w-0">
                             {assignee ? (
                               <>
-                                <img
-                                  src={assignee.avatar}
-                                  alt={assignee.name}
-                                  className="w-5 h-5 rounded-full object-cover border border-slate-700 shrink-0"
-                                />
+                                <AgentAvatar agent={assignee} size={20} />
                                 <div className="truncate">
                                   <span className="text-slate-300 text-[11px] font-medium block truncate">
                                     {assignee.name.split(' ')[0]}

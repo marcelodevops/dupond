@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Task, Agent, Epic } from '../types';
+import { AgentAvatar } from './AgentAvatar';
 import { 
   GitGraph, 
   Calendar, 
@@ -478,10 +479,10 @@ export const DiagramsProgress: React.FC<DiagramsProgressProps> = ({
                         >
                           <span className="truncate">{task.estimatedHours}h</span>
                           {assignee && (
-                            <img
-                              src={assignee.avatar}
-                              alt={assignee.name}
-                              className="w-4 h-4 rounded-full border border-white/40 shrink-0 ml-1"
+                            <AgentAvatar
+                              agent={assignee}
+                              size={18}
+                              className="shrink-0 ml-1"
                             />
                           )}
                         </div>
@@ -618,10 +619,9 @@ export const DiagramsProgress: React.FC<DiagramsProgressProps> = ({
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-3">
-                        <img
-                          src={agent.avatar}
-                          alt={agent.name}
-                          className="w-9 h-9 rounded-full object-cover border border-slate-700"
+                        <AgentAvatar
+                          agent={agent}
+                          size={36}
                         />
                         <div>
                           <h4 className="text-xs font-bold text-slate-100">{agent.name}</h4>
