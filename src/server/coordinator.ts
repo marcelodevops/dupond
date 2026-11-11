@@ -44,14 +44,10 @@ const __dirname = path.dirname(__filename);
 // Server-authoritative storage paths
 const DATA_DIR = path.resolve(__dirname, '../../data');
 // Overridable so a test run cannot write credentials into the shipped state file.
-const STATE_FILE = process.env.DUPOND_STATE_FILE || process.env.AEGIS_STATE_FILE
-  ? path.resolve(process.env.DUPOND_STATE_FILE || process.env.AEGIS_STATE_FILE!)
-  : (fs.existsSync(path.resolve(DATA_DIR, 'dupond_state.json'))
-      ? path.resolve(DATA_DIR, 'dupond_state.json')
-      : path.resolve(DATA_DIR, 'aegis_state.json'));
-const ARTIFACTS_DIR = fs.existsSync(path.resolve(__dirname, '../../.dupond_artifacts'))
-  ? path.resolve(__dirname, '../../.dupond_artifacts')
-  : path.resolve(__dirname, '../../.aegis_artifacts');
+const STATE_FILE = process.env.DUPOND_STATE_FILE
+  ? path.resolve(process.env.DUPOND_STATE_FILE)
+  : path.resolve(DATA_DIR, 'dupond_state.json');
+const ARTIFACTS_DIR = path.resolve(__dirname, '../../.dupond_artifacts');
 
 /** Placeholder standing in for a stored secret. Matches the UI's masked value. */
 export const REDACTED = '•'.repeat(32);
