@@ -1,3 +1,4 @@
+import { DomainError } from '../utils/errors';
 import {
   CodingWorkerAdapter,
   WorkerExecutionContext,
@@ -61,7 +62,7 @@ export class OpenAICodingWorkerAdapter implements CodingWorkerAdapter {
   public async execute(context: WorkerExecutionContext): Promise<WorkerExecutionResult> {
     const avail = await this.isAvailable();
     if (!avail.available) {
-      throw new Error(`Worker execution blocked: ${avail.error}`);
+      throw new DomainError(`Worker execution blocked: ${avail.error}`);
     }
     return runCodingWorkerLoop(this.providerAdapter, context, this.sandbox);
   }

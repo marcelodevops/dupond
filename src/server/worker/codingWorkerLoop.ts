@@ -1,3 +1,4 @@
+import { DomainError } from '../utils/errors';
 import fs from 'fs';
 import { execFileSync } from 'node:child_process';
 import {
@@ -90,10 +91,10 @@ Address the failure directly and verify your fix.
   try {
     while (turns < maxTurns) {
       if (Date.now() >= deadline) {
-        throw new Error(`Worker execution wall-clock deadline exceeded (${timeoutMs}ms)`);
+        throw new DomainError(`Worker execution wall-clock deadline exceeded (${timeoutMs}ms)`);
       }
       if (context.abortSignal?.aborted) {
-        throw new Error('Worker execution cancelled by user');
+        throw new DomainError('Worker execution cancelled by user');
       }
 
       turns++;
@@ -122,10 +123,10 @@ Address the failure directly and verify your fix.
       const toolResults: Array<{ callId?: string; toolName: string; result: any }> = [];
       for (const call of toolCalls) {
         if (context.abortSignal?.aborted) {
-          throw new Error('Worker execution cancelled by user');
+          throw new DomainError('Worker execution cancelled by user');
         }
         if (Date.now() >= deadline) {
-          throw new Error(`Worker execution wall-clock deadline exceeded (${timeoutMs}ms)`);
+          throw new DomainError(`Worker execution wall-clock deadline exceeded (${timeoutMs}ms)`);
         }
 
         const result = await executeWorkspaceTool(context, call.name, call.arguments, sandbox, log);

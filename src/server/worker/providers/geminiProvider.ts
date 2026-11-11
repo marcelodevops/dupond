@@ -1,3 +1,4 @@
+import { DomainError } from '../../utils/errors';
 import { GoogleGenAI } from '@google/genai';
 import {
   ModelProviderAdapter,
@@ -61,7 +62,7 @@ export class GeminiProviderAdapter implements ModelProviderAdapter {
 
     while (callAttempts < maxCallAttempts) {
       if (input.abortSignal?.aborted) {
-        throw new Error('Worker execution cancelled by user');
+        throw new DomainError('Worker execution cancelled by user');
       }
 
       try {
@@ -77,7 +78,7 @@ export class GeminiProviderAdapter implements ModelProviderAdapter {
         break;
       } catch (callErr: any) {
         if (input.abortSignal?.aborted) {
-          throw new Error('Worker execution cancelled by user');
+          throw new DomainError('Worker execution cancelled by user');
         }
 
         const errStr = callErr.message || JSON.stringify(callErr);
@@ -90,7 +91,7 @@ export class GeminiProviderAdapter implements ModelProviderAdapter {
           await new Promise((r) => setTimeout(r, parsedWaitSec * 1000));
         } else {
           // If non-transient, quota exhausted, delay excessive (> 60s), or retries exhausted, fail closed immediately
-          throw new Error(`Gemini API rate limit or quota exceeded: ${errStr}`);
+          throw new DomainError(`Gemini API rate limit or quota exceeded: ${errStr}`);
         }
       }
     }

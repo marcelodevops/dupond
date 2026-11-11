@@ -1,3 +1,4 @@
+import { DomainError } from './utils/errors';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -825,7 +826,7 @@ export class CoordinatorEngine {
       const run = await runArtifactVerification(implementationCode, testCode);
 
       if (!run.testsOk) {
-        throw new Error(`Unit tests failed for ${task.key}: ${run.detail}. Cannot advance stage.`);
+        throw new DomainError(`Unit tests failed for ${task.key}: ${run.detail}. Cannot advance stage.`);
       }
 
       const verifiedCriteria = run.criteria;
@@ -935,7 +936,7 @@ ${implementationCode.slice(0, 500)}...
     try {
       taskWorker = resolveCodingWorker(storeTask.workerConfig);
     } catch (cfgErr: any) {
-      throw new Error(`Worker configuration blocked: ${cfgErr.message}`);
+      throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
     }
 
     const workerAvailable = await taskWorker.isAvailable();
@@ -960,7 +961,7 @@ ${implementationCode.slice(0, 500)}...
     });
 
     if (workerRun.status !== 'completed') {
-      throw new Error(`Worker execution failed for ${task.key}: ${workerRun.failureReason}`);
+      throw new DomainError(`Worker execution failed for ${task.key}: ${workerRun.failureReason}`);
     }
 
     const verificationRecord = taskStore.getLatestVerification(workerRun.id);

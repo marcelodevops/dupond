@@ -1,3 +1,4 @@
+import { DomainError } from '../utils/errors';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
@@ -47,7 +48,7 @@ export class WorkspaceManager {
         stdio: 'pipe',
       });
     } catch (err: any) {
-      throw new Error(`Base commit ${baseCommit} is not a valid commit in repository ${this.baseRepoDir}: ${err.message}`);
+      throw new DomainError(`Base commit ${baseCommit} is not a valid commit in repository ${this.baseRepoDir}: ${err.message}`);
     }
 
     // Create the worktree: git worktree add -B <branchName> <worktreePath> <baseCommit>
@@ -58,7 +59,7 @@ export class WorkspaceManager {
         stdio: 'pipe',
       });
     } catch (err: any) {
-      throw new Error(`Failed to create worktree at ${worktreePath}: ${err.stderr || err.message}`);
+      throw new DomainError(`Failed to create worktree at ${worktreePath}: ${err.stderr || err.message}`);
     }
 
     // Verify current HEAD in worktree matches baseCommit
@@ -74,7 +75,7 @@ export class WorkspaceManager {
 
     if (currentSha !== expectedSha) {
       this.cleanupWorktree(worktreePath, branchName);
-      throw new Error(`Worktree revision mismatch: expected ${expectedSha}, got ${currentSha}`);
+      throw new DomainError(`Worktree revision mismatch: expected ${expectedSha}, got ${currentSha}`);
     }
 
     return {

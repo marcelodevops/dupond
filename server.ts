@@ -38,6 +38,7 @@ import { defaultLifecycleService } from './src/server/lifecycle/lifecycleService
 import { balanceWorkload, calculateAgentLoad, buildGeminiOptimizerPrompt } from './src/services/workloadBalancer.js';
 import { handleRepositoryDispatch } from './src/server/deliveryHandler.js';
 import { safeRequest, EgressBlockedError } from './src/server/egress.js';
+import { toClientMessage } from './src/server/utils/errors.js';
 import { requireAuth } from './src/server/auth.js';
 import { taskStore } from './src/server/db/database.js';
 import { defaultGitHubDelivery } from './src/server/delivery/githubDelivery.js';
@@ -111,7 +112,7 @@ app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Resp
     }
     res.json(result);
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Status transition failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Status transition failed') });
   }
 });
 
@@ -126,7 +127,7 @@ app.post('/api/orchestrate/engine/step', async (_req: Request, res: Response) =>
       state: coordinator.getStateView(),
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Step execution failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Step execution failed') });
   }
 });
 
@@ -159,7 +160,7 @@ app.post('/api/orchestrate/verify-task', async (req: Request, res: Response) => 
     const verification = await coordinator.verifyTaskQualityGates(task);
     res.json(verification);
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Verification failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Verification failed') });
   }
 });
 
@@ -239,7 +240,7 @@ Return a pure JSON response matching this schema (do NOT include markdown code f
     return res.json(fallbackResult);
   } catch (error: any) {
     console.error('Error parsing plan:', error);
-    res.status(500).json({ error: error.message || 'Failed to parse plan' });
+    res.status(500).json({ error: toClientMessage(error, 'Failed to parse plan') });
   }
 });
 
@@ -329,7 +330,7 @@ Return a pure JSON response (no markdown fences):
     });
   } catch (error: any) {
     console.error('Error allocating resources:', error);
-    res.status(500).json({ error: error.message || 'Failed to allocate resources' });
+    res.status(500).json({ error: toClientMessage(error, 'Failed to allocate resources') });
   }
 });
 
@@ -441,7 +442,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
     }
   } catch (error: any) {
     console.error('Error executing agent step:', error);
-    res.status(500).json({ error: error.message || 'Failed to execute agent step' });
+    res.status(500).json({ error: toClientMessage(error, 'Failed to execute agent step') });
   }
 });
 
@@ -543,7 +544,7 @@ Generate a rigorous, professional stakeholder report in pure JSON (no markdown t
     return res.json(fallbackReport);
   } catch (error: any) {
     console.error('Error generating report:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate status report' });
+    res.status(500).json({ error: toClientMessage(error, 'Failed to generate status report') });
   }
 });
 
@@ -672,7 +673,7 @@ app.post('/api/integrations/jira/sync', async (req: Request, res: Response) => {
     if (isBlockedError(error)) {
       return res.status(403).json({ success: false, blocked: true, error: error.message });
     }
-    res.status(500).json({ error: error.message || 'Jira sync failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Jira sync failed') });
   }
 });
 
@@ -773,7 +774,7 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
       messageId: `msg-${Date.now()}`,
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Slack dispatch failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Slack dispatch failed') });
   }
 });
 
@@ -807,7 +808,7 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
     const result = await handleRepositoryDispatch({ action, repoConfig, task, allowOverwrite });
     return res.status(result.status).json(result.body);
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Repository dispatch failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Repository dispatch failed') });
   }
 });
 
@@ -826,7 +827,7 @@ app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
     coordinator.projectAuthoritativeStatuses();
     return res.status(result.status).json(result);
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Delivery dispatch failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Delivery dispatch failed') });
   }
 });
 
@@ -840,7 +841,7 @@ app.get('/api/runs/:id', (req: Request, res: Response) => {
     const delivery = taskStore.getDeliveryForRun(run.id);
     return res.json({ run, attempts, verification, delivery });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to get run' });
+    res.status(500).json({ error: toClientMessage(error, 'Failed to get run') });
   }
 });
 
@@ -854,7 +855,7 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
     const delivery = taskStore.getDeliveryForRun(run.id);
     return res.json({ run, attempts, verification, delivery });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to get task runs' });
+    res.status(500).json({ error: toClientMessage(error, 'Failed to get task runs') });
   }
 });
 
@@ -972,7 +973,7 @@ Respond directly, strategically, and concisely to the operator's directive or in
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Chat failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Chat failed') });
   }
 });
 
@@ -1029,7 +1030,7 @@ Return pure JSON (no markdown fences):
       recommendedTaskKey: tasks.find((t: any) => t.priority === 'critical')?.key || 'AEG-102',
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Suggest role failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Suggest role failed') });
   }
 });
 
@@ -1089,7 +1090,7 @@ app.post('/api/custom-providers/execute', async (req: Request, res: Response) =>
       throw error;
     }
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Provider execution failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Provider execution failed') });
   }
 });
 
@@ -1136,7 +1137,7 @@ app.post('/api/custom-providers/ping', async (req: Request, res: Response) => {
       return res.json({ success: false, error: fetchErr.message || 'Connection failed', latencyMs });
     }
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Provider ping failed' });
+    res.status(500).json({ error: toClientMessage(error, 'Provider ping failed') });
   }
 });
 
