@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Task, Agent, Epic, Priority } from '../types';
 import { Plus, X } from 'lucide-react';
+import { AgentAvatar } from './AgentAvatar';
 
 interface AddTaskModalProps {
   isOpen: boolean;
@@ -156,17 +157,23 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
               <label className="text-xs font-semibold text-slate-300 block mb-1">
                 Assign Specialist Agent
               </label>
-              <select
-                value={assignedAgentId}
-                onChange={(e) => setAssignedAgentId(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
-              >
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({a.role.split(' ')[0]})
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center space-x-2">
+                {(() => {
+                  const selectedAgent = agents.find((a) => a.id === assignedAgentId);
+                  return selectedAgent ? <AgentAvatar agent={selectedAgent} size={28} /> : null;
+                })()}
+                <select
+                  value={assignedAgentId}
+                  onChange={(e) => setAssignedAgentId(e.target.value)}
+                  className="flex-1 min-w-0 px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                >
+                  {agents.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} ({a.role.split(' ')[0]})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div>

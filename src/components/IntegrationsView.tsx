@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { IntegrationConfig, CustomProvider, CommunicationMessage, Task, RepositoryConfig } from '../types';
 import { apiFetch } from '../lib/api';
+import { AgentAvatar } from './AgentAvatar';
 import { 
   Share2, 
   Send, 
@@ -1031,6 +1032,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2">
+                    <AgentAvatar role={msg.senderRole} name={msg.senderName} size={20} />
                     <span className="font-bold text-indigo-300">{msg.senderName}</span>
                     <span className="text-[10px] text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800">
                       {msg.senderRole}

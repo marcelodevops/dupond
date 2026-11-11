@@ -364,9 +364,9 @@ async function executeSuite() {
   });
 
   await runTest('Coordinator execution contract derives target repository, protected paths, and criteria checks', async () => {
-    const uniqueNum = Math.floor(100 + Math.random() * 800);
-    const uniqueKey = `AEG-${uniqueNum}`;
-    const uniqueId = `task-contract-${Date.now()}-${uniqueNum}`;
+    const timestamp = Date.now();
+    const uniqueKey = `AEG-${timestamp}-${Math.floor(Math.random() * 1000)}`;
+    const uniqueId = `task-contract-${timestamp}`;
     const customTask = {
       id: uniqueId,
       key: uniqueKey,

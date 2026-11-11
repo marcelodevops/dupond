@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Agent, Task } from '../types';
 import { apiFetch } from '../lib/api';
 import { calculateAgentLoad, balanceWorkload } from '../services/workloadBalancer';
+import { AgentAvatar } from './AgentAvatar';
 import { 
   Users, 
   Sparkles, 
@@ -249,23 +250,7 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
               <div>
                 <div className="flex items-start justify-between">
                   <div className="flex items-center space-x-3">
-                    <div className="relative">
-                      <img
-                        src={agent.avatar}
-                        alt={agent.name}
-                        className="w-11 h-11 rounded-full object-cover border-2 border-slate-700 shadow"
-                      />
-                      <span
-                        className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-slate-900 ${
-                          agent.status === 'working'
-                            ? 'bg-emerald-400'
-                            : agent.status === 'reviewing'
-                            ? 'bg-amber-400'
-                            : 'bg-slate-400'
-                        }`}
-                        title={`Status: ${agent.status}`}
-                      />
-                    </div>
+                    <AgentAvatar agent={agent} size={48} showStatus />
                     <div>
                       <h3 className="text-xs font-bold text-slate-100 flex items-center space-x-1.5">
                         <span>{agent.name}</span>
@@ -409,7 +394,7 @@ export const ResourceAllocationMatrix: React.FC<ResourceAllocationMatrixProps> =
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full shadow-2xl space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-slate-800">
               <h3 className="text-sm font-bold text-slate-100 flex items-center space-x-2">
-                <Cpu className="w-4 h-4 text-indigo-400" />
+                <AgentAvatar agent={selectedAgentForRoleShift} size={24} />
                 <span>Assume Dynamic Role for {selectedAgentForRoleShift.name}</span>
               </h3>
               <button
