@@ -9,7 +9,9 @@
 import assert from 'assert';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { test } from 'vitest';
 
+test('acceptance mapping suite', async () => {
 console.log('=== RUNNING ACCEPTANCE MAPPING SUITE ===\n');
 
 const {
@@ -127,3 +129,4 @@ assert.ok(!html.includes('Acceptance Criteria &amp; Subtasks'), 'the old mixed h
 console.log('✔ [PASS] The modal renders authoritative criteria separately from progress items');
 
 console.log('\n=== ALL ACCEPTANCE MAPPING TESTS PASSED CLEANLY ===');
+});

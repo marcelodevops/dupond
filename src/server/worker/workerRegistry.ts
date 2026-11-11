@@ -1,3 +1,4 @@
+import { DomainError } from '../utils/errors';
 import { CodingWorkerAdapter, WorkerConfig, WorkerProvider } from './types.js';
 import { SandboxExecutor, defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
 import { GeminiCodingWorkerAdapter } from './geminiWorkerAdapter.js';
@@ -79,7 +80,7 @@ export function resolveCodingWorker(
 ): CodingWorkerAdapter {
   const validation = validateWorkerConfig(config);
   if (!validation.valid) {
-    throw new Error(`Worker configuration invalid: ${validation.error}`);
+    throw new DomainError(`Worker configuration invalid: ${validation.error}`);
   }
 
   if (validation.provider === 'openai') {

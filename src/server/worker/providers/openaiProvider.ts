@@ -1,3 +1,4 @@
+import { DomainError } from '../../utils/errors';
 import OpenAI from 'openai';
 import {
   ModelProviderAdapter,
@@ -65,7 +66,7 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
 
     while (callAttempts < maxCallAttempts) {
       if (input.abortSignal?.aborted) {
-        throw new Error('Worker execution cancelled by user');
+        throw new DomainError('Worker execution cancelled by user');
       }
 
       try {
@@ -88,7 +89,7 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
         break;
       } catch (callErr: any) {
         if (input.abortSignal?.aborted) {
-          throw new Error('Worker execution cancelled by user');
+          throw new DomainError('Worker execution cancelled by user');
         }
 
         // Fail-closed immediately on non-transient authentication, authorization, quota exhaustion, or invalid configuration
@@ -99,7 +100,7 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
           (callErr?.message && callErr.message.includes('credit_balance_exhausted'));
 
         if (isQuotaExhausted) {
-          throw new Error(`OpenAI account credit balance exhausted (429 insufficient_quota): ${callErr.message}`);
+          throw new DomainError(`OpenAI account credit balance exhausted (429 insufficient_quota): ${callErr.message}`);
         }
 
         if (
@@ -112,7 +113,7 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
           callErr instanceof OpenAI.NotFoundError ||
           callErr?.status === 404
         ) {
-          throw new Error(`OpenAI API error (${callErr.status || 'client'}): ${callErr.message || 'Invalid request or credentials'}`);
+          throw new DomainError(`OpenAI API error (${callErr.status || 'client'}): ${callErr.message || 'Invalid request or credentials'}`);
         }
 
         const isRateLimit = callErr instanceof OpenAI.RateLimitError || callErr?.status === 429;

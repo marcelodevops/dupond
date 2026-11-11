@@ -9,9 +9,7 @@ const __dirname = path.dirname(__filename);
 
 /** Root of this application; artifacts live under `.dupond_artifacts/<key>/`. */
 const PROJECT_ROOT = path.resolve(__dirname, '../../');
-const ARTIFACTS_DIR = fs.existsSync(path.resolve(PROJECT_ROOT, '.dupond_artifacts'))
-  ? path.resolve(PROJECT_ROOT, '.dupond_artifacts')
-  : path.resolve(PROJECT_ROOT, '.aegis_artifacts');
+const ARTIFACTS_DIR = path.resolve(PROJECT_ROOT, '.dupond_artifacts');
 
 export interface DeliveryResult {
   status: number;

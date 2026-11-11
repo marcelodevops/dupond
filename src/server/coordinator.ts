@@ -1,3 +1,5 @@
+import { DomainError } from './utils/errors';
+import { GEMINI_MODEL } from './gemini';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -42,14 +44,10 @@ const __dirname = path.dirname(__filename);
 // Server-authoritative storage paths
 const DATA_DIR = path.resolve(__dirname, '../../data');
 // Overridable so a test run cannot write credentials into the shipped state file.
-const STATE_FILE = process.env.DUPOND_STATE_FILE || process.env.AEGIS_STATE_FILE
-  ? path.resolve(process.env.DUPOND_STATE_FILE || process.env.AEGIS_STATE_FILE!)
-  : (fs.existsSync(path.resolve(DATA_DIR, 'dupond_state.json'))
-      ? path.resolve(DATA_DIR, 'dupond_state.json')
-      : path.resolve(DATA_DIR, 'aegis_state.json'));
-const ARTIFACTS_DIR = fs.existsSync(path.resolve(__dirname, '../../.dupond_artifacts'))
-  ? path.resolve(__dirname, '../../.dupond_artifacts')
-  : path.resolve(__dirname, '../../.aegis_artifacts');
+const STATE_FILE = process.env.DUPOND_STATE_FILE
+  ? path.resolve(process.env.DUPOND_STATE_FILE)
+  : path.resolve(DATA_DIR, 'dupond_state.json');
+const ARTIFACTS_DIR = path.resolve(__dirname, '../../.dupond_artifacts');
 
 /** Placeholder standing in for a stored secret. Matches the UI's masked value. */
 export const REDACTED = '•'.repeat(32);
@@ -825,7 +823,7 @@ export class CoordinatorEngine {
       const run = await runArtifactVerification(implementationCode, testCode);
 
       if (!run.testsOk) {
-        throw new Error(`Unit tests failed for ${task.key}: ${run.detail}. Cannot advance stage.`);
+        throw new DomainError(`Unit tests failed for ${task.key}: ${run.detail}. Cannot advance stage.`);
       }
 
       const verifiedCriteria = run.criteria;
@@ -923,7 +921,7 @@ ${implementationCode.slice(0, 500)}...
         protectedPaths: protectedPaths,
         verificationCommands: verificationCommands.length > 0 ? verificationCommands : ['npm test'],
         acceptanceCriteria: criteria,
-        workerConfig: task.workerConfig || { provider: 'gemini', model: 'gemini-3.8-flash' },
+        workerConfig: task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
         maxAttempts: task.maxAttempts || 3,
         timeoutSeconds: task.timeoutSeconds || 300,
         requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
@@ -935,7 +933,7 @@ ${implementationCode.slice(0, 500)}...
     try {
       taskWorker = resolveCodingWorker(storeTask.workerConfig);
     } catch (cfgErr: any) {
-      throw new Error(`Worker configuration blocked: ${cfgErr.message}`);
+      throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
     }
 
     const workerAvailable = await taskWorker.isAvailable();
@@ -960,7 +958,7 @@ ${implementationCode.slice(0, 500)}...
     });
 
     if (workerRun.status !== 'completed') {
-      throw new Error(`Worker execution failed for ${task.key}: ${workerRun.failureReason}`);
+      throw new DomainError(`Worker execution failed for ${task.key}: ${workerRun.failureReason}`);
     }
 
     const verificationRecord = taskStore.getLatestVerification(workerRun.id);

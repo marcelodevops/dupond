@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import { TaskStore } from '../src/server/db/database.ts';
 
@@ -161,7 +162,4 @@ async function main() {
   console.log('\n=== ALL TASKSTORE TESTS PASSED CLEANLY ===');
 }
 
-main().catch((err) => {
-  console.error('TaskStore test failed:', err);
-  process.exit(1);
-});
+test('suite', main);

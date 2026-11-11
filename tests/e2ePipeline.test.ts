@@ -1,3 +1,4 @@
+import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
@@ -600,7 +601,7 @@ async function runAcceptanceSuite() {
     const ciContent = fs.readFileSync(path.resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf-8');
     assert.ok(ciContent.includes('npm run lint'));
     assert.ok(ciContent.includes('npm run build'));
-    assert.ok(ciContent.includes('tests/e2ePipeline.test.ts'));
+    assert.ok(ciContent.includes('npm test'));
     passScenario(13, 'Dupond CI workflow present and configured for all verification stages');
 
     console.log(`\n===============================================================`);
@@ -614,7 +615,4 @@ async function runAcceptanceSuite() {
   }
 }
 
-runAcceptanceSuite().catch((err) => {
-  console.error('Acceptance suite failed:', err);
-  process.exit(1);
-});
+test('suite', runAcceptanceSuite);
