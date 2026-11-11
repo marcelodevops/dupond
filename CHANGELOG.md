@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/marcelodevops/dupond/compare/v0.6.0...v0.7.0) (2026-11-11)
+
+
+### Features
+
+* **project:** harden workspace and project switching against stale responses, mutations, and missing endpoints ([db7f1c0](https://github.com/marcelodevops/dupond/commit/db7f1c05fa502a87655733bf584646c4eb0eac07))
+* **projects:** implement project management ([5fb2313](https://github.com/marcelodevops/dupond/commit/5fb231326853ea90098c32ca7bba3a95b02c9e31))
+
+
+### Bug Fixes
+
+* **projects:** remove simulated success fallbacks ([5d6e612](https://github.com/marcelodevops/dupond/commit/5d6e61205d97499aac76b935393f6c57bdff7116))
+* **tests:** track AEG-104 artifact fixture, isolate test stores, and resolve git fixture branch drift ([6827467](https://github.com/marcelodevops/dupond/commit/682746737fd91875adacc2f1be7fbbc82bf87004))
+
 ## [0.6.0](https://github.com/marcelodevops/dupond/compare/v0.5.0...v0.6.0) (2026-11-11)
 
 
