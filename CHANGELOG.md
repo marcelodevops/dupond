@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/marcelodevops/dupond/compare/v0.7.0...v0.7.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* complete multi-project backend integration ([3fc2753](https://github.com/marcelodevops/dupond/commit/3fc2753071ae3d0d2fa7022cf0e6520f988a62bb))
+* complete multi-project backend integration ([78eb943](https://github.com/marcelodevops/dupond/commit/78eb9432b8c2f4a7a6714d38fe1187d0330545c1))
+
 ## [0.7.0](https://github.com/marcelodevops/dupond/compare/v0.6.0...v0.7.0) (2026-11-11)
 
 
