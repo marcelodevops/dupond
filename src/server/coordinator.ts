@@ -21,6 +21,7 @@ import {
 } from '../types';
 import { StateMutationSchema } from '../types/schemas.js';
 import { taskStore } from './db/database.js';
+import { defaultProjectStore } from './projects/projectStore.js';
 import type { TaskRecord } from './db/schema.js';
 import { mergePostedCriteria, promoteChecklistItems } from '../services/acceptanceMapping.js';
 import { defaultLifecycleService } from './lifecycle/lifecycleService.js';
@@ -122,12 +123,20 @@ export interface VerificationResult {
 
 export class CoordinatorEngine {
   private state: ServerState;
+  private activeProjectId = 'default';
   private daemonTimer: NodeJS.Timeout | null = null;
   private isProcessingTick = false;
 
   constructor() {
     this.ensureDirectories();
     this.state = this.loadStateFromDisk();
+    try {
+      if (defaultProjectStore.getProjectState<Partial<ServerState>>('default', {}).tasks === undefined) {
+        defaultProjectStore.saveProjectState('default', this.state);
+      }
+    } catch (err) {
+      console.warn('Project state migration unavailable:', err);
+    }
     // On boot the store is the source of truth for lifecycle outcomes that
     // happened in a previous process (delivered work, revocations, restarts
     // that interrupted a run). Reconcile abandoned runs, then project the
@@ -157,7 +166,20 @@ export class CoordinatorEngine {
    * gates. The contract is mirrored as well as the status, otherwise the board
    * keeps displaying requirements that were revoked or never persisted.
    */
-  public projectAuthoritativeStatuses(): number {
+  public projectAuthoritativeStatuses(projectId = 'default'): number {
+    const previousState = this.state;
+    const previousProjectId = this.activeProjectId;
+    this.activeProjectId = projectId;
+    this.state = this.getState(projectId);
+    try {
+      return this.projectAuthoritativeStatusesInternal();
+    } finally {
+      if (projectId !== 'default') this.state = previousState;
+      this.activeProjectId = previousProjectId;
+    }
+  }
+
+  private projectAuthoritativeStatusesInternal(): number {
     let changed = 0;
     const nextTasks = this.state.tasks.map((task) => {
       const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
@@ -239,6 +261,7 @@ export class CoordinatorEngine {
           daemonRunning: false, // Default to false on reboot until explicitly commanded
           lastUpdated: new Date().toISOString(),
         };
+
       }
     } catch (err) {
       console.warn('Failed to load dupond_state.json, initializing defaults:', err);
@@ -259,18 +282,36 @@ export class CoordinatorEngine {
     return initialState;
   }
 
+  private emptyState(): ServerState {
+    return {
+      tasks: [],
+      agents: DEFAULT_AGENTS,
+      epics: [],
+      orchestratorConfig: DEFAULT_ORCHESTRATOR_CONFIG,
+      integrationConfig: DEFAULT_INTEGRATION_CONFIG,
+      communications: [],
+      cycleCount: 0,
+      daemonRunning: false,
+      lastUpdated: new Date().toISOString(),
+    };
+  }
+
   public saveStateToDisk(stateToSave?: ServerState): void {
     try {
       const data = stateToSave || this.state;
       data.lastUpdated = new Date().toISOString();
-      fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+      defaultProjectStore.saveProjectState(this.activeProjectId, data);
+      if (this.activeProjectId === 'default') {
+        fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+      }
     } catch (err) {
       console.error('Failed to write dupond_state.json to disk:', err);
     }
   }
 
-  public getState(): ServerState {
-    return this.state;
+  public getState(projectId = this.activeProjectId): ServerState {
+    if (projectId === this.activeProjectId) return this.state;
+    return defaultProjectStore.getProjectState(projectId, this.emptyState());
   }
 
   /**
@@ -282,12 +323,13 @@ export class CoordinatorEngine {
    *
    * Internal code keeps using getState(); only the wire view is redacted.
    */
-  public getStateView(): ServerState {
-    return { ...this.state, integrationConfig: this.getIntegrationConfigView() };
+  public getStateView(projectId = this.activeProjectId): ServerState {
+    const state = this.getState(projectId);
+    return { ...state, integrationConfig: this.getIntegrationConfigView(projectId) };
   }
 
-  public getIntegrationConfigView(): IntegrationConfig {
-    const config = this.state.integrationConfig;
+  public getIntegrationConfigView(projectId = this.activeProjectId): IntegrationConfig {
+    const config = this.getState(projectId).integrationConfig;
     return {
       ...config,
       jira: redactSecret(config.jira, 'apiToken'),
@@ -304,8 +346,8 @@ export class CoordinatorEngine {
    * Credentials for server-side use only (Jira/Slack dispatch). Never return
    * this to a client.
    */
-  public getIntegrationSecrets(): IntegrationConfig {
-    const config = this.state.integrationConfig;
+  public getIntegrationSecrets(projectId = this.activeProjectId): IntegrationConfig {
+    const config = this.getState(projectId).integrationConfig;
     return {
       ...config,
       jira: fillSection(config.jira),
@@ -342,7 +384,21 @@ export class CoordinatorEngine {
   }
 
   // --- Central State Enforcement with Quality Gates & Schema Validation ---
-  public updateState(partial: unknown): { success: boolean; state: ServerState; rejectedDoneTasks: string[]; error?: string } {
+  public updateState(partial: unknown, context?: { projectId?: string; actor?: string }): { success: boolean; state: ServerState; rejectedDoneTasks: string[]; error?: string } {
+    const projectId = context?.projectId || 'default';
+    const previousState = this.state;
+    const previousProjectId = this.activeProjectId;
+    this.activeProjectId = projectId;
+    this.state = this.getState(projectId);
+    try {
+      return this.updateStateInternal(partial, context);
+    } finally {
+      if (projectId !== 'default') this.state = previousState;
+      this.activeProjectId = previousProjectId;
+    }
+  }
+
+  private updateStateInternal(partial: unknown, context?: { projectId?: string; actor?: string }): { success: boolean; state: ServerState; rejectedDoneTasks: string[]; error?: string } {
     const parseResult = StateMutationSchema.safeParse(partial);
     if (!parseResult.success) {
       return {
@@ -471,8 +527,10 @@ export class CoordinatorEngine {
           }
         }
         if (requirementsRebound) {
+          const reboundTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
           return {
             ...task,
+            status: reboundTask ? this.toUiStatus(reboundTask.status) : task.status,
             lastAgentComment: 'Requirements rebound: acceptance-relevant fields changed, so prior verification evidence and any granted Review/Done acceptance were revoked. Fresh verification is required.',
             lastUpdated: 'Just now',
           };
@@ -511,6 +569,7 @@ export class CoordinatorEngine {
       });
     }
 
+    this.projectAuthoritativeStatusesInternal();
     this.saveStateToDisk();
     return { success: true, state: this.getStateView(), rejectedDoneTasks };
   }
@@ -782,7 +841,7 @@ export class CoordinatorEngine {
   }
 
   // --- Real Coding Worker: Generates Real Application Code & Tests on Disk ---
-  public async executeWorkerStep(task: Task, agent: Agent): Promise<{
+  public async executeWorkerStep(task: Task, agent: Agent, projectId?: string): Promise<{
     deliverableContent: string;
     artifactFilePath: string;
     testFilePath: string;
@@ -802,7 +861,8 @@ export class CoordinatorEngine {
     const codeFilePath = path.resolve(taskArtifactDir, 'implementation.js');
     const testFilePath = path.resolve(taskArtifactDir, 'spec.test.js');
 
-    let storeTask = taskStore.getTask(task.key) || taskStore.getTask(task.id);
+    const executionProjectId = projectId || task.projectId || this.activeProjectId;
+    let storeTask = taskStore.getTaskScoped(task.key, executionProjectId) || taskStore.getTaskScoped(task.id, executionProjectId);
 
     // Pre-existing static artifact files are a legacy deliverable format used by
     // tasks that live only in the JSON state. Once a task is registered in the
@@ -909,6 +969,7 @@ ${implementationCode.slice(0, 500)}...
 
       storeTask = taskStore.createTask({
         id: task.id,
+        projectId: executionProjectId,
         key: task.key,
         title: task.title,
         description: task.description,
