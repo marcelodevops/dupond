@@ -17,6 +17,7 @@ export interface SubTask {
 
 export interface Task {
   id: string;
+  projectId?: string;
   key: string; // e.g. AEG-101
   title: string;
   description: string;

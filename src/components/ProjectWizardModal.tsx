@@ -68,6 +68,12 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
   const [selectedIssueType, setSelectedIssueType] = useState('');
   const [jiraTemplates, setJiraTemplates] = useState<JiraTemplateOption[]>([]);
   const [jiraIssueTypes, setJiraIssueTypes] = useState<JiraIssueTypeOption[]>([]);
+  const [jiraCapabilities, setJiraCapabilities] = useState({
+    linkExisting: true,
+    createProject: false,
+    createEpic: false,
+    reason: '',
+  });
   const [confirmRemoteCreation, setConfirmRemoteCreation] = useState(false);
   const [jiraMetadataError, setJiraMetadataError] = useState<string | null>(null);
 
@@ -79,6 +85,7 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
         .then((meta) => {
           setJiraTemplates(meta.templates || []);
           setJiraIssueTypes(meta.issueTypes || []);
+          if (meta.capabilities) setJiraCapabilities({ ...meta.capabilities, reason: meta.capabilities.reason || '' });
           if (meta.defaultTemplateKey) setSelectedTemplateKey(meta.defaultTemplateKey);
           const epicType = meta.issueTypes?.find((t) => t.isEpic);
           if (epicType) setSelectedIssueType(epicType.name);
@@ -96,9 +103,10 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
   const isStep2Valid = Boolean(repoUrl.trim());
   const isStep3Valid = (() => {
     if (jiraMode === 'none') return true;
-    if (jiraMode === 'link_existing') return jiraProjectKey.trim().length >= 2;
+    if (jiraMode === 'link_existing') return jiraCapabilities.linkExisting && jiraProjectKey.trim().length >= 2;
     if (jiraMode === 'create_project') {
       return (
+        jiraCapabilities.createProject &&
         jiraProjectKey.trim().length >= 2 &&
         jiraProjectName.trim().length >= 2 &&
         confirmRemoteCreation
@@ -106,6 +114,7 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
     }
     if (jiraMode === 'create_epic') {
       return (
+        jiraCapabilities.createEpic &&
         jiraProjectKey.trim().length >= 2 &&
         jiraEpicSummary.trim().length >= 3 &&
         confirmRemoteCreation
@@ -188,6 +197,8 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
             projectKey: jiraProjectKey.trim().toUpperCase(),
             projectName: jiraProjectName.trim(),
             templateKey: selectedTemplateKey || undefined,
+            confirmRemoteCreation: true,
+            operationId: `jop-${createdProject.id}-project`,
           };
         } else {
           jiraReq = {
@@ -195,6 +206,8 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
             projectKey: jiraProjectKey.trim().toUpperCase(),
             epicSummary: jiraEpicSummary.trim(),
             issueType: selectedIssueType || 'Epic',
+            confirmRemoteCreation: true,
+            operationId: `jop-${createdProject.id}-epic`,
           };
         }
 
@@ -515,9 +528,18 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
                         desc: 'Add a new Epic issue within an existing Jira project.',
                       },
                     ].map((opt) => (
+                      (() => {
+                        const supported =
+                          opt.mode === 'none' ||
+                          (opt.mode === 'link_existing' && jiraCapabilities.linkExisting) ||
+                          (opt.mode === 'create_project' && jiraCapabilities.createProject) ||
+                          (opt.mode === 'create_epic' && jiraCapabilities.createEpic);
+                        return (
                       <label
                         key={opt.mode}
-                        className={`flex flex-col p-3 rounded-xl border text-xs cursor-pointer transition-all ${
+                        className={`flex flex-col p-3 rounded-xl border text-xs transition-all ${
+                          supported ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'
+                        } ${
                           jiraMode === opt.mode
                             ? 'bg-indigo-950/50 border-indigo-500 text-indigo-100 shadow-sm'
                             : 'bg-slate-950/40 border-slate-800 text-slate-300 hover:border-slate-700'
@@ -530,13 +552,19 @@ export const ProjectWizardModal: React.FC<ProjectWizardModalProps> = ({ isOpen, 
                             name="jiraMode"
                             checked={jiraMode === opt.mode}
                             onChange={() => setJiraMode(opt.mode as any)}
+                            disabled={!supported}
                             className="text-indigo-600 focus:ring-indigo-500"
                           />
                         </div>
                         <span className="text-[11px] text-slate-400">{opt.desc}</span>
                       </label>
+                        );
+                      })()
                     ))}
                   </div>
+                  {!jiraCapabilities.createProject && !jiraCapabilities.createEpic && jiraCapabilities.reason && (
+                    <p className="text-[11px] text-amber-300">{jiraCapabilities.reason}</p>
+                  )}
 
                   {/* Mode Inputs */}
                   {jiraMode === 'link_existing' && (

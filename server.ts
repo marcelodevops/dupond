@@ -36,8 +36,37 @@ import {
 import { handleChat } from './src/server/chat/chatDirective.js';
 import { suggestRole } from './src/server/chat/roleSuggestion.js';
 import { toClientMessage } from './src/server/utils/errors.js';
+import { createProjectRouter, parseProjectContextHeader } from './src/server/projects/projectApi.js';
+import { defaultProjectStore, ProjectApiError } from './src/server/projects/projectStore.js';
 
 app.use(requireAuth);
+app.use('/api', createProjectRouter());
+
+function projectContext(req: Request, res: Response, resourceProjectId?: string | null): string | null {
+  try {
+    const context = parseProjectContextHeader(req);
+    if (!context) {
+      res.status(400).json({ error: 'X-Dupond-Project-Id is required for project-scoped API operations.', code: 'PROJECT_CONTEXT_REQUIRED' });
+      return null;
+    }
+    if (!defaultProjectStore.getProject(context)) {
+      res.status(404).json({ error: `Project ${context} does not exist.`, code: 'PROJECT_NOT_FOUND' });
+      return null;
+    }
+    if (resourceProjectId && resourceProjectId !== context) {
+      res.status(403).json({
+        error: `Resource belongs to project ${resourceProjectId}, not ${context}.`,
+        code: 'PROJECT_CONTEXT_MISMATCH',
+      });
+      return null;
+    }
+    return context;
+  } catch (error) {
+    const err = error instanceof ProjectApiError ? error : new ProjectApiError(400, 'INVALID_REQUEST', 'Invalid project context.');
+    res.status(err.httpStatus).json({ error: err.message, code: err.code });
+    return null;
+  }
+}
 
 // Health check endpoint
 app.get('/api/health', (_req: Request, res: Response) => {
@@ -50,18 +79,20 @@ app.get('/api/health', (_req: Request, res: Response) => {
 });
 
 // Endpoint: Server-authoritative state management
-app.get('/api/orchestrate/state', (_req: Request, res: Response) => {
-  // Redacted view: credentials stay server-side even though the UI round-trips
-  // this object back through POST /state.
-  res.json(coordinator.getStateView());
+app.get('/api/orchestrate/state', (req: Request, res: Response) => {
+  const projectId = projectContext(req, res);
+  if (!projectId) return;
+  res.json(coordinator.getStateView(projectId));
 });
 
 app.post('/api/orchestrate/state', (req: Request, res: Response) => {
-  const result = coordinator.updateState(req.body);
+  const projectId = projectContext(req, res);
+  if (!projectId) return;
+  const result = coordinator.updateState(req.body, { projectId });
   if (!result.success) {
     return res.status(422).json({
       success: false,
-      state: coordinator.getStateView(),
+      state: coordinator.getStateView(projectId),
       rejectedDoneTasks: result.rejectedDoneTasks,
       error: result.error,
     });
@@ -72,6 +103,9 @@ app.post('/api/orchestrate/state', (req: Request, res: Response) => {
 // Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
 app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Response) => {
   try {
+    const taskProjectId = taskStore.getProjectIdForTask(req.params.id);
+    const projectId = projectContext(req, res, taskProjectId);
+    if (!projectId) return;
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: 'status is required' });
 
@@ -88,6 +122,11 @@ app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Resp
 // Endpoint: Single Step Execution Trigger for "Next Cycle"
 app.post('/api/orchestrate/engine/step', async (_req: Request, res: Response) => {
   try {
+    const projectId = projectContext(_req, res);
+    if (!projectId) return;
+    if (projectId !== 'default') {
+      return res.status(501).json({ error: 'Project engine automation is not yet available for non-default projects.', code: 'PROJECT_ENGINE_UNSUPPORTED' });
+    }
     const result = await coordinator.runDaemonTick();
     res.json({
       success: true,
@@ -102,17 +141,32 @@ app.post('/api/orchestrate/engine/step', async (_req: Request, res: Response) =>
 
 // Endpoint: Server-side Background Coordinator Daemon controls
 app.post('/api/orchestrate/engine/start', (req: Request, res: Response) => {
+  const projectId = projectContext(req, res);
+  if (!projectId) return;
+  if (projectId !== 'default') {
+    return res.status(501).json({ error: 'Project engine automation is not yet available for non-default projects.', code: 'PROJECT_ENGINE_UNSUPPORTED' });
+  }
   const { intervalMs = 7000 } = req.body || {};
   coordinator.startDaemon(intervalMs);
   res.json({ success: true, running: true, message: 'Server background coordinator daemon started.' });
 });
 
 app.post('/api/orchestrate/engine/stop', (_req: Request, res: Response) => {
+  const projectId = projectContext(_req, res);
+  if (!projectId) return;
+  if (projectId !== 'default') {
+    return res.status(501).json({ error: 'Project engine automation is not yet available for non-default projects.', code: 'PROJECT_ENGINE_UNSUPPORTED' });
+  }
   coordinator.stopDaemon();
   res.json({ success: true, running: false, message: 'Server background coordinator daemon paused.' });
 });
 
 app.get('/api/orchestrate/engine/status', (_req: Request, res: Response) => {
+  const projectId = projectContext(_req, res);
+  if (!projectId) return;
+  if (projectId !== 'default') {
+    return res.status(501).json({ error: 'Project engine automation is not yet available for non-default projects.', code: 'PROJECT_ENGINE_UNSUPPORTED' });
+  }
   res.json({
     running: coordinator.isDaemonRunning(),
     cycleCount: coordinator.getState().cycleCount,
@@ -125,6 +179,9 @@ app.post('/api/orchestrate/verify-task', async (req: Request, res: Response) => 
   try {
     const { task } = req.body;
     if (!task) return res.status(400).json({ error: 'task is required' });
+    const taskProjectId = taskStore.getProjectIdForTask(task.id || task.key);
+    const projectId = projectContext(req, res, taskProjectId);
+    if (!projectId) return;
 
     const verification = await coordinator.verifyTaskQualityGates(task);
     res.json(verification);
@@ -172,10 +229,13 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
     if (!task || !agent) {
       return res.status(400).json({ error: 'task and agent are required' });
     }
+    const taskProjectId = taskStore.getProjectIdForTask(task.id || task.key);
+    const projectId = projectContext(req, res, taskProjectId);
+    if (!projectId) return;
 
     try {
       // Execute the real worker step through the central coordinator
-      const workerResult = await coordinator.executeWorkerStep(task, agent);
+      const workerResult = await coordinator.executeWorkerStep(task, agent, projectId);
 
       // Store-backed tasks advance only through the authoritative lifecycle
       // service: Review requires evidence bound to the current spec, and Done
@@ -292,7 +352,10 @@ app.post('/api/orchestrate/generate-report', async (req: Request, res: Response)
 // Endpoint: Atlassian Jira Cloud REST integration
 app.post('/api/integrations/jira/sync', async (req: Request, res: Response) => {
   try {
-    const result = await syncJiraTask(req.body || {});
+    const taskProjectId = taskStore.getProjectIdForTask(req.body?.task?.id || req.body?.task?.key);
+    const projectId = projectContext(req, res, taskProjectId);
+    if (!projectId) return;
+    const result = await syncJiraTask(req.body || {}, projectId);
     res.status(result.status).json(result.body);
   } catch (error: any) {
     if (isBlockedError(error)) {
@@ -316,6 +379,11 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
 app.post('/api/integrations/repository/dispatch', async (req: Request, res: Response) => {
   try {
     const { action = 'verify', repoConfig, task, allowOverwrite = false, runId, isApproved = false, approvedBy } = req.body || {};
+    const resourceProjectId =
+      (runId ? taskStore.getProjectIdForRun(runId) : null) ||
+      taskStore.getProjectIdForTask(task?.id || task?.key);
+    const projectId = projectContext(req, res, resourceProjectId);
+    if (!projectId) return;
 
     if (action === 'create_pr' || action === 'deliver') {
       const targetRun = runId
@@ -334,7 +402,7 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
         });
         // Delivery may have granted Done (or revoked acceptance) in the
         // authoritative store; project that outcome into the UI state.
-        coordinator.projectAuthoritativeStatuses();
+        coordinator.projectAuthoritativeStatuses(projectId);
         return res.status(deliveryResult.status).json(deliveryResult);
       }
     }
@@ -351,6 +419,8 @@ app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
   try {
     const { runId, isApproved = false, approvedBy, repoUrl, targetBaseBranch } = req.body || {};
     if (!runId) return res.status(400).json({ error: 'runId is required' });
+    const projectId = projectContext(req, res, taskStore.getProjectIdForRun(runId));
+    if (!projectId) return;
     const result = await defaultGitHubDelivery.dispatchDelivery({
       runId,
       isApproved: isApproved === true,
@@ -358,7 +428,7 @@ app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
       repoUrl,
       targetBaseBranch,
     });
-    coordinator.projectAuthoritativeStatuses();
+    coordinator.projectAuthoritativeStatuses(projectId);
     return res.status(result.status).json(result);
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Delivery dispatch failed') });
@@ -370,6 +440,7 @@ app.get('/api/runs/:id', (req: Request, res: Response) => {
   try {
     const run = taskStore.getRun(req.params.id);
     if (!run) return res.status(404).json({ error: 'Run not found' });
+    if (!projectContext(req, res, run.projectId)) return;
     const attempts = taskStore.listAttempts(run.id);
     const verification = taskStore.getLatestVerification(run.id);
     const delivery = taskStore.getDeliveryForRun(run.id);
@@ -382,8 +453,10 @@ app.get('/api/runs/:id', (req: Request, res: Response) => {
 // Endpoint: Read Latest Run for Task
 app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
   try {
+    if (!projectContext(req, res, taskStore.getProjectIdForTask(req.params.id))) return;
     const run = taskStore.getLatestRunForTask(req.params.id) || taskStore.getRun(req.params.id);
     if (!run) return res.status(404).json({ error: 'No run found for task' });
+    if (!projectContext(req, res, run.projectId)) return;
     const attempts = taskStore.listAttempts(run.id);
     const verification = taskStore.getLatestVerification(run.id);
     const delivery = taskStore.getDeliveryForRun(run.id);
@@ -447,6 +520,10 @@ app.post('/api/custom-providers/ping', async (req: Request, res: Response) => {
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Provider ping failed') });
   }
+});
+
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({ error: 'API route not found', code: 'API_NOT_FOUND' });
 });
 
 // Dev vs Prod Vite mounting
