@@ -287,3 +287,22 @@ Expected response:
 ```
 
 The pull request is now delivered on GitHub, linked to the verified commit, and ready for review by your team. Dupond does not automatically merge pull requests.
+
+## 7. Project Context and Isolation
+
+List projects with the same bearer token:
+
+```bash
+curl -s http://localhost:3000/api/projects \
+  -H "Authorization: Bearer your_secure_operator_token"
+```
+
+Use the selected project ID on project-owned requests:
+
+```bash
+curl -s http://localhost:3000/api/orchestrate/state \
+  -H "Authorization: Bearer your_secure_operator_token" \
+  -H "X-Dupond-Project-Id: default"
+```
+
+The server rejects a resource ID from another project with `PROJECT_CONTEXT_MISMATCH`. Project switching is client-local; the server never maintains a global active project. The first startup migrates existing single-project records into `default`, and reset/archive operations refuse pending or running work while preserving remote GitHub and Jira resources.

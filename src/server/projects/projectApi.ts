@@ -59,7 +59,7 @@ const UpdateProjectSchema = z
   .strict();
 
 const ResetSchema = z.object({
-  scopes: z.array(z.enum(['runs', 'evidence', 'deliveries', 'worktrees', 'artifacts'])).min(1).optional(),
+  scopes: z.array(z.enum(['tasks', 'cycles', 'runs', 'evidence', 'deliveries', 'worktrees', 'artifacts'])).min(1).optional(),
   confirm: z.literal(true).optional(),
   confirmProjectName: z.string().min(1).optional(),
   scope: z.object({
@@ -260,8 +260,8 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
         throw new ProjectApiError(409, 'INVALID_REQUEST', 'Project name confirmation does not match.');
       }
       const scopes = body.scopes || [
-        ...(body.scope?.wipeTasks ? ['runs', 'evidence', 'deliveries'] as const : []),
-        ...(body.scope?.wipeCycles ? ['runs'] as const : []),
+        ...(body.scope?.wipeTasks ? ['tasks'] as const : []),
+        ...(body.scope?.wipeCycles ? ['cycles'] as const : []),
         ...(body.scope?.wipeWorktrees ? ['worktrees'] as const : []),
       ];
       if (!body.confirm && !body.confirmProjectName) {
@@ -271,8 +271,8 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
       res.json({
         projectId: result.projectId,
         resetAt: new Date().toISOString(),
-        clearedTasksCount: result.cleared.runs,
-        clearedCyclesCount: result.cleared.runs,
+        clearedTasksCount: result.cleared.tasks,
+        clearedCyclesCount: result.cleared.cycles,
         clearedWorktreesCount: result.cleared.worktrees,
         message: 'Workspace successfully reset.',
         details: result,
@@ -298,24 +298,24 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
         } as any,
         actor: 'api',
       });
-
-      router.get('/integrations/jira/metadata', (_req: Request, res: Response) => {
-        res.json({
-          templates: [],
-          issueTypes: [{ id: 'epic', name: 'Epic', isEpic: true }],
-          defaultTemplateKey: '',
-          capabilities: {
-            linkExisting: true,
-            createProject: false,
-            createEpic: false,
-            reason: 'Remote Jira creation requires a configured server-held connection and supported capability.',
-          },
-        });
-      });
       res.status(httpStatus).json(result);
     } catch (err) {
       fail(res, err);
     }
+  });
+
+  router.get('/integrations/jira/metadata', (_req: Request, res: Response) => {
+    res.json({
+      templates: [],
+      issueTypes: [{ id: 'epic', name: 'Epic', isEpic: true }],
+      defaultTemplateKey: '',
+      capabilities: {
+        linkExisting: true,
+        createProject: false,
+        createEpic: false,
+        reason: 'Remote Jira creation requires a configured server-held connection and supported capability.',
+      },
+    });
   });
 
   return router;
