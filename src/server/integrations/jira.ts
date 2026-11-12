@@ -15,11 +15,11 @@ interface JiraSyncResult {
  * let any caller point a Basic-auth token at an arbitrary origin — a
  * credential-smuggling oracle.
  */
-export async function syncJiraTask(body: any): Promise<JiraSyncResult> {
+export async function syncJiraTask(body: any, projectId?: string): Promise<JiraSyncResult> {
   const action = body?.action || 'sync_task';
   const task = body?.task;
 
-  const jira = coordinator.getIntegrationSecrets().jira;
+  const jira = coordinator.getIntegrationSecrets(projectId).jira;
   const hostUrl = jira.hostUrl;
   const userEmail = jira.userEmail;
   let apiToken = jira.apiToken;

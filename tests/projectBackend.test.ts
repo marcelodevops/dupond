@@ -209,6 +209,23 @@ describe('multi-project backend', () => {
     });
     assert.equal(response.status, 409);
     assert.equal((await response.json()).code, 'ACTIVE_RUNS_PRESENT');
+
+    const reset = await fetch(`${base}/api/projects/${project.id}/reset`, {
+      method: 'POST',
+      headers: { ...headers(project.id), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        confirmProjectName: project.name,
+        scope: {
+          wipeTasks: true,
+          wipeCycles: true,
+          wipeWorktrees: true,
+          preserveRemoteGit: true,
+          preserveRemoteJira: true,
+        },
+      }),
+    });
+    assert.equal(reset.status, 409);
+    assert.equal((await reset.json()).code, 'ACTIVE_RUNS_PRESENT');
   });
 
   it('validates Jira links, persists retry identity, and never uses real network transport', async () => {

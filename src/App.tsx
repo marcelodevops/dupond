@@ -130,6 +130,15 @@ function AppWorkspace() {
     const abortCtrl = new AbortController();
     abortStateFetchRef.current = abortCtrl;
 
+    if (!capturedProjectId) {
+      setTasks([]);
+      setIsBoardLoading(false);
+      return () => {
+        isCancelled = true;
+        abortCtrl.abort();
+      };
+    }
+
     // If project changed, immediately clear tasks and enter loading state to prevent leakage
     if (lastProjectIdRef.current !== capturedProjectId) {
       lastProjectIdRef.current = capturedProjectId;

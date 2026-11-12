@@ -14,9 +14,12 @@ import { RepositoryConfig } from './index';
 export type { RepositoryConfig };
 
 export interface ProjectRepositoryConfig {
-  repoUrl: string;
+  repoUrl?: string;
   localPath?: string;
   defaultBranch?: string;
+  defaultBaseBranch?: string;
+  slug?: string;
+  path?: string;
   targetDirectory?: string;
   localWriteMode?: 'worktree' | 'direct_write' | 'git_branch' | 'patch_export';
   branchPrefix?: string;
@@ -29,9 +32,12 @@ export type JiraProvisionStatus = 'unlinked' | 'linked' | 'provisioned' | 'faile
 
 export interface ProjectJiraState {
   connectionRef?: string;       // Public/opaque host connection reference, e.g. "jira.corp.internal"
+  connectionId?: string | null;
+  hostUrl?: string | null;
   projectKey?: string;          // Jira Project Key (e.g. "AEG", "DUP")
   epicKey?: string;             // Optional Epic Issue Key (e.g. "AEG-100")
   provisionStatus?: JiraProvisionStatus;
+  provisioningState?: JiraProvisionStatus | 'unconfigured';
   lastSync?: string;            // ISO timestamp
   error?: string;               // Last sync/provision error message
 }
@@ -39,6 +45,31 @@ export interface ProjectJiraState {
 export interface ProjectAgentPreferences {
   defaultProvider?: 'gemini' | 'openai' | 'custom';
   defaultModel?: string;
+}
+
+export type ProjectPreferences = ProjectAgentPreferences & {
+  requireApprovalByDefault?: boolean;
+};
+
+export type ProjectResetScope = 'tasks' | 'cycles' | 'runs' | 'evidence' | 'deliveries' | 'worktrees' | 'artifacts';
+
+export interface ProjectResetResult {
+  projectId: string;
+  cleared: Record<ProjectResetScope, number>;
+  auditEventId: string;
+  skipped: Array<{ scope: ProjectResetScope; reason: string }>;
+}
+
+export const PROJECT_CONTEXT_HEADER = 'x-dupond-project-id';
+export const DEFAULT_PROJECT_ID = 'default';
+
+export interface ProjectCapabilities {
+  jira: {
+    linkExisting: boolean;
+    createProject: boolean;
+    createEpic: boolean;
+    reason?: string;
+  };
 }
 
 export interface ProjectSummary {
@@ -52,10 +83,13 @@ export interface ProjectSummary {
   updatedAt: string;
   taskCount?: number;
   activeRunsCount?: number;
+  capabilities?: ProjectCapabilities;
 }
 
 export interface Project extends ProjectSummary {
   agentPreferences?: ProjectAgentPreferences;
+  preferences?: ProjectPreferences;
+  archivedAt?: string | null;
 }
 
 /**
@@ -74,6 +108,8 @@ export interface CreateProjectRequest {
     epicKey?: string;
     epicSummary?: string;
     templateKey?: string;
+    confirmRemoteCreation?: boolean;
+    operationId?: string;
   };
   agentPreferences?: ProjectAgentPreferences;
 }
@@ -133,6 +169,7 @@ export interface ProvisionJiraLinkExisting {
   mode: 'link_existing';
   projectKey: string;
   epicKey?: string;
+  connectionRef?: string;
 }
 
 export interface ProvisionJiraCreateProject {
@@ -141,6 +178,9 @@ export interface ProvisionJiraCreateProject {
   projectName: string;          // Name of project to create
   templateKey?: string;         // e.g. "software.kanban", "software.scrum"
   projectTypeKey?: string;      // "software" or "business"
+  confirmRemoteCreation?: boolean;
+  operationId?: string;
+  connectionRef?: string;
 }
 
 export interface ProvisionJiraCreateEpic {
@@ -148,6 +188,9 @@ export interface ProvisionJiraCreateEpic {
   projectKey: string;           // Target existing Jira project key
   epicSummary: string;          // Summary for the epic issue
   issueType?: string;           // Issue type name or id for Epic
+  confirmRemoteCreation?: boolean;
+  operationId?: string;
+  connectionRef?: string;
 }
 
 export type ProvisionJiraRequest =
@@ -155,12 +198,55 @@ export type ProvisionJiraRequest =
   | ProvisionJiraCreateProject
   | ProvisionJiraCreateEpic;
 
+export type JiraProvisionRequest = {
+  mode: JiraProvisionMode | 'none';
+  connectionId?: string;
+  connectionRef?: string;
+  projectKey?: string;
+  projectName?: string;
+  epicSummary?: string;
+  issueType?: string;
+  templateKey?: string;
+  connection?: {
+    hostUrl: string;
+    userEmail: string;
+    apiToken?: string;
+  };
+  confirmRemoteCreation?: boolean;
+  operationId?: string;
+  epicKey?: string;
+  createProject?: {
+    key: string;
+    name: string;
+    projectTypeKey: 'business' | 'software' | 'service_desk' | 'customer_service';
+    projectTemplateKey: string;
+    leadAccountId: string;
+    description?: string;
+  };
+  createEpic?: { summary: string; description?: string };
+};
+
+export interface JiraProvisionResult {
+  projectId: string;
+  operationId: string;
+  mode: JiraProvisionMode | 'none';
+  status: 'succeeded' | 'failed' | 'reconciled' | 'replayed' | 'no_change';
+  connectionId?: string | null;
+  projectKey?: string | null;
+  epicKey?: string | null;
+  error?: { code: string; httpStatus?: number; message: string; requiredPermissions?: string[] };
+  note?: string;
+}
+
 export interface ProvisionJiraResponse {
   projectId: string;
   provisionStatus: 'linked' | 'provisioned';
   jira: ProjectJiraState;
   remoteUrl?: string;
   message: string;
+  operationId?: string;
+  code?: string;
+  details?: Record<string, any>;
 }
 
 /**
@@ -182,6 +268,7 @@ export interface JiraMetadataResponse {
   templates: JiraTemplateOption[];
   issueTypes: JiraIssueTypeOption[];
   defaultTemplateKey: string;
+  capabilities?: ProjectCapabilities['jira'];
 }
 
 /**

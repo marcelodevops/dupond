@@ -82,6 +82,42 @@ export class TaskStore {
         // Column already exists
       }
     }
+    this.migrateProjectIsolation();
+  }
+
+  private migrateProjectIsolation(): void {
+    this.db.exec('BEGIN IMMEDIATE TRANSACTION;');
+    try {
+      for (const ddl of [
+        "ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
+        "ALTER TABLE task_runs ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
+        "ALTER TABLE audit_events ADD COLUMN project_id TEXT DEFAULT 'default';",
+        'ALTER TABLE jira_operations ADD COLUMN remote_id TEXT;',
+        "ALTER TABLE projects ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}';",
+      ]) {
+        try {
+          this.db.exec(ddl);
+        } catch {
+          // Column already exists.
+        }
+      }
+      this.db.exec("UPDATE tasks SET project_id = 'default' WHERE project_id IS NULL OR project_id = '';");
+      this.db.exec("UPDATE task_runs SET project_id = 'default' WHERE project_id IS NULL OR project_id = '';");
+      this.db.exec("UPDATE audit_events SET project_id = 'default' WHERE project_id IS NULL OR project_id = '';");
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_task_runs_project ON task_runs(project_id);');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id);');
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        INSERT OR IGNORE INTO projects
+          (id, name, description, status, repository_config, preferences, state_json, created_at, updated_at)
+        VALUES (?, ?, ?, 'active', '{}', '{}', '{}', ?, ?)
+      `).run('default', 'Default', 'Migrated single-project workspace', now, now);
+      this.db.exec('COMMIT;');
+    } catch (error) {
+      this.db.exec('ROLLBACK;');
+      throw error;
+    }
   }
 
   public getRawDb(): DatabaseSync {
@@ -102,27 +138,29 @@ export class TaskStore {
   }
 
   // --- Task Methods ---
-  public createTask(task: Omit<TaskRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): TaskRecord {
+  public createTask(task: Omit<TaskRecord, 'id' | 'createdAt' | 'updatedAt' | 'projectId'> & { id?: string; projectId?: string }): TaskRecord {
     const id = task.id || `task-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
     const record: TaskRecord = {
       ...task,
       id,
+      projectId: task.projectId || 'default',
       createdAt: now,
       updatedAt: now,
     };
 
     const stmt = this.db.prepare(`
       INSERT INTO tasks (
-        id, key, title, description, status, priority, target_repo, target_repo_path, base_commit,
+        id, project_id, key, title, description, status, priority, target_repo, target_repo_path, base_commit,
         allowed_paths, protected_paths, verification_commands, acceptance_criteria,
         worker_config, max_attempts, timeout_seconds, require_approval,
         blocked_reason, claimed_by, claimed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
       record.id,
+      record.projectId,
       record.key,
       record.title,
       record.description || '',
@@ -165,14 +203,29 @@ export class TaskStore {
     return this.mapTaskRow(row);
   }
 
-  public listTasks(statusFilter?: string): TaskRecord[] {
-    let stmt;
+  public getTaskScoped(idOrKey: string, projectId: string): TaskRecord | null {
+    const task = this.getTask(idOrKey);
+    return task && task.projectId === projectId ? task : null;
+  }
+
+  public getProjectIdForTask(idOrKey: string): string | null {
+    const row = this.db.prepare('SELECT project_id FROM tasks WHERE id = ? OR key = ?').get(idOrKey, idOrKey) as any;
+    return row?.project_id || null;
+  }
+
+  public listTasks(statusFilter?: string, projectId?: string): TaskRecord[] {
+    const clauses: string[] = [];
+    const params: string[] = [];
     if (statusFilter) {
-      stmt = this.db.prepare('SELECT * FROM tasks WHERE status = ? ORDER BY created_at ASC');
-      return (stmt.all(statusFilter) as any[]).map(this.mapTaskRow);
+      clauses.push('status = ?');
+      params.push(statusFilter);
     }
-    stmt = this.db.prepare('SELECT * FROM tasks ORDER BY created_at ASC');
-    return (stmt.all() as any[]).map(this.mapTaskRow);
+    if (projectId) {
+      clauses.push('project_id = ?');
+      params.push(projectId);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    return (this.db.prepare(`SELECT * FROM tasks${where} ORDER BY created_at ASC`).all(...params) as any[]).map(this.mapTaskRow);
   }
 
   /**
@@ -428,26 +481,34 @@ export class TaskStore {
   }
 
   // --- Run Methods ---
-  public createRun(run: Omit<TaskRunRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): TaskRunRecord {
+  public createRun(run: Omit<TaskRunRecord, 'id' | 'createdAt' | 'updatedAt' | 'projectId'> & { id?: string; projectId?: string }): TaskRunRecord {
     const id = run.id || `run-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
+    const task = this.getTask(run.taskId);
+    if (!task) throw new DomainError(`Task ${run.taskId} not found`);
+    const projectId = run.projectId || task.projectId || 'default';
+    if (task.projectId !== projectId) {
+      throw new DomainError(`Project ownership mismatch: task ${task.id} belongs to ${task.projectId}, not ${projectId}`);
+    }
     const record: TaskRunRecord = {
       ...run,
       id,
+      projectId,
       createdAt: now,
       updatedAt: now,
     };
 
     const stmt = this.db.prepare(`
       INSERT INTO task_runs (
-        id, task_id, status, target_repo, base_commit, target_branch, worktree_path,
+        id, project_id, task_id, status, target_repo, base_commit, target_branch, worktree_path,
         current_attempt, duration_ms, failure_type, failure_reason,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
       record.id,
+      record.projectId,
       record.taskId,
       record.status,
       record.targetRepo || null,
@@ -478,6 +539,16 @@ export class TaskStore {
     const row = stmt.get(id) as any;
     if (!row) return null;
     return this.mapRunRow(row);
+  }
+
+  public getRunScoped(id: string, projectId: string): TaskRunRecord | null {
+    const run = this.getRun(id);
+    return run && run.projectId === projectId ? run : null;
+  }
+
+  public getProjectIdForRun(runId: string): string | null {
+    const row = this.db.prepare('SELECT project_id FROM task_runs WHERE id = ?').get(runId) as any;
+    return row?.project_id || null;
   }
 
   public getLatestRunForTask(taskId: string): TaskRunRecord | null {
@@ -867,12 +938,18 @@ export class TaskStore {
   public recordAudit(event: Omit<AuditEventRecord, 'id' | 'timestamp'>): void {
     const id = `aud-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
+    const projectId =
+      event.projectId ||
+      (event.taskId ? this.getProjectIdForTask(event.taskId) : null) ||
+      (event.runId ? this.getProjectIdForRun(event.runId) : null) ||
+      'default';
     const stmt = this.db.prepare(`
-      INSERT INTO audit_events (id, task_id, run_id, event_type, actor, details, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO audit_events (id, project_id, task_id, run_id, event_type, actor, details, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       id,
+      projectId,
       event.taskId || null,
       event.runId || null,
       event.eventType,
@@ -932,6 +1009,7 @@ export class TaskStore {
   private mapTaskRow(row: any): TaskRecord {
     return {
       id: row.id,
+      projectId: row.project_id || 'default',
       key: row.key,
       title: row.title,
       description: row.description,
@@ -959,6 +1037,7 @@ export class TaskStore {
   private mapRunRow(row: any): TaskRunRecord {
     return {
       id: row.id,
+      projectId: row.project_id || 'default',
       taskId: row.task_id,
       status: row.status,
       targetRepo: row.target_repo || undefined,

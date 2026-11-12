@@ -302,7 +302,7 @@ export class ProjectStore {
   // --- Narrow reset ---
 
   public resetProject(projectId: string, scopes: ProjectResetScope[], actor: string): ProjectResetResult {
-    const valid: ProjectResetScope[] = ['runs', 'evidence', 'deliveries', 'worktrees', 'artifacts'];
+    const valid: ProjectResetScope[] = ['tasks', 'cycles', 'runs', 'evidence', 'deliveries', 'worktrees', 'artifacts'];
     if (!Array.isArray(scopes) || scopes.length === 0) {
       throw new ProjectApiError(400, 'INVALID_REQUEST', 'reset requires at least one scope.');
     }
@@ -322,6 +322,8 @@ export class ProjectStore {
     }
 
     const cleared: Record<ProjectResetScope, number> = {
+      tasks: 0,
+      cycles: 0,
       runs: 0,
       evidence: 0,
       deliveries: 0,
@@ -336,6 +338,19 @@ export class ProjectStore {
         .all(projectId) as any[];
       const runIds = runRows.map((r) => r.id);
       const taskRows = this.db.prepare('SELECT id, key FROM tasks WHERE project_id = ?').all(projectId) as any[];
+
+      if (scopes.includes('cycles')) {
+        const stateRow = this.db.prepare('SELECT state_json FROM projects WHERE id = ?').get(projectId) as any;
+        try {
+          const state = JSON.parse(stateRow?.state_json || '{}');
+          cleared.cycles = Number.isFinite(state.cycleCount) ? Number(state.cycleCount) : 0;
+          state.cycleCount = 0;
+          this.db.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
+            .run(JSON.stringify(state), new Date().toISOString(), projectId);
+        } catch {
+          cleared.cycles = 0;
+        }
+      }
 
       if (scopes.includes('deliveries')) {
         cleared.deliveries = this.deleteWhereIn('delivery_records', 'run_id', runIds);
@@ -353,6 +368,27 @@ export class ProjectStore {
           this.db
             .prepare("UPDATE tasks SET status = 'todo', claimed_by = NULL, claimed_at = NULL, blocked_reason = NULL, updated_at = ? WHERE id = ? AND status IN ('in_progress','review','done','blocked')")
             .run(new Date().toISOString(), t.id);
+        }
+
+        if (scopes.includes('tasks')) {
+          const taskIds = taskRows.map((task) => task.id);
+          if (taskIds.length > 0) {
+            this.deleteWhereIn('run_attempts', 'run_id', runIds);
+            this.deleteWhereIn('verification_records', 'run_id', runIds);
+            this.deleteWhereIn('delivery_records', 'run_id', runIds);
+            this.deleteWhereIn('task_runs', 'id', runIds);
+            cleared.tasks = this.deleteWhereIn('tasks', 'id', taskIds);
+          }
+          const stateRow = this.db.prepare('SELECT state_json FROM projects WHERE id = ?').get(projectId) as any;
+          try {
+            const state = JSON.parse(stateRow?.state_json || '{}');
+            state.tasks = [];
+            state.communications = [];
+            this.db.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
+              .run(JSON.stringify(state), new Date().toISOString(), projectId);
+          } catch {
+            // Local rows remain the authoritative reset target.
+          }
         }
         const stateRow = this.db.prepare('SELECT state_json FROM projects WHERE id = ?').get(projectId) as any;
         try {

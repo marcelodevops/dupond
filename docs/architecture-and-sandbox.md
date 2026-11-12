@@ -144,3 +144,22 @@ git fetch origin main
    - If merge conflicts occur, delivery blocks with HTTP 409 Conflict.
    - If merge succeeds, Dupond re-runs authoritative verification on the combined result.
    - **Re-approval requirement**: If integration produced a new commit SHA, prior operator approval is invalidated. The operator must explicitly review and approve the new merged commit SHA before delivery can proceed.
+
+## 6. Multi-Project Persistence and Context
+
+Dupond stores projects and project-owned execution data in SQLite. On first startup after the migration, the existing single-project task/run/audit history is assigned to the canonical `default` project without changing record IDs. The existing JSON state is imported into that project's durable state blob; subsequent project state is stored per project.
+
+Project APIs are authenticated and mounted before the SPA fallback:
+
+```text
+GET/POST /api/projects
+GET/PATCH /api/projects/:projectId
+POST /api/projects/:projectId/archive
+POST /api/projects/:projectId/reset
+POST /api/projects/:projectId/jira/provision
+GET /api/integrations/jira/metadata
+```
+
+Project-owned orchestration requests carry `X-Dupond-Project-Id`. Resource endpoints derive ownership from task/run IDs and reject a header that names another project. There is no server-wide active project. Archived projects remain readable but cannot start execution, mutate state, provision Jira, or deliver work; archive/reset refuse pending or running work and reset never deletes remote GitHub/Jira resources.
+
+Unknown `/api/*` paths return a JSON `API_NOT_FOUND` response instead of the frontend `index.html`. Jira project responses contain only opaque connection references and public project/epic mappings. Jira linking is read-only validated; remote creation requires explicit confirmation and a persisted operation identity, and tests use an injected transport rather than a real Jira site.
