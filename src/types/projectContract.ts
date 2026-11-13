@@ -152,6 +152,18 @@ export interface PlanningReadiness {
   error?: string;
 }
 
+export interface RepositoryVerificationResult {
+  valid: boolean;
+  localPathExists: boolean;
+  isGitRepo: boolean;
+  branchExists: boolean;
+  writable: boolean;
+  headCommit?: string;
+  resolvedBranch?: string;
+  error?: string;
+  details: string[];
+}
+
 /**
  * Request payload for POST /api/projects
  */

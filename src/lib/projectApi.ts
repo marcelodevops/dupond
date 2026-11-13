@@ -28,6 +28,7 @@ import {
   ParsePlanRequest,
   AdoptPlanRequest,
   AdoptPlanResponse,
+  RepositoryVerificationResult,
 } from '../types/projectContract';
 
 const ACTIVE_PROJECT_KEY = 'dupond_active_project_id';
@@ -359,6 +360,28 @@ export const projectApi = {
           [PROJECT_HEADER]: projectId,
         },
         body: JSON.stringify(req),
+      },
+      signal
+    );
+  },
+
+  /**
+   * Verify local repository path, git structure, branch, and permissions
+   */
+  async verifyRepository(
+    projectId: string,
+    repository?: ProjectRepositoryConfig,
+    signal?: AbortSignal
+  ): Promise<RepositoryVerificationResult> {
+    return callProjectApi<RepositoryVerificationResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/repository/verify`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [PROJECT_HEADER]: projectId,
+        },
+        body: JSON.stringify({ repository }),
       },
       signal
     );

@@ -53,7 +53,8 @@ const UpdateProjectSchema = z
         projectKey: z.string().max(20).nullable().optional(),
         epicKey: z.string().max(30).nullable().optional(),
       })
-      .strict(),
+      .strict()
+      .optional(),
     preferences: PreferencesSchema.optional(),
     agentPreferences: PreferencesSchema.optional(),
   })
@@ -223,6 +224,19 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
         'api',
       );
       res.json(project);
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.post('/projects/:projectId/repository/verify', (req: Request, res: Response) => {
+    try {
+      const ctx = projectContext(req);
+      if (ctx !== req.params.projectId) {
+        throw new ProjectApiError(403, 'PROJECT_CONTEXT_MISMATCH', `Path project ${req.params.projectId} does not match ${PROJECT_CONTEXT_HEADER} context ${ctx}.`);
+      }
+      const result = store.verifyProjectRepository(req.params.projectId, req.body?.repository);
+      res.json(result);
     } catch (err) {
       fail(res, err);
     }

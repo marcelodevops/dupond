@@ -3,6 +3,7 @@ import {
   Project,
   ProjectSummary,
   CreateProjectRequest,
+  UpdateProjectRequest,
   ArchiveProjectResponse,
   ResetProjectRequest,
   ResetProjectResponse,
@@ -30,6 +31,7 @@ interface ProjectContextValue {
   switchProject: (projectId: string) => Promise<void>;
   refreshProjects: () => Promise<void>;
   createProject: (req: CreateProjectRequest) => Promise<Project>;
+  updateProject: (projectId: string, patch: UpdateProjectRequest) => Promise<Project>;
   archiveProject: (projectId: string) => Promise<ArchiveProjectResponse>;
   resetProject: (projectId: string, req: ResetProjectRequest) => Promise<ResetProjectResponse>;
   provisionJira: (projectId: string, req: ProvisionJiraRequest) => Promise<ProvisionJiraResponse>;
@@ -179,6 +181,15 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return created;
   }, [refreshProjects, switchProject]);
 
+  const updateProject = useCallback(async (projectId: string, patch: UpdateProjectRequest): Promise<Project> => {
+    const updated = await projectApi.updateProject(projectId, patch);
+    await refreshProjects();
+    if (currentProject?.id === projectId) {
+      setCurrentProject(updated);
+    }
+    return updated;
+  }, [currentProject?.id, refreshProjects]);
+
   const archiveProject = useCallback(async (projectId: string): Promise<ArchiveProjectResponse> => {
     const res = await projectApi.archiveProject(projectId);
     await refreshProjects();
@@ -255,6 +266,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         switchProject,
         refreshProjects,
         createProject,
+        updateProject,
         archiveProject,
         resetProject,
         provisionJira,

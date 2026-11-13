@@ -32,6 +32,7 @@ import { apiFetch, getApiToken, isAuthRequired, onAuthStateChange, setApiToken }
 import { ProjectProvider, useProject } from './context/ProjectContext';
 import { ProjectWizardModal } from './components/ProjectWizardModal';
 import { ProjectLifecycleModal } from './components/ProjectLifecycleModal';
+import { ProjectSettingsModal } from './components/ProjectSettingsModal';
 import { getActiveProjectId, PROJECT_HEADER, projectApi } from './lib/projectApi';
 
 function AppWorkspace() {
@@ -226,6 +227,7 @@ function AppWorkspace() {
   const [selectedTaskForModal, setSelectedTaskForModal] = useState<Task | null>(null);
   const [isIngestModalOpen, setIsIngestModalOpen] = useState<boolean>(false);
   const [isAddTaskModalOpen, setIsAddTaskModalOpen] = useState<boolean>(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
 
   // Toast Notification state
   const [toastMessage, setToastMessage] = useState<{ title: string; desc: string; type: 'info' | 'success' | 'alert' } | null>(null);
@@ -720,6 +722,7 @@ function AppWorkspace() {
         }}
         onRunSingleStep={handleRunServerCycle}
         isProcessingStep={isProcessingStep}
+        onOpenSettings={() => setIsSettingsModalOpen(true)}
         onOpenIngestModal={() => setIsIngestModalOpen(true)}
         onOpenReportModal={() => setActiveTab('reports')}
         projectTitle={projectTitle}
@@ -898,6 +901,12 @@ function AppWorkspace() {
       <ProjectWizardModal
         isOpen={isCreateWizardOpen}
         onClose={() => setIsCreateWizardOpen(false)}
+      />
+
+      {/* Project Settings & Repository Verification Modal */}
+      <ProjectSettingsModal
+        isOpen={isSettingsModalOpen}
+        onClose={() => setIsSettingsModalOpen(false)}
       />
 
       {/* Project Lifecycle Management Modal (Reset & Archive) */}
