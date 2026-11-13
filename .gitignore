@@ -1,3 +1,4 @@
+node_modules
 node_modules/
 build/
 dist/
@@ -17,10 +18,11 @@ coverage/
 
 # Temporary worktrees and local database
 .dupond_worktrees/
+data/
 data/*.db
 data/*.db-*
-data/*.db-*
 data/.dupond_auth_token
+data/.dupond_conn_key
 .qoder/
 
 # Local runtime state and debug scratch
