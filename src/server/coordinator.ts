@@ -575,12 +575,13 @@ export class CoordinatorEngine {
   }
 
   // Centralized transition method
-  public async transitionTaskStatus(taskId: string, targetStatus: TaskStatus): Promise<{
+  public async transitionTaskStatus(taskId: string, targetStatus: TaskStatus, projectId?: string): Promise<{
     success: boolean;
     task?: Task;
     verification?: VerificationResult;
     error?: string;
   }> {
+    const effectiveProjectId = projectId || this.activeProjectId;
     const task = this.state.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
       return { success: false, error: `Task ${taskId} not found` };
@@ -589,7 +590,7 @@ export class CoordinatorEngine {
     // Tasks registered in the authoritative store transition only through the
     // lifecycle service, which gates Review/Done on bound verification evidence.
     // The JSON entry is updated as a projection of that outcome afterward.
-    const dbTask = taskStore.getTask(task.id, this.activeProjectId) || taskStore.getTask(task.key, this.activeProjectId);
+    const dbTask = taskStore.getTask(task.id, effectiveProjectId) || taskStore.getTask(task.key, effectiveProjectId);
     if (dbTask) {
       const outcome = defaultLifecycleService.transition({
         taskId: dbTask.id,

@@ -404,13 +404,25 @@ function AppWorkspace() {
       return;
     }
     const capturedProjectId = currentProject?.id || getActiveProjectId();
+    if (capturedProjectId && capturedProjectId !== 'default') {
+      showToast('Automation Unavailable', 'Automated cycle execution is not supported for this project. Tasks must be executed manually.', 'alert');
+      return;
+    }
     setIsProcessingStep(true);
     try {
       const res = await apiFetch('/api/orchestrate/engine/step', {
         method: 'POST',
         headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 501 || data.code === 'PROJECT_ENGINE_UNSUPPORTED') {
+          showToast('Automation Unavailable', 'Automated cycle execution is not supported for this project.', 'alert');
+        } else {
+          showToast('Engine Error', data.error || `Server returned HTTP ${res.status}`, 'alert');
+        }
+        return;
+      }
       if (capturedProjectId === (currentProject?.id || getActiveProjectId())) {
         if (data.state) {
           setTasks(data.state.tasks);
@@ -667,21 +679,31 @@ function AppWorkspace() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         isRunningAuto={isRunningAuto}
+        isManualMode={Boolean(currentProject && currentProject.id !== 'default')}
         onToggleAuto={async () => {
           if (isArchived) {
             showToast('Project is Archived', 'Cannot run automated engine on an archived project.', 'alert');
+            return;
+          }
+          const capturedProjectId = currentProject?.id || getActiveProjectId();
+          if (capturedProjectId && capturedProjectId !== 'default') {
+            showToast('Automation Unavailable', 'Automated engine daemon is not supported for secondary projects.', 'alert');
             return;
           }
           const next = !isRunningAuto;
           setIsRunningAuto(next);
           try {
             const ep = next ? '/api/orchestrate/engine/start' : '/api/orchestrate/engine/stop';
-            const res = await apiFetch(ep, { method: 'POST' });
+            const res = await apiFetch(ep, {
+              method: 'POST',
+              headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
+            });
+            const data = await res.json().catch(() => ({}));
             if (!res.ok) {
               setIsRunningAuto(!next);
               showToast(
                 'Coordinator Unchanged',
-                `The API refused to ${next ? 'start' : 'stop'} the coordinator (HTTP ${res.status}).`,
+                data.error || `The API refused to ${next ? 'start' : 'stop'} the coordinator (HTTP ${res.status}).`,
                 'alert'
               );
               return;
@@ -691,8 +713,9 @@ function AppWorkspace() {
               next ? 'Autonomous background daemon active. Will continue executing even if browser is closed.' : 'Server coordinator paused.',
               next ? 'success' : 'info'
             );
-          } catch (err) {
-            console.warn('Failed to toggle server daemon:', err);
+          } catch (err: any) {
+            setIsRunningAuto(!next);
+            showToast('Engine Error', err.message || 'Failed to toggle server daemon', 'alert');
           }
         }}
         onRunSingleStep={handleRunServerCycle}
@@ -702,6 +725,22 @@ function AppWorkspace() {
         projectTitle={projectTitle}
         cycleCount={cycleCount}
       />
+
+      {/* Non-Default Project Notice */}
+      {currentProject && currentProject.id !== 'default' && !isArchived && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-amber-800/40 text-slate-300 text-xs flex flex-wrap items-center justify-between gap-2 shadow-sm">
+            <div className="flex items-center space-x-2.5">
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Manual Workflow Only
+              </span>
+              <span>
+                <strong>{currentProject.name}</strong> is operating in manual mode. Automated engine daemon and autonomous cycle step execution are disabled for secondary projects.
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Archived Read-Only Banner */}
       {isArchived && (
