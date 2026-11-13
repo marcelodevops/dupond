@@ -335,7 +335,7 @@ export class CoordinatorEngine {
   }
 
   public getIntegrationConfigView(projectId = this.activeProjectId): IntegrationConfig {
-    const config = this.getState(projectId).integrationConfig;
+    const config = this.getState(projectId).integrationConfig || this.emptyState().integrationConfig;
     return {
       ...config,
       jira: redactSecret(config.jira, 'apiToken'),
@@ -353,7 +353,7 @@ export class CoordinatorEngine {
    * this to a client.
    */
   public getIntegrationSecrets(projectId = this.activeProjectId): IntegrationConfig {
-    const config = this.getState(projectId).integrationConfig;
+    const config = this.getState(projectId).integrationConfig || this.emptyState().integrationConfig;
     return {
       ...config,
       jira: fillSection(config.jira),
