@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.0](https://github.com/marcelodevops/dupond/compare/v0.7.1...v0.8.0) (2026-11-13)
+
+
+### Features
+
+* **adoption:** enforce strict project isolation and atomic plan adoption ([ca4f965](https://github.com/marcelodevops/dupond/commit/ca4f965994e805407dcb921076ef8cf39bc30def))
+* **context:** enforce explicit project context and honest error visibility ([d6bc4b1](https://github.com/marcelodevops/dupond/commit/d6bc4b1d9647440be3a1b39000da69f7a12e8b02))
+* **planning:** remove fabricated plan fallbacks and persist source plans ([093334a](https://github.com/marcelodevops/dupond/commit/093334ab4ad617f6e6b9a08619604ff9d6dcd211))
+* **settings:** introduce project settings window and server-side repo verification ([1771632](https://github.com/marcelodevops/dupond/commit/177163236d13666a2b6cd0ea1ced0527ab91934b))
+
+
+### Bug Fixes
+
+* **adoption:** enforce source plan ownership and synchronize authoritative database tasks ([9b8b4cc](https://github.com/marcelodevops/dupond/commit/9b8b4cc2b9779b34bfa603babb869e56d218c125))
+* **db:** enforce scoped task lookups and migrate legacy table constraints ([a4f9bb8](https://github.com/marcelodevops/dupond/commit/a4f9bb8e639d1f6fee9be0670cad69798a92939e))
+* **projects:** align default project fixed identity guard with store record name ([6dfc6b3](https://github.com/marcelodevops/dupond/commit/6dfc6b3649dac46a80a7d2401a60ef806c94f1ee))
+* **projects:** repair multi-project workflow integrity and honest error visibility ([555e3f8](https://github.com/marcelodevops/dupond/commit/555e3f87774326cc99edf3e8000f5aa9e8f883c7))
+* **tests:** probe the address the journey server actually binds ([b139ec1](https://github.com/marcelodevops/dupond/commit/b139ec160cfbdce08eed2866ff5a564ee7a72f3b))
+* **types:** resolve TypeScript compilation errors in project API and task schema ([d0160f4](https://github.com/marcelodevops/dupond/commit/d0160f4b7b05d2558dcc9f2a9ec4d25d7815215b))
+
 ## [0.7.1](https://github.com/marcelodevops/dupond/compare/v0.7.0...v0.7.1) (2026-11-12)
 
 
