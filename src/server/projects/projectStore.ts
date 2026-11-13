@@ -499,6 +499,9 @@ export class ProjectStore {
     return this.txn(() => {
       const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as any;
       if (!row) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${projectId} not found.`);
+      if (projectId === 'default' && patch.name && patch.name.trim() !== 'Default Project') {
+        throw new ProjectApiError(400, 'CANNOT_MODIFY_DEFAULT_IDENTITY', 'The default project fixed identity cannot be modified.');
+      }
       if (patch.name !== undefined) {
         const name = patch.name.trim();
         if (!name || name.length > 120) {
@@ -558,6 +561,144 @@ export class ProjectStore {
       });
       return this.toView(row);
     });
+  }
+
+  public verifyProjectRepository(
+    projectId: string,
+    candidate?: ProjectRepositoryConfig
+  ): {
+    valid: boolean;
+    localPathExists: boolean;
+    isGitRepo: boolean;
+    branchExists: boolean;
+    writable: boolean;
+    headCommit?: string;
+    resolvedBranch?: string;
+    error?: string;
+    details: string[];
+  } {
+    const project = this.getProject(projectId);
+    if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${projectId} not found.`);
+
+    const repo = candidate || project.repository || {};
+    const details: string[] = [];
+
+    if (!repo.localPath || typeof repo.localPath !== 'string' || !repo.localPath.trim()) {
+      return {
+        valid: false,
+        localPathExists: false,
+        isGitRepo: false,
+        branchExists: false,
+        writable: false,
+        error: 'Local repository path is not configured.',
+        details: ['Local path is missing or empty.'],
+      };
+    }
+
+    const resolvedPath = path.resolve(repo.localPath.trim());
+    if (!fs.existsSync(resolvedPath)) {
+      return {
+        valid: false,
+        localPathExists: false,
+        isGitRepo: false,
+        branchExists: false,
+        writable: false,
+        error: `Directory does not exist at path: ${resolvedPath}`,
+        details: [`Target filesystem path not found: ${resolvedPath}`],
+      };
+    }
+
+    // Check directory writable
+    let writable = false;
+    try {
+      fs.accessSync(resolvedPath, fs.constants.W_OK);
+      writable = true;
+      details.push('Filesystem directory is writable.');
+    } catch {
+      details.push('Filesystem directory is read-only (permission denied).');
+    }
+
+    // Check git repo
+    let isGitRepo = false;
+    try {
+      const gitDir = execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--git-dir'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (gitDir) {
+        isGitRepo = true;
+        details.push(`Valid git directory detected: ${gitDir}`);
+      }
+    } catch (gitErr: any) {
+      return {
+        valid: false,
+        localPathExists: true,
+        isGitRepo: false,
+        branchExists: false,
+        writable,
+        error: `Path is not a valid git repository: ${resolvedPath}`,
+        details: [...details, `Git verification failed: ${gitErr.message || 'not a git repo'}`],
+      };
+    }
+
+    // Check default / target branch
+    const targetBranch = repo.defaultBranch || 'main';
+    let branchExists = false;
+    let headCommit: string | undefined;
+    let resolvedBranch: string | undefined;
+
+    try {
+      headCommit = execFileSync('git', ['-C', resolvedPath, 'rev-parse', 'HEAD'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      details.push(`HEAD commit: ${headCommit.slice(0, 8)}`);
+    } catch {
+      // Empty repo or unborn branch
+    }
+
+    try {
+      resolvedBranch = execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      details.push(`Current checked out branch: ${resolvedBranch}`);
+    } catch {
+      // ignore
+    }
+
+    try {
+      execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--verify', targetBranch], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      branchExists = true;
+      details.push(`Target branch "${targetBranch}" successfully resolved.`);
+    } catch {
+      try {
+        execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--verify', `refs/heads/${targetBranch}`], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        branchExists = true;
+        details.push(`Target branch "refs/heads/${targetBranch}" resolved.`);
+      } catch {
+        details.push(`Target branch "${targetBranch}" not found in local repository.`);
+      }
+    }
+
+    const valid = isGitRepo && branchExists && writable;
+    return {
+      valid,
+      localPathExists: true,
+      isGitRepo,
+      branchExists,
+      writable,
+      headCommit,
+      resolvedBranch,
+      error: valid ? undefined : (!branchExists ? `Branch "${targetBranch}" does not exist in repository.` : !writable ? 'Directory is not writable.' : undefined),
+      details,
+    };
   }
 
   // --- Archive ---
