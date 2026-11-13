@@ -34,7 +34,8 @@ async function main() {
   assert.ok(task.id, 'Task ID generated');
   assert.strictEqual(task.key, 'AEG-501');
 
-  const fetched = store.getTask('AEG-501');
+  assert.strictEqual(store.getTask('AEG-501'), null, 'Unscoped lookup by key alone must return null');
+  const fetched = store.getTask('AEG-501', 'default');
   assert.strictEqual(fetched?.id, task.id);
   assert.deepStrictEqual(fetched?.allowedPaths, ['src/**']);
   assert.strictEqual(fetched?.requireApproval, true);

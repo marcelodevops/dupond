@@ -92,6 +92,78 @@ export interface Project extends ProjectSummary {
   archivedAt?: string | null;
 }
 
+export type PlanSourceStatus = 'submitted' | 'parsed' | 'parse_failed' | 'adopted';
+
+export interface ProjectSourcePlan {
+  id: string;
+  projectId: string;
+  revision: number;
+  sourceText: string;
+  summary?: string;
+  status: PlanSourceStatus;
+  errorMessage?: string;
+  breakdownJson?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ParsePlanRequest {
+  planText: string;
+  currentAgents?: Array<{ name: string; role: string; skills?: string[] }>;
+}
+
+export interface AdoptPlanRequest {
+  sourcePlanId?: string;
+  planRevision?: number;
+  summary: string;
+  epics: Array<{
+    id: string;
+    title: string;
+    description?: string;
+    color?: string;
+  }>;
+  tasks: Array<{
+    id: string;
+    key: string;
+    title: string;
+    description: string;
+    epicId: string;
+    priority?: 'critical' | 'high' | 'medium' | 'low';
+    estimatedHours?: number;
+    recommendedRole?: string;
+    dependencies?: string[];
+    tags?: string[];
+    subtasks?: Array<{ id: string; title: string; completed?: boolean; checkCommand?: string }>;
+  }>;
+}
+
+export interface AdoptPlanResponse {
+  success: boolean;
+  adoptedCount: number;
+  sourcePlanRevision?: number;
+  tasks: any[];
+  epics: any[];
+}
+
+export interface PlanningReadiness {
+  provider: string;
+  model: string;
+  ready: boolean;
+  error?: string;
+}
+
+export interface RepositoryVerificationResult {
+  valid: boolean;
+  localPathExists: boolean;
+  isGitRepo: boolean;
+  branchExists: boolean;
+  writable: boolean;
+  headCommit?: string;
+  resolvedBranch?: string;
+  error?: string;
+  details: string[];
+}
+
 /**
  * Request payload for POST /api/projects
  */

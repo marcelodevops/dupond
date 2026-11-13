@@ -12,7 +12,8 @@ import {
   Sliders, 
   Share2, 
   Activity,
-  Layers
+  Layers,
+  Settings
 } from 'lucide-react';
 import { ProjectSwitcher } from './ProjectSwitcher';
 
@@ -29,6 +30,8 @@ interface HeaderProps {
   onOpenReportModal: () => void;
   projectTitle: string;
   cycleCount: number;
+  isManualMode?: boolean;
+  onOpenSettings?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -42,6 +45,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenReportModal,
   projectTitle,
   cycleCount,
+  isManualMode = false,
+  onOpenSettings,
 }) => {
   const tabs = [
     { id: 'kanban', label: 'Kanban Board', icon: Kanban },
@@ -76,9 +81,15 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-white via-slate-100 to-indigo-200 bg-clip-text text-transparent">
                   Dupond Orchestrator
                 </span>
-                <span className="hidden sm:inline-flex px-2 py-0.5 text-xs font-semibold rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  Autonomous v2.4
-                </span>
+                {isManualMode ? (
+                  <span className="hidden sm:inline-flex px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    Manual Workflow Only
+                  </span>
+                ) : (
+                  <span className="hidden sm:inline-flex px-2 py-0.5 text-xs font-semibold rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    Autonomous v2.4
+                  </span>
+                )}
               </div>
               <div className="mt-1 flex items-center space-x-2">
                 <ProjectSwitcher />
@@ -97,15 +108,17 @@ export const Header: React.FC<HeaderProps> = ({
             {/* Step-by-Step execution button */}
             <button
               onClick={onRunSingleStep}
-              disabled={isProcessingStep || isRunningAuto}
+              disabled={isProcessingStep || isRunningAuto || isManualMode}
               className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all duration-150 ${
-                isProcessingStep
+                isManualMode
+                  ? 'bg-slate-900 border-slate-800 text-slate-500 cursor-not-allowed opacity-60'
+                  : isProcessingStep
                   ? 'bg-indigo-900/50 border-indigo-700 text-indigo-200 cursor-wait'
                   : isRunningAuto
                   ? 'bg-slate-900 border-slate-800 text-slate-500 cursor-not-allowed'
                   : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200 hover:text-white hover:border-slate-600 active:scale-95'
               }`}
-              title="Execute single agent orchestration step"
+              title={isManualMode ? 'Step execution is not supported for secondary projects.' : 'Execute single agent orchestration step'}
             >
               <RotateCw className={`w-3.5 h-3.5 ${isProcessingStep ? 'animate-spin text-indigo-400' : ''}`} />
               <span className="hidden sm:inline">Next Cycle</span>
@@ -114,11 +127,15 @@ export const Header: React.FC<HeaderProps> = ({
             {/* Auto-Pilot Toggle */}
             <button
               onClick={onToggleAuto}
+              disabled={isManualMode}
               className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 shadow-sm ${
-                isRunningAuto
+                isManualMode
+                  ? 'bg-slate-900 border border-slate-800 text-slate-500 cursor-not-allowed opacity-60'
+                  : isRunningAuto
                   ? 'bg-rose-500/20 border border-rose-500/40 text-rose-300 hover:bg-rose-500/30 ring-2 ring-rose-500/20'
                   : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-700/20'
               }`}
+              title={isManualMode ? 'Automated engine daemon is not supported for secondary projects.' : isRunningAuto ? 'Pause background engine' : 'Start background autonomous engine'}
             >
               {isRunningAuto ? (
                 <>
@@ -132,6 +149,18 @@ export const Header: React.FC<HeaderProps> = ({
                 </>
               )}
             </button>
+
+            {/* Project Settings Button */}
+            {onOpenSettings && (
+              <button
+                onClick={onOpenSettings}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-all"
+                title="Project Settings & Verification"
+              >
+                <Settings className="w-3.5 h-3.5 text-slate-400" />
+                <span className="hidden sm:inline">Settings</span>
+              </button>
+            )}
 
             {/* Quick Ingest Plan Modal */}
             <button

@@ -24,6 +24,10 @@ export function getGeminiClient(): GoogleGenAI | null {
   return ai;
 }
 
+export function setGeminiClientForTesting(client: any): void {
+  ai = client;
+}
+
 export function hasGeminiKey(): boolean {
   return Boolean(geminiApiKey);
 }

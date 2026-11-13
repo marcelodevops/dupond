@@ -1,171 +1,163 @@
+import { z } from 'zod';
 import { GEMINI_MODEL, getGeminiClient } from '../gemini.js';
+import { ProjectApiError } from '../projects/projectStore.js';
+import type { PlanningReadiness } from '../../types/projectContract.js';
+
+export const PlanEpicSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().optional().default(''),
+  color: z.string().optional().default('#3B82F6'),
+});
+
+export const PlanSubtaskSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  completed: z.boolean().optional().default(false),
+  checkCommand: z.string().optional(),
+});
+
+export const PlanTaskSchema = z.object({
+  id: z.string().min(1),
+  key: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().optional().default(''),
+  epicId: z.string().min(1),
+  status: z.enum(['backlog', 'todo']).optional().default('backlog'),
+  priority: z.enum(['critical', 'high', 'medium', 'low']).optional().default('medium'),
+  estimatedHours: z.number().optional().default(4),
+  recommendedRole: z.string().optional(),
+  dependencies: z.array(z.string()).optional().default([]),
+  tags: z.array(z.string()).optional().default([]),
+  subtasks: z.array(PlanSubtaskSchema).optional().default([]),
+});
+
+export const PlanDecompositionSchema = z.object({
+  summary: z.string().min(1),
+  suggestedTimelineWeeks: z.number().optional(),
+  epics: z.array(PlanEpicSchema).min(1, 'At least one epic is required'),
+  tasks: z.array(PlanTaskSchema).min(1, 'At least one task is required'),
+});
+
+export type PlanDecompositionResult = z.infer<typeof PlanDecompositionSchema>;
 
 /**
- * Heuristic fallback plan decomposition used when the Gemini plan parser is
- * unavailable or fails. Produces the same response shape as the live model so
- * the UI can render either result without branching.
+ * Returns current planning engine capability and readiness.
+ * Note: AI planning currently only supports Gemini.
  */
-export function generateFallbackPlanBreakdown(planText: string) {
-  const lines = planText.split('\n').filter((l) => l.trim().length > 0);
-  const title = lines[0] ? lines[0].replace(/^#+\s*/, '') : 'Orchestrated Project Sprint';
-
+export function getPlanningReadiness(): PlanningReadiness {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    return {
+      provider: 'gemini',
+      model: GEMINI_MODEL,
+      ready: false,
+      error: 'GEMINI_API_KEY is not configured on the server. AI plan decomposition is unavailable.',
+    };
+  }
   return {
-    summary: `Structured execution roadmap generated for: ${title}. Decomposed into core technical work streams with automated role delegation.`,
-    suggestedTimelineWeeks: 3,
-    epics: [
-      {
-        id: 'epic-core',
-        title: 'Core Engine & Architecture',
-        description: 'Foundational services, domain schemas, and high-throughput pipelines',
-        color: '#3B82F6',
-      },
-      {
-        id: 'epic-ui',
-        title: 'Interactive Frontend Experience',
-        description: 'Responsive user interfaces, real-time reactive boards, and visual controls',
-        color: '#10B981',
-      },
-      {
-        id: 'epic-integration',
-        title: 'Integrations & External APIs',
-        description: 'Bi-directional webhooks, security policies, and third-party orchestration connectors',
-        color: '#8B5CF6',
-      },
-    ],
-    tasks: [
-      {
-        id: 'task-101',
-        key: 'AEG-101',
-        title: 'Architect Domain Schemas & Orchestration State Model',
-        description: 'Design immutable state machine for agent transitions and dependency graph verification.',
-        epicId: 'epic-core',
-        status: 'done',
-        priority: 'critical',
-        estimatedHours: 8,
-        recommendedRole: 'Lead Architect',
-        dependencies: [],
-        tags: ['Architecture', 'State Machine', 'TypeScript'],
-        subtasks: [
-          { id: 'st-1', title: 'Define Task and Agent interfaces', completed: true },
-          { id: 'st-2', title: 'Implement topological sort for DAG dependencies', completed: true },
-          { id: 'st-3', title: 'Add schema validation hooks', completed: true },
-        ],
-      },
-      {
-        id: 'task-102',
-        key: 'AEG-102',
-        title: 'Implement Interactive Kanban Board with Real-Time Updates',
-        description: 'Develop five-column Kanban board with live task status transitions, agent active pulses, and filtering.',
-        epicId: 'epic-ui',
-        status: 'in_progress',
-        priority: 'high',
-        estimatedHours: 12,
-        recommendedRole: 'Frontend Specialist',
-        dependencies: ['task-101'],
-        tags: ['React', 'Kanban', 'TailwindCSS'],
-        subtasks: [
-          { id: 'st-4', title: 'Create drag/click transition mechanism', completed: true },
-          { id: 'st-5', title: 'Render agent avatar indicators & workload tags', completed: false },
-          { id: 'st-6', title: 'Integrate task detail flyout drawer', completed: false },
-        ],
-      },
-      {
-        id: 'task-103',
-        key: 'AEG-103',
-        title: 'Configure Jira & Slack Bi-Directional Webhook Dispatcher',
-        description: 'Build webhook sync endpoints and message formatting engines for Jira tickets and Slack notifications.',
-        epicId: 'epic-integration',
-        status: 'todo',
-        priority: 'high',
-        estimatedHours: 10,
-        recommendedRole: 'Backend & Integrations Dev',
-        dependencies: ['task-101'],
-        tags: ['Jira', 'Slack', 'Webhooks'],
-        subtasks: [
-          { id: 'st-7', title: 'Construct Jira issue transition payload builder', completed: false },
-          { id: 'st-8', title: 'Create Slack Block Kit layout template', completed: false },
-        ],
-      },
-      {
-        id: 'task-104',
-        key: 'AEG-104',
-        title: 'Build AI-Driven Dynamic Resource Allocation Matrix',
-        description: 'Create algorithm analyzing agent velocity, skill sets, and backlog capacity to rebalance assignments automatically.',
-        epicId: 'epic-core',
-        status: 'todo',
-        priority: 'medium',
-        estimatedHours: 6,
-        recommendedRole: 'AI & Algorithm Engineer',
-        dependencies: ['task-101'],
-        tags: ['AI Engine', 'Resource Optimization'],
-        subtasks: [
-          { id: 'st-9', title: 'Compute capacity load percentages', completed: false },
-          { id: 'st-10', title: 'Role matching heuristic and confidence rating', completed: false },
-        ],
-      },
-      {
-        id: 'task-105',
-        key: 'AEG-105',
-        title: 'Automated Stakeholder Status Reporting Engine',
-        description: 'Generate sprint digests, risk & blocker mitigation briefs, and milestone tracking for leadership.',
-        epicId: 'epic-integration',
-        status: 'backlog',
-        priority: 'medium',
-        estimatedHours: 6,
-        recommendedRole: 'Product & Scrum Scribe',
-        dependencies: ['task-102', 'task-104'],
-        tags: ['Reporting', 'Executive Brief', 'Export'],
-        subtasks: [
-          { id: 'st-11', title: 'Format executive KPI summary', completed: false },
-          { id: 'st-12', title: 'Export to Markdown and PDF preview', completed: false },
-        ],
-      },
-    ],
+    provider: 'gemini',
+    model: GEMINI_MODEL,
+    ready: true,
   };
 }
 
 /**
- * Parses and decomposes a curated plan into epics and tasks via Gemini,
- * falling back to the heuristic breakdown when the model is unavailable or
- * fails. Returns the same response shape either way.
+ * Parses and decomposes a curated plan into epics and tasks via Gemini.
+ * Never falls back to fabricated canned tasks on failure.
  */
-export async function parsePlan(planText: string, currentAgents: any[]): Promise<unknown> {
-  const ai = getGeminiClient();
-  if (ai) {
-    try {
-      const prompt = buildPlanBreakdownPrompt(planText, currentAgents);
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.2,
-        },
-      });
-      return JSON.parse(response.text || '{}');
-    } catch (geminiError: any) {
-      console.warn('Gemini plan breakdown fallback:', geminiError?.message);
-    }
+export async function parsePlan(planText: string, currentAgents: any[] = []): Promise<PlanDecompositionResult> {
+  const text = (planText || '').trim();
+  if (!text) {
+    throw new ProjectApiError(400, 'INVALID_PLAN', 'Plan text is required and cannot be empty.');
   }
-  return generateFallbackPlanBreakdown(planText);
+
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    throw new ProjectApiError(
+      503,
+      'PLANNER_UNAVAILABLE',
+      'AI plan decomposition is unavailable: GEMINI_API_KEY is not configured on the server.'
+    );
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    throw new ProjectApiError(
+      503,
+      'PLANNER_UNAVAILABLE',
+      'AI planning client failed to initialize with provided credentials.'
+    );
+  }
+
+  let rawJson: string;
+  try {
+    const prompt = buildPlanBreakdownPrompt(text, currentAgents);
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.2,
+      },
+    });
+    rawJson = response.text || '';
+  } catch (apiErr: any) {
+    throw new ProjectApiError(
+      502,
+      'PLAN_PARSING_FAILED',
+      `AI plan decomposition request failed: ${apiErr?.message || 'Upstream provider error'}`
+    );
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    throw new ProjectApiError(
+      502,
+      'PLAN_PARSING_FAILED',
+      'AI plan decomposition returned invalid non-JSON output.'
+    );
+  }
+
+  const validation = PlanDecompositionSchema.safeParse(parsed);
+  if (!validation.success) {
+    const issues = validation.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(', ');
+    throw new ProjectApiError(
+      422,
+      'PLAN_PARSING_FAILED',
+      `AI plan decomposition produced an invalid structure: ${issues}`
+    );
+  }
+
+  const result = validation.data;
+  // Safety invariant: Newly parsed tasks must never claim execution or completion
+  result.tasks = result.tasks.map((task) => ({
+    ...task,
+    status: 'backlog',
+    subtasks: (task.subtasks || []).map((sub) => ({ ...sub, completed: false })),
+  }));
+
+  return result;
 }
 
 export function buildPlanBreakdownPrompt(
   planText: string,
-  currentAgents: { name: string; role: string; skills: string[] }[]
+  currentAgents: { name: string; role: string; skills: string[] }[] = []
 ): string {
   return `You are Dupond Chief Orchestrator, an enterprise-level Autonomous Project Management Agent.
 Analyze the following project plan and decompose it into a structured sprint plan with Epics, granular Tasks, clear dependencies, recommended specialized agent roles, and estimated effort in hours.
 
 The available agent roles or specialist profiles in the organization include:
-${JSON.stringify(currentAgents.map((a) => ({ name: a.name, role: a.role, skills: a.skills })))}
+${JSON.stringify((currentAgents || []).map((a) => ({ name: a.name, role: a.role, skills: a.skills })))}
 
 Plan to parse:
 """
 ${planText}
 """
 
-Return a pure JSON response matching this schema (do NOT include markdown code fences, return raw JSON string):
+Return a pure JSON response matching this schema:
 {
   "summary": "High-level orchestration summary of the project scope",
   "suggestedTimelineWeeks": 3,
@@ -173,28 +165,67 @@ Return a pure JSON response matching this schema (do NOT include markdown code f
     {
       "id": "epic-1",
       "title": "Epic Name",
-      "description": "Brief description of the epic scope",
+      "description": "Epic description",
       "color": "#3B82F6"
     }
   ],
   "tasks": [
     {
-      "id": "task-101",
-      "key": "AEG-101",
-      "title": "Task Title",
-      "description": "Clear technical description and acceptance criteria",
+      "id": "task-1",
+      "key": "TSK-01",
+      "title": "Task title",
+      "description": "Task description",
       "epicId": "epic-1",
-      "status": "todo",
       "priority": "high",
       "estimatedHours": 8,
-      "recommendedRole": "Solutions Architect & Lead",
+      "recommendedRole": "Specialist Role",
       "dependencies": [],
-      "tags": ["Architecture", "Backend"],
+      "tags": ["tag1"],
       "subtasks": [
-        {"id": "st-1", "title": "Subtask 1", "completed": false},
-        {"id": "st-2", "title": "Subtask 2", "completed": false}
+        { "id": "st-1", "title": "Subtask title", "completed": false }
       ]
     }
   ]
 }`;
+}
+
+/**
+ * Test-only deterministic breakdown fixture. Used strictly in tests when explicit
+ * mock decomposition is requested. Never called in normal production execution.
+ */
+export function generateDeterministicTestBreakdown(planText: string): PlanDecompositionResult {
+  const lines = planText.split('\n').filter((l) => l.trim().length > 0);
+  const title = lines[0] ? lines[0].replace(/^#+\s*/, '') : 'Orchestrated Project Sprint';
+
+  return {
+    summary: `Structured execution roadmap generated for: ${title}.`,
+    suggestedTimelineWeeks: 2,
+    epics: [
+      {
+        id: 'epic-core',
+        title: 'Core Engine & Architecture',
+        description: 'Foundational services, domain schemas, and high-throughput pipelines',
+        color: '#3B82F6',
+      },
+    ],
+    tasks: [
+      {
+        id: 'task-test-1',
+        key: 'TEST-01',
+        title: `Implement foundational components for: ${title}`,
+        description: 'Construct core data structures and validation boundaries.',
+        epicId: 'epic-core',
+        status: 'backlog',
+        priority: 'high',
+        estimatedHours: 6,
+        recommendedRole: 'Solutions Architect',
+        dependencies: [],
+        tags: ['Architecture', 'Core'],
+        subtasks: [
+          { id: 'st-test-1', title: 'Define interface types', completed: false },
+          { id: 'st-test-2', title: 'Implement validation hooks', completed: false },
+        ],
+      },
+    ],
+  };
 }

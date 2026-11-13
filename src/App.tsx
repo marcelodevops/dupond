@@ -32,7 +32,8 @@ import { apiFetch, getApiToken, isAuthRequired, onAuthStateChange, setApiToken }
 import { ProjectProvider, useProject } from './context/ProjectContext';
 import { ProjectWizardModal } from './components/ProjectWizardModal';
 import { ProjectLifecycleModal } from './components/ProjectLifecycleModal';
-import { getActiveProjectId, PROJECT_HEADER } from './lib/projectApi';
+import { ProjectSettingsModal } from './components/ProjectSettingsModal';
+import { getActiveProjectId, PROJECT_HEADER, projectApi } from './lib/projectApi';
 
 function AppWorkspace() {
   const {
@@ -226,6 +227,7 @@ function AppWorkspace() {
   const [selectedTaskForModal, setSelectedTaskForModal] = useState<Task | null>(null);
   const [isIngestModalOpen, setIsIngestModalOpen] = useState<boolean>(false);
   const [isAddTaskModalOpen, setIsAddTaskModalOpen] = useState<boolean>(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
 
   // Toast Notification state
   const [toastMessage, setToastMessage] = useState<{ title: string; desc: string; type: 'info' | 'success' | 'alert' } | null>(null);
@@ -404,13 +406,25 @@ function AppWorkspace() {
       return;
     }
     const capturedProjectId = currentProject?.id || getActiveProjectId();
+    if (capturedProjectId && capturedProjectId !== 'default') {
+      showToast('Automation Unavailable', 'Automated cycle execution is not supported for this project. Tasks must be executed manually.', 'alert');
+      return;
+    }
     setIsProcessingStep(true);
     try {
       const res = await apiFetch('/api/orchestrate/engine/step', {
         method: 'POST',
         headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 501 || data.code === 'PROJECT_ENGINE_UNSUPPORTED') {
+          showToast('Automation Unavailable', 'Automated cycle execution is not supported for this project.', 'alert');
+        } else {
+          showToast('Engine Error', data.error || `Server returned HTTP ${res.status}`, 'alert');
+        }
+        return;
+      }
       if (capturedProjectId === (currentProject?.id || getActiveProjectId())) {
         if (data.state) {
           setTasks(data.state.tasks);
@@ -496,13 +510,31 @@ function AppWorkspace() {
     showToast('Task Created', `${newTask.key}: ${newTask.title} added to sprint board.`, 'success');
   };
 
-  const handleAdoptPlan = (newEpics: Epic[], newTasks: Task[], planSummary: string) => {
-    setEpics(newEpics);
-    setTasks(newTasks);
-    setCustomPlanTitle(planSummary.slice(0, 50));
-    setCycleCount(1);
-    syncToServer({ epics: newEpics, tasks: newTasks });
-    showToast('Plan Adopted', `Generated ${newTasks.length} tasks across ${newEpics.length} epics.`, 'success');
+  const handleAdoptPlan = async (
+    newEpics: Epic[],
+    newTasks: Task[],
+    planSummary: string,
+    sourcePlanId?: string,
+    planRevision?: number
+  ) => {
+    const targetProjectId = currentProject?.id || 'default';
+    try {
+      const response = await projectApi.adoptPlan(targetProjectId, {
+        summary: planSummary,
+        epics: newEpics,
+        tasks: newTasks,
+        sourcePlanId,
+        planRevision,
+      });
+      setEpics(response.epics || newEpics);
+      setTasks(response.tasks || newTasks);
+      setCustomPlanTitle(planSummary.slice(0, 50));
+      setCycleCount(1);
+      showToast('Plan Adopted', `Adopted ${response.adoptedCount || newTasks.length} tasks across ${newEpics.length} epics.`, 'success');
+    } catch (err: any) {
+      showToast('Plan Adoption Failed', err.message || 'Server rejected plan adoption.', 'alert');
+      throw err;
+    }
   };
 
   const handleRebalanceComplete = (
@@ -649,21 +681,31 @@ function AppWorkspace() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         isRunningAuto={isRunningAuto}
+        isManualMode={Boolean(currentProject && currentProject.id !== 'default')}
         onToggleAuto={async () => {
           if (isArchived) {
             showToast('Project is Archived', 'Cannot run automated engine on an archived project.', 'alert');
+            return;
+          }
+          const capturedProjectId = currentProject?.id || getActiveProjectId();
+          if (capturedProjectId && capturedProjectId !== 'default') {
+            showToast('Automation Unavailable', 'Automated engine daemon is not supported for secondary projects.', 'alert');
             return;
           }
           const next = !isRunningAuto;
           setIsRunningAuto(next);
           try {
             const ep = next ? '/api/orchestrate/engine/start' : '/api/orchestrate/engine/stop';
-            const res = await apiFetch(ep, { method: 'POST' });
+            const res = await apiFetch(ep, {
+              method: 'POST',
+              headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
+            });
+            const data = await res.json().catch(() => ({}));
             if (!res.ok) {
               setIsRunningAuto(!next);
               showToast(
                 'Coordinator Unchanged',
-                `The API refused to ${next ? 'start' : 'stop'} the coordinator (HTTP ${res.status}).`,
+                data.error || `The API refused to ${next ? 'start' : 'stop'} the coordinator (HTTP ${res.status}).`,
                 'alert'
               );
               return;
@@ -673,17 +715,35 @@ function AppWorkspace() {
               next ? 'Autonomous background daemon active. Will continue executing even if browser is closed.' : 'Server coordinator paused.',
               next ? 'success' : 'info'
             );
-          } catch (err) {
-            console.warn('Failed to toggle server daemon:', err);
+          } catch (err: any) {
+            setIsRunningAuto(!next);
+            showToast('Engine Error', err.message || 'Failed to toggle server daemon', 'alert');
           }
         }}
         onRunSingleStep={handleRunServerCycle}
         isProcessingStep={isProcessingStep}
+        onOpenSettings={() => setIsSettingsModalOpen(true)}
         onOpenIngestModal={() => setIsIngestModalOpen(true)}
         onOpenReportModal={() => setActiveTab('reports')}
         projectTitle={projectTitle}
         cycleCount={cycleCount}
       />
+
+      {/* Non-Default Project Notice */}
+      {currentProject && currentProject.id !== 'default' && !isArchived && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-amber-800/40 text-slate-300 text-xs flex flex-wrap items-center justify-between gap-2 shadow-sm">
+            <div className="flex items-center space-x-2.5">
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Manual Workflow Only
+              </span>
+              <span>
+                <strong>{currentProject.name}</strong> is operating in manual mode. Automated engine daemon and autonomous cycle step execution are disabled for secondary projects.
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Archived Read-Only Banner */}
       {isArchived && (
@@ -841,6 +901,12 @@ function AppWorkspace() {
       <ProjectWizardModal
         isOpen={isCreateWizardOpen}
         onClose={() => setIsCreateWizardOpen(false)}
+      />
+
+      {/* Project Settings & Repository Verification Modal */}
+      <ProjectSettingsModal
+        isOpen={isSettingsModalOpen}
+        onClose={() => setIsSettingsModalOpen(false)}
       />
 
       {/* Project Lifecycle Management Modal (Reset & Archive) */}

@@ -11,7 +11,16 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const httpServer = http.createServer(app);
-const PORT = Number(process.env.PORT) || 3000;
+function resolveListenPort(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 3000;
+  const parsed = Number(raw);
+  // Port 0 is the kernel ephemeral assignment. `|| 3000` would discard it.
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) return 3000;
+  return parsed;
+}
+
+const PORT = resolveListenPort(process.env.PORT);
+const BIND_HOST = process.env.DUPOND_BIND_HOST?.trim() || '';
 const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(express.json({ limit: '10mb' }));
@@ -103,13 +112,15 @@ app.post('/api/orchestrate/state', (req: Request, res: Response) => {
 // Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
 app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Response) => {
   try {
-    const taskProjectId = taskStore.getProjectIdForTask(req.params.id);
+    const dbProjectId = taskStore.getProjectIdForTask(req.params.id);
+    const inCoordinator = coordinator.getState().tasks.some((t) => t.id === req.params.id || t.key === req.params.id);
+    const taskProjectId = dbProjectId || (inCoordinator ? 'default' : null);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: 'status is required' });
 
-    const result = await coordinator.transitionTaskStatus(req.params.id, status);
+    const result = await coordinator.transitionTaskStatus(req.params.id, status, projectId);
     if (!result.success) {
       return res.status(422).json(result);
     }
@@ -193,20 +204,54 @@ app.post('/api/orchestrate/verify-task', async (req: Request, res: Response) => 
 // Endpoint: Parse and decompose a curated plan into epics and tasks
 app.post('/api/orchestrate/parse-plan', async (req: Request, res: Response) => {
   try {
-    const { planText, currentAgents = [] } = req.body;
-    if (!planText || typeof planText !== 'string') {
-      return res.status(400).json({ error: 'planText is required' });
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
+    const { planText, currentAgents = [] } = req.body || {};
+    if (!planText || typeof planText !== 'string' || !planText.trim()) {
+      return res.status(400).json({ error: 'planText is required', code: 'INVALID_PLAN' });
     }
-    res.json(await parsePlan(planText, currentAgents));
+
+    const store = defaultProjectStore;
+    const savedPlan = store.saveSourcePlan({
+      projectId,
+      sourceText: planText,
+      status: 'submitted',
+    });
+
+    try {
+      const breakdown = await parsePlan(planText, currentAgents);
+      store.updateSourcePlanStatus(savedPlan.id, {
+        status: 'parsed',
+        summary: breakdown.summary,
+        breakdownJson: JSON.stringify(breakdown),
+      });
+      res.json({
+        ...breakdown,
+        sourcePlanId: savedPlan.id,
+        planRevision: savedPlan.revision,
+      });
+    } catch (parseErr: any) {
+      store.updateSourcePlanStatus(savedPlan.id, {
+        status: 'parse_failed',
+        errorMessage: parseErr.message,
+      });
+      throw parseErr;
+    }
   } catch (error: any) {
-    console.error('Error parsing plan:', error);
-    res.status(500).json({ error: toClientMessage(error, 'Failed to parse plan') });
+    if (error instanceof ProjectApiError) {
+      return res.status(error.httpStatus).json({ error: error.message, code: error.code });
+    }
+    res.status(500).json({ error: toClientMessage(error, 'Failed to parse plan'), code: 'PLAN_PARSING_FAILED' });
   }
 });
 
 // Endpoint: AI-driven resource allocation & workload balancing (Connected to AEG-104 module)
 app.post('/api/orchestrate/allocate-resources', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { tasks = [], agents = [] } = req.body;
 
     if (tasks.length === 0 || agents.length === 0) {
@@ -241,7 +286,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
       // service: Review requires evidence bound to the current spec, and Done
       // waits for a recorded delivery (plus approval when the task requires
       // it). The posted task blob cannot grant either.
-      const dbTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+      const dbTask = taskStore.getTask(task.id || '', projectId) || taskStore.getTask(task.key || '', projectId);
       if (dbTask) {
         let fresh = dbTask;
         if (dbTask.status !== 'review') {
@@ -251,7 +296,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
             actor: 'api',
             reason: 'Worker step executed via orchestration API',
           });
-          fresh = taskStore.getTask(dbTask.id) || dbTask;
+          fresh = taskStore.getTask(dbTask.id, projectId) || dbTask;
           if (!transition.ok) {
             return res.status(400).json({
               success: false,
@@ -339,6 +384,9 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
 // Endpoint: Automated status reporting for stakeholders
 app.post('/api/orchestrate/generate-report', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { tasks = [], agents = [], sprintNumber = 1, period = 'Current Sprint' } = req.body;
 
     const result = await generateStakeholderReport(tasks, agents, sprintNumber, period);
@@ -469,6 +517,9 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
 // Endpoint: Real Interactive Chat with Dupond Chief Orchestrator
 app.post('/api/orchestrate/chat', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { message, orchestratorConfig, tasks = [], agents = [] } = req.body;
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'message is required' });
@@ -484,6 +535,9 @@ app.post('/api/orchestrate/chat', async (req: Request, res: Response) => {
 // Endpoint: AI-Assisted Dynamic Role Suggestion
 app.post('/api/orchestrate/suggest-role', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { agent, tasks = [], communications = [] } = req.body;
     if (!agent) return res.status(400).json({ error: 'agent is required' });
 
@@ -557,6 +611,18 @@ httpServer.on('error', (err: any) => {
   throw err;
 });
 
-httpServer.listen(PORT, () => {
-  console.log(`Dupond Orchestrator server running on http://0.0.0.0:${PORT}`);
-});
+const onListening = () => {
+  const addr = httpServer.address();
+  const boundPort = typeof addr === 'object' && addr ? addr.port : PORT;
+  const boundHost = typeof addr === 'object' && addr ? addr.address : (BIND_HOST || '0.0.0.0');
+  console.log(`Dupond Orchestrator server running on http://0.0.0.0:${boundPort}`);
+  console.log(`DUPOND_READY host=${boundHost} port=${boundPort}`);
+};
+
+// Default remains an unspecified bind. Tests set DUPOND_BIND_HOST so the
+// readiness probe targets the same address family the socket opened.
+if (BIND_HOST) {
+  httpServer.listen(PORT, BIND_HOST, onListening);
+} else {
+  httpServer.listen(PORT, onListening);
+}

@@ -182,7 +182,7 @@ export class CoordinatorEngine {
   private projectAuthoritativeStatusesInternal(): number {
     let changed = 0;
     const nextTasks = this.state.tasks.map((task) => {
-      const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
+      const dbTask = taskStore.getTask(task.id, this.activeProjectId) || taskStore.getTask(task.key, this.activeProjectId);
       if (!dbTask) return task;
       const projected = this.toUiStatus(dbTask.status);
       const specMirrored = this.mirrorAuthoritativeSpec(task, dbTask);
@@ -428,7 +428,7 @@ export class CoordinatorEngine {
         // evidence binding and, when it changed, transactionally revokes the
         // Review/Done acceptance that the old spec authorized.
         let requirementsRebound = false;
-        const dbTaskForEdit = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+        const dbTaskForEdit = taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId);
         if (dbTaskForEdit) {
           // An acceptanceCriteria field that the caller sent is authoritative
           // for the contract — including when it is sent empty, which means
@@ -460,7 +460,7 @@ export class CoordinatorEngine {
             JSON.stringify(updates.verificationCommands) !== JSON.stringify(dbTaskForEdit.verificationCommands) ||
             JSON.stringify(updates.protectedPaths) !== JSON.stringify(dbTaskForEdit.protectedPaths);
           if (requirementsChanged) {
-            const outcome = taskStore.updateTaskRequirements(dbTaskForEdit.id, updates, 'ui');
+            const outcome = taskStore.updateTaskRequirements(dbTaskForEdit.id, updates, 'ui', this.activeProjectId);
             if (outcome.bindingChanged) {
               requirementsRebound = true;
               rejectTask(task.key);
@@ -473,7 +473,7 @@ export class CoordinatorEngine {
         // its evidence gates. A posted state blob is clamped to the persisted
         // status instead of independently granting Review or Done.
         if (task.status === 'review' || task.status === 'done') {
-          const dbTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+          const dbTask = taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId);
           if (dbTask && dbTask.status !== task.status) {
             rejectTask(task.key);
             return {
@@ -527,7 +527,7 @@ export class CoordinatorEngine {
           }
         }
         if (requirementsRebound) {
-          const reboundTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+          const reboundTask = taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId);
           return {
             ...task,
             status: reboundTask ? this.toUiStatus(reboundTask.status) : task.status,
@@ -543,7 +543,7 @@ export class CoordinatorEngine {
       // revoked, or re-bound cannot keep being shown as if it were granted.
       validatedPartial.tasks = validatedPartial.tasks.map((task) => this.mirrorAuthoritativeSpec(
         task,
-        taskStore.getTask(task.id || '') || taskStore.getTask(task.key || ''),
+        taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId),
       ));
     }
 
@@ -575,12 +575,13 @@ export class CoordinatorEngine {
   }
 
   // Centralized transition method
-  public async transitionTaskStatus(taskId: string, targetStatus: TaskStatus): Promise<{
+  public async transitionTaskStatus(taskId: string, targetStatus: TaskStatus, projectId?: string): Promise<{
     success: boolean;
     task?: Task;
     verification?: VerificationResult;
     error?: string;
   }> {
+    const effectiveProjectId = projectId || this.activeProjectId;
     const task = this.state.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
       return { success: false, error: `Task ${taskId} not found` };
@@ -589,7 +590,7 @@ export class CoordinatorEngine {
     // Tasks registered in the authoritative store transition only through the
     // lifecycle service, which gates Review/Done on bound verification evidence.
     // The JSON entry is updated as a projection of that outcome afterward.
-    const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
+    const dbTask = taskStore.getTask(task.id, effectiveProjectId) || taskStore.getTask(task.key, effectiveProjectId);
     if (dbTask) {
       const outcome = defaultLifecycleService.transition({
         taskId: dbTask.id,
@@ -1101,11 +1102,11 @@ ${implementationCode.slice(0, 500)}...
         // Store-backed work: the repair loop already routed the Review attempt
         // through the lifecycle service against bound evidence. If it did not
         // grant Review, the daemon must not either.
-        const dbTwin = taskStore.getTask(inProgressTask.id) || taskStore.getTask(inProgressTask.key);
+        const dbTwin = taskStore.getTask(inProgressTask.id, this.activeProjectId) || taskStore.getTask(inProgressTask.key, this.activeProjectId);
         let projectedStatus: TaskStatus = 'review';
         let refusalDetail = '';
         if (dbTwin) {
-          let fresh = taskStore.getTask(dbTwin.id) || dbTwin;
+          let fresh = taskStore.getTask(dbTwin.id, this.activeProjectId) || dbTwin;
           if (fresh.status !== 'review') {
             const outcome = defaultLifecycleService.transition({
               taskId: fresh.id,
@@ -1113,7 +1114,7 @@ ${implementationCode.slice(0, 500)}...
               actor: 'daemon',
               reason: 'Autonomous worker step completed',
             });
-            fresh = taskStore.getTask(fresh.id) || fresh;
+            fresh = taskStore.getTask(fresh.id, this.activeProjectId) || fresh;
             projectedStatus = outcome.ok ? 'review' : this.toUiStatus(fresh.status);
             if (!outcome.ok) refusalDetail = outcome.detail || outcome.reason || 'refused';
           }
@@ -1160,7 +1161,7 @@ ${implementationCode.slice(0, 500)}...
       // Done is granted only by the lifecycle service after a recorded,
       // approved delivery. No artifact-based gate may certify it here.
       const reviewTask = tasks.find((t) =>
-        t.status === 'review' && !(taskStore.getTask(t.id) || taskStore.getTask(t.key)));
+        t.status === 'review' && !(taskStore.getTask(t.id, this.activeProjectId) || taskStore.getTask(t.key, this.activeProjectId)));
       if (reviewTask) {
         const verification = await this.verifyTaskQualityGates(reviewTask);
 
@@ -1236,7 +1237,7 @@ ${implementationCode.slice(0, 500)}...
         // Store-backed tasks may only start through the lifecycle service so a
         // revocation, unmet dependency, or open claim cannot be bypassed by a
         // direct JSON status write.
-        const dbTodo = taskStore.getTask(todoTask.id) || taskStore.getTask(todoTask.key);
+        const dbTodo = taskStore.getTask(todoTask.id, this.activeProjectId) || taskStore.getTask(todoTask.key, this.activeProjectId);
         if (dbTodo) {
           const outcome = defaultLifecycleService.transition({
             taskId: dbTodo.id,
@@ -1245,7 +1246,7 @@ ${implementationCode.slice(0, 500)}...
             reason: 'Dependencies verified clear; daemon claimed task for execution',
           });
           if (!outcome.ok) {
-            const fresh = taskStore.getTask(dbTodo.id);
+            const fresh = taskStore.getTask(dbTodo.id, this.activeProjectId);
             const updatedTask: Task = {
               ...todoTask,
               status: this.toUiStatus(fresh?.status ?? dbTodo.status),

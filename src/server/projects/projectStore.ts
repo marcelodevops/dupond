@@ -11,6 +11,9 @@ import {
   ProjectResetScope,
   ProjectResetResult,
   DEFAULT_PROJECT_ID,
+  ProjectSourcePlan,
+  PlanSourceStatus,
+  AdoptPlanResponse,
 } from '../../types/projectContract.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -118,6 +121,417 @@ export class ProjectStore {
       .run(JSON.stringify(state), new Date().toISOString(), projectId);
   }
 
+  // --- Source Plans ---
+
+  public saveSourcePlan(input: {
+    projectId: string;
+    sourceText: string;
+    summary?: string;
+    status?: PlanSourceStatus;
+    errorMessage?: string;
+    breakdownJson?: string;
+  }): ProjectSourcePlan {
+    const project = this.getProject(input.projectId);
+    if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${input.projectId} not found.`);
+
+    const text = (input.sourceText || '').trim();
+    if (!text) throw new ProjectApiError(400, 'INVALID_REQUEST', 'Source plan text is required.');
+
+    const now = new Date().toISOString();
+    return this.txn(() => {
+      const maxRevRow = this.db
+        .prepare('SELECT MAX(revision) as maxRev FROM project_source_plans WHERE project_id = ?')
+        .get(input.projectId) as any;
+      const nextRevision = (maxRevRow?.maxRev ?? 0) + 1;
+      const id = `plan-${input.projectId}-rev${nextRevision}`;
+
+      this.db
+        .prepare(`
+          INSERT INTO project_source_plans (
+            id, project_id, revision, source_text, summary, status, error_message, breakdown_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          id,
+          input.projectId,
+          nextRevision,
+          text,
+          input.summary || null,
+          input.status || 'submitted',
+          input.errorMessage || null,
+          input.breakdownJson || null,
+          now,
+          now
+        );
+
+      return {
+        id,
+        projectId: input.projectId,
+        revision: nextRevision,
+        sourceText: text,
+        summary: input.summary,
+        status: input.status || 'submitted',
+        errorMessage: input.errorMessage,
+        breakdownJson: input.breakdownJson,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+  }
+
+  public getLatestSourcePlan(projectId: string): ProjectSourcePlan | null {
+    const row = this.db
+      .prepare('SELECT * FROM project_source_plans WHERE project_id = ? ORDER BY revision DESC LIMIT 1')
+      .get(projectId) as any;
+    return row ? this.toSourcePlanView(row) : null;
+  }
+
+  public listSourcePlans(projectId: string): ProjectSourcePlan[] {
+    const rows = this.db
+      .prepare('SELECT * FROM project_source_plans WHERE project_id = ? ORDER BY revision DESC')
+      .all(projectId) as any[];
+    return rows.map((r) => this.toSourcePlanView(r));
+  }
+
+  private toSourcePlanView(row: any): ProjectSourcePlan {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      revision: row.revision,
+      sourceText: row.source_text,
+      summary: row.summary || undefined,
+      status: row.status,
+      errorMessage: row.error_message || undefined,
+      breakdownJson: row.breakdown_json || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  public getSourcePlan(id: string): ProjectSourcePlan | null {
+    const row = this.db.prepare('SELECT * FROM project_source_plans WHERE id = ?').get(id) as any;
+    if (!row) return null;
+    return this.toSourcePlanView(row);
+  }
+
+  public updateSourcePlanStatus(
+    id: string,
+    updates: {
+      status: PlanSourceStatus;
+      summary?: string;
+      errorMessage?: string;
+      breakdownJson?: string;
+    },
+    projectId?: string,
+  ): void {
+    const now = new Date().toISOString();
+    if (projectId) {
+      this.db.prepare(`
+        UPDATE project_source_plans
+        SET status = ?, summary = COALESCE(?, summary), error_message = ?, breakdown_json = COALESCE(?, breakdown_json), updated_at = ?
+        WHERE id = ? AND project_id = ?
+      `).run(
+        updates.status,
+        updates.summary || null,
+        updates.errorMessage || null,
+        updates.breakdownJson || null,
+        now,
+        id,
+        projectId,
+      );
+    } else {
+      this.db.prepare(`
+        UPDATE project_source_plans
+        SET status = ?, summary = COALESCE(?, summary), error_message = ?, breakdown_json = COALESCE(?, breakdown_json), updated_at = ?
+        WHERE id = ?
+      `).run(
+        updates.status,
+        updates.summary || null,
+        updates.errorMessage || null,
+        updates.breakdownJson || null,
+        now,
+        id,
+      );
+    }
+  }
+
+  public adoptPlan(input: {
+    projectId: string;
+    sourcePlanId?: string;
+    planRevision?: number;
+    summary: string;
+    epics: Array<{ id: string; title: string; description?: string; color?: string }>;
+    tasks: Array<{
+      id: string;
+      key: string;
+      title: string;
+      description: string;
+      epicId: string;
+      priority?: 'critical' | 'high' | 'medium' | 'low';
+      estimatedHours?: number;
+      recommendedRole?: string;
+      dependencies?: string[];
+      tags?: string[];
+      subtasks?: Array<{ id: string; title: string; completed?: boolean; checkCommand?: string }>;
+    }>;
+    actor?: string;
+  }): AdoptPlanResponse {
+    const project = this.getProject(input.projectId);
+    if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${input.projectId} not found.`);
+    if (project.status === 'archived') {
+      throw new ProjectApiError(409, 'PROJECT_ARCHIVED', 'Cannot adopt plan into an archived project.');
+    }
+
+    if (!Array.isArray(input.tasks) || input.tasks.length === 0) {
+      throw new ProjectApiError(400, 'INVALID_REQUEST', 'Plan must contain at least one task.');
+    }
+    if (!Array.isArray(input.epics) || input.epics.length === 0) {
+      throw new ProjectApiError(400, 'INVALID_REQUEST', 'Plan must contain at least one epic.');
+    }
+
+    // Source-plan ownership & revision verification
+    if (input.sourcePlanId) {
+      const plan = this.getSourcePlan(input.sourcePlanId);
+      if (!plan) {
+        throw new ProjectApiError(404, 'SOURCE_PLAN_NOT_FOUND', `Source plan ${input.sourcePlanId} not found.`);
+      }
+      if (plan.projectId !== input.projectId) {
+        throw new ProjectApiError(
+          403,
+          'PROJECT_CONTEXT_MISMATCH',
+          `Source plan ${input.sourcePlanId} belongs to project ${plan.projectId}, not ${input.projectId}.`,
+        );
+      }
+      if (input.planRevision != null && plan.revision !== input.planRevision) {
+        throw new ProjectApiError(
+          409,
+          'PLAN_REVISION_MISMATCH',
+          `Source plan revision mismatch: expected ${input.planRevision}, got ${plan.revision}.`,
+        );
+      }
+    }
+
+    // 1. Dependency Validation & DAG Cycle Detection
+    const taskKeys = new Set(input.tasks.map((t) => t.key));
+    const taskIds = new Set(input.tasks.map((t) => t.id));
+    const epicIds = new Set(input.epics.map((e) => e.id));
+
+    // Graph for cycle detection
+    const adj = new Map<string, string[]>();
+    for (const t of input.tasks) {
+      if (!epicIds.has(t.epicId)) {
+        throw new ProjectApiError(400, 'INVALID_REQUEST', `Task ${t.key} references unknown epic ${t.epicId}`);
+      }
+      const deps = t.dependencies || [];
+      for (const d of deps) {
+        if (!taskKeys.has(d) && !taskIds.has(d)) {
+          // Check if dependency exists in project's existing DB tasks
+          const existingDep = this.store.getTaskScoped(d, input.projectId);
+          if (!existingDep) {
+            throw new ProjectApiError(400, 'INVALID_DEPENDENCIES', `Task ${t.key} references non-existent dependency "${d}"`);
+          }
+        }
+      }
+      adj.set(t.key, deps.map((d) => (taskKeys.has(d) ? d : input.tasks.find((it) => it.id === d)?.key || d)));
+    }
+
+    // Detect cycles via DFS
+    const visited = new Map<string, number>(); // 0: unvisited, 1: visiting, 2: visited
+    const hasCycle = (node: string, path: string[]): boolean => {
+      visited.set(node, 1);
+      const neighbors = adj.get(node) || [];
+      for (const neighbor of neighbors) {
+        if (!adj.has(neighbor)) continue; // external dep
+        if (visited.get(neighbor) === 1) {
+          path.push(neighbor);
+          return true;
+        }
+        if (visited.get(neighbor) !== 2) {
+          path.push(neighbor);
+          if (hasCycle(neighbor, path)) return true;
+          path.pop();
+        }
+      }
+      visited.set(node, 2);
+      return false;
+    };
+
+    for (const t of input.tasks) {
+      if (!visited.has(t.key)) {
+        const cyclePath = [t.key];
+        if (hasCycle(t.key, cyclePath)) {
+          throw new ProjectApiError(400, 'INVALID_DEPENDENCIES', `Circular dependency detected: ${cyclePath.join(' -> ')}`);
+        }
+      }
+    }
+
+    const now = new Date().toISOString();
+    return this.txn(() => {
+      // Check for active execution runs or in-progress tasks before adoption
+      const activeRuns = this.db.prepare(`
+        SELECT count(*) as count FROM task_runs WHERE project_id = ? AND status IN ('pending', 'running')
+      `).get(input.projectId) as any;
+      if (activeRuns && activeRuns.count > 0) {
+        throw new ProjectApiError(409, 'ACTIVE_RUNS_PRESENT', `Cannot adopt plan while project ${input.projectId} has active task runs.`);
+      }
+
+      const inProgressTasks = this.db.prepare(`
+        SELECT count(*) as count FROM tasks WHERE project_id = ? AND status IN ('in_progress', 'review')
+      `).get(input.projectId) as any;
+      if (inProgressTasks && inProgressTasks.count > 0) {
+        throw new ProjectApiError(409, 'ACTIVE_TASKS_PRESENT', `Cannot adopt plan while project ${input.projectId} has tasks in progress or review.`);
+      }
+
+      // Authoritative state synchronization: remove existing unstarted tasks to prevent board divergence and ghost tasks
+      this.db.prepare("DELETE FROM tasks WHERE project_id = ? AND status IN ('todo', 'backlog')").run(input.projectId);
+
+      // 2. Insert authoritative task rows
+      const insertedTasks: any[] = [];
+      for (const t of input.tasks) {
+        // Enforce task ID is scoped to this project
+        const scopedTaskId = t.id.startsWith(`task-${input.projectId}-`)
+          ? t.id
+          : `task-${input.projectId}-${t.id.replace(/^task-/, '')}`;
+
+        // Ensure key is unique within this project
+        const existing = this.store.getTaskScoped(t.key, input.projectId);
+        if (existing) {
+          // Invariant: Do not silently overwrite or duplicate
+          throw new ProjectApiError(409, 'TASK_KEY_CONFLICT', `Task key "${t.key}" already exists in project ${input.projectId}.`);
+        }
+
+        const initialStatus = (t.dependencies && t.dependencies.length > 0) ? 'backlog' : 'todo';
+        const cleanSubtasks = (t.subtasks || []).map((s) => ({
+          id: s.id,
+          title: s.title,
+          completed: false, // Invariant: newly adopted tasks NEVER start completed
+          ...(s.checkCommand ? { checkCommand: s.checkCommand } : {}),
+        }));
+
+        const cleanCriteria = cleanSubtasks.map((s) => ({
+          id: s.id,
+          title: s.title,
+          completed: false,
+          ...(s.checkCommand ? { checkCommand: s.checkCommand } : {}),
+        }));
+
+        this.db.prepare(`
+          INSERT INTO tasks (
+            id, key, title, description, epic_id, status, priority,
+            estimated_hours, spent_hours, worker_config,
+            target_repo, base_commit, allowed_paths, protected_paths,
+            verification_commands, acceptance_criteria,
+            project_id, source_plan_id, plan_revision,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', 'local', 'HEAD', '["src/**"]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+        `).run(
+          scopedTaskId,
+          t.key,
+          t.title,
+          t.description || '',
+          t.epicId || null,
+          initialStatus,
+          t.priority || 'medium',
+          t.estimatedHours || 4,
+          JSON.stringify(cleanCriteria),
+          input.projectId,
+          input.sourcePlanId || null,
+          input.planRevision || null,
+          now,
+          now
+        );
+
+        this.store.recordAudit({
+          taskId: scopedTaskId,
+          projectId: input.projectId,
+          eventType: 'TASK_CREATED',
+          actor: input.actor || 'plan-adoption',
+          details: { key: t.key, title: t.title, sourcePlanId: input.sourcePlanId, planRevision: input.planRevision },
+        });
+
+        insertedTasks.push({
+          id: scopedTaskId,
+          key: t.key,
+          title: t.title,
+          description: t.description || '',
+          epicId: t.epicId,
+          status: initialStatus,
+          priority: t.priority || 'medium',
+          estimatedHours: t.estimatedHours || 4,
+          spentHours: 0,
+          assignedAgentId: '',
+          dependencies: t.dependencies || [],
+          tags: t.tags || [],
+          subtasks: cleanSubtasks,
+          acceptanceCriteria: cleanCriteria,
+          jiraSynced: false,
+          slackNotified: false,
+          lastUpdated: 'Just now',
+        });
+      }
+
+      // 3. Mark source plan as adopted if sourcePlanId is provided
+      if (input.sourcePlanId) {
+        this.updateSourcePlanStatus(
+          input.sourcePlanId,
+          {
+            status: 'adopted',
+            summary: input.summary,
+          },
+          input.projectId,
+        );
+      }
+
+      // 4. Project state to state_json - synchronized directly from authoritative SQLite tasks
+      const authoritativeDbTasks = this.store.listTasks(undefined, input.projectId);
+      const synchronizedTasks = authoritativeDbTasks.map((t) => {
+        const found = insertedTasks.find((it) => it.id === t.id);
+        if (found) return found;
+        return {
+          id: t.id,
+          key: t.key,
+          title: t.title,
+          description: t.description || '',
+          epicId: t.epicId || '',
+          status: t.status,
+          priority: t.priority,
+          estimatedHours: t.estimatedHours || 4,
+          spentHours: t.spentHours || 0,
+          assignedAgentId: t.claimedBy || '',
+          dependencies: [],
+          tags: [],
+          subtasks: (t.acceptanceCriteria || []).map((c) => ({
+            id: c.id,
+            title: c.title,
+            completed: Boolean(c.completed),
+            ...(c.checkCommand ? { checkCommand: c.checkCommand } : {}),
+          })),
+          acceptanceCriteria: t.acceptanceCriteria || [],
+          jiraSynced: false,
+          slackNotified: false,
+          lastUpdated: 'Just now',
+        };
+      });
+
+      const currentState = this.getProjectState<any>(input.projectId, {});
+      const nextState = {
+        ...currentState,
+        tasks: synchronizedTasks,
+        epics: input.epics,
+        lastUpdated: now,
+      };
+      this.saveProjectState(input.projectId, nextState);
+
+      return {
+        success: true,
+        adoptedCount: insertedTasks.length,
+        sourcePlanRevision: input.planRevision,
+        tasks: insertedTasks,
+        epics: input.epics,
+      };
+    });
+  }
+
   public createProject(input: {
     id?: string;
     name: string;
@@ -185,6 +599,9 @@ export class ProjectStore {
     return this.txn(() => {
       const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as any;
       if (!row) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${projectId} not found.`);
+      if (projectId === 'default' && patch.name && patch.name.trim() !== row.name) {
+        throw new ProjectApiError(400, 'CANNOT_MODIFY_DEFAULT_IDENTITY', 'The default project fixed identity cannot be modified.');
+      }
       if (patch.name !== undefined) {
         const name = patch.name.trim();
         if (!name || name.length > 120) {
@@ -244,6 +661,144 @@ export class ProjectStore {
       });
       return this.toView(row);
     });
+  }
+
+  public verifyProjectRepository(
+    projectId: string,
+    candidate?: ProjectRepositoryConfig
+  ): {
+    valid: boolean;
+    localPathExists: boolean;
+    isGitRepo: boolean;
+    branchExists: boolean;
+    writable: boolean;
+    headCommit?: string;
+    resolvedBranch?: string;
+    error?: string;
+    details: string[];
+  } {
+    const project = this.getProject(projectId);
+    if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${projectId} not found.`);
+
+    const repo = candidate || project.repository || {};
+    const details: string[] = [];
+
+    if (!repo.localPath || typeof repo.localPath !== 'string' || !repo.localPath.trim()) {
+      return {
+        valid: false,
+        localPathExists: false,
+        isGitRepo: false,
+        branchExists: false,
+        writable: false,
+        error: 'Local repository path is not configured.',
+        details: ['Local path is missing or empty.'],
+      };
+    }
+
+    const resolvedPath = path.resolve(repo.localPath.trim());
+    if (!fs.existsSync(resolvedPath)) {
+      return {
+        valid: false,
+        localPathExists: false,
+        isGitRepo: false,
+        branchExists: false,
+        writable: false,
+        error: `Directory does not exist at path: ${resolvedPath}`,
+        details: [`Target filesystem path not found: ${resolvedPath}`],
+      };
+    }
+
+    // Check directory writable
+    let writable = false;
+    try {
+      fs.accessSync(resolvedPath, fs.constants.W_OK);
+      writable = true;
+      details.push('Filesystem directory is writable.');
+    } catch {
+      details.push('Filesystem directory is read-only (permission denied).');
+    }
+
+    // Check git repo
+    let isGitRepo = false;
+    try {
+      const gitDir = execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--git-dir'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (gitDir) {
+        isGitRepo = true;
+        details.push(`Valid git directory detected: ${gitDir}`);
+      }
+    } catch (gitErr: any) {
+      return {
+        valid: false,
+        localPathExists: true,
+        isGitRepo: false,
+        branchExists: false,
+        writable,
+        error: `Path is not a valid git repository: ${resolvedPath}`,
+        details: [...details, `Git verification failed: ${gitErr.message || 'not a git repo'}`],
+      };
+    }
+
+    // Check default / target branch
+    const targetBranch = repo.defaultBranch || 'main';
+    let branchExists = false;
+    let headCommit: string | undefined;
+    let resolvedBranch: string | undefined;
+
+    try {
+      headCommit = execFileSync('git', ['-C', resolvedPath, 'rev-parse', 'HEAD'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      details.push(`HEAD commit: ${headCommit.slice(0, 8)}`);
+    } catch {
+      // Empty repo or unborn branch
+    }
+
+    try {
+      resolvedBranch = execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      details.push(`Current checked out branch: ${resolvedBranch}`);
+    } catch {
+      // ignore
+    }
+
+    try {
+      execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--verify', targetBranch], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      branchExists = true;
+      details.push(`Target branch "${targetBranch}" successfully resolved.`);
+    } catch {
+      try {
+        execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--verify', `refs/heads/${targetBranch}`], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        branchExists = true;
+        details.push(`Target branch "refs/heads/${targetBranch}" resolved.`);
+      } catch {
+        details.push(`Target branch "${targetBranch}" not found in local repository.`);
+      }
+    }
+
+    const valid = isGitRepo && branchExists && writable;
+    return {
+      valid,
+      localPathExists: true,
+      isGitRepo,
+      branchExists,
+      writable,
+      headCommit,
+      resolvedBranch,
+      error: valid ? undefined : (!branchExists ? `Branch "${targetBranch}" does not exist in repository.` : !writable ? 'Directory is not writable.' : undefined),
+      details,
+    };
   }
 
   // --- Archive ---
