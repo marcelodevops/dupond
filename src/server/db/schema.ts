@@ -28,6 +28,8 @@ export interface TaskRecord {
   blockedReason?: string | null;
   claimedBy?: string | null;
   claimedAt?: string | null;
+  sourcePlanId?: string | null;
+  planRevision?: number | null;
   createdAt: string;
   updatedAt: string;
 }
