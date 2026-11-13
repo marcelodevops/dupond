@@ -24,7 +24,7 @@ data/*.db-*
 data/.dupond_auth_token
 data/.dupond_conn_key
 .qoder/
-
+.github/
 # Local runtime state and debug scratch
 data/*_state.json
 .scratch/
