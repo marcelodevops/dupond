@@ -1102,11 +1102,11 @@ ${implementationCode.slice(0, 500)}...
         // Store-backed work: the repair loop already routed the Review attempt
         // through the lifecycle service against bound evidence. If it did not
         // grant Review, the daemon must not either.
-        const dbTwin = taskStore.getTask(inProgressTask.id) || taskStore.getTask(inProgressTask.key);
+        const dbTwin = taskStore.getTask(inProgressTask.id, this.activeProjectId) || taskStore.getTask(inProgressTask.key, this.activeProjectId);
         let projectedStatus: TaskStatus = 'review';
         let refusalDetail = '';
         if (dbTwin) {
-          let fresh = taskStore.getTask(dbTwin.id) || dbTwin;
+          let fresh = taskStore.getTask(dbTwin.id, this.activeProjectId) || dbTwin;
           if (fresh.status !== 'review') {
             const outcome = defaultLifecycleService.transition({
               taskId: fresh.id,
@@ -1114,7 +1114,7 @@ ${implementationCode.slice(0, 500)}...
               actor: 'daemon',
               reason: 'Autonomous worker step completed',
             });
-            fresh = taskStore.getTask(fresh.id) || fresh;
+            fresh = taskStore.getTask(fresh.id, this.activeProjectId) || fresh;
             projectedStatus = outcome.ok ? 'review' : this.toUiStatus(fresh.status);
             if (!outcome.ok) refusalDetail = outcome.detail || outcome.reason || 'refused';
           }
@@ -1161,7 +1161,7 @@ ${implementationCode.slice(0, 500)}...
       // Done is granted only by the lifecycle service after a recorded,
       // approved delivery. No artifact-based gate may certify it here.
       const reviewTask = tasks.find((t) =>
-        t.status === 'review' && !(taskStore.getTask(t.id) || taskStore.getTask(t.key)));
+        t.status === 'review' && !(taskStore.getTask(t.id, this.activeProjectId) || taskStore.getTask(t.key, this.activeProjectId)));
       if (reviewTask) {
         const verification = await this.verifyTaskQualityGates(reviewTask);
 
@@ -1237,7 +1237,7 @@ ${implementationCode.slice(0, 500)}...
         // Store-backed tasks may only start through the lifecycle service so a
         // revocation, unmet dependency, or open claim cannot be bypassed by a
         // direct JSON status write.
-        const dbTodo = taskStore.getTask(todoTask.id) || taskStore.getTask(todoTask.key);
+        const dbTodo = taskStore.getTask(todoTask.id, this.activeProjectId) || taskStore.getTask(todoTask.key, this.activeProjectId);
         if (dbTodo) {
           const outcome = defaultLifecycleService.transition({
             taskId: dbTodo.id,
@@ -1246,7 +1246,7 @@ ${implementationCode.slice(0, 500)}...
             reason: 'Dependencies verified clear; daemon claimed task for execution',
           });
           if (!outcome.ok) {
-            const fresh = taskStore.getTask(dbTodo.id);
+            const fresh = taskStore.getTask(dbTodo.id, this.activeProjectId);
             const updatedTask: Task = {
               ...todoTask,
               status: this.toUiStatus(fresh?.status ?? dbTodo.status),

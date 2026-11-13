@@ -277,7 +277,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
       // service: Review requires evidence bound to the current spec, and Done
       // waits for a recorded delivery (plus approval when the task requires
       // it). The posted task blob cannot grant either.
-      const dbTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+      const dbTask = taskStore.getTask(task.id || '', projectId) || taskStore.getTask(task.key || '', projectId);
       if (dbTask) {
         let fresh = dbTask;
         if (dbTask.status !== 'review') {
@@ -287,7 +287,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
             actor: 'api',
             reason: 'Worker step executed via orchestration API',
           });
-          fresh = taskStore.getTask(dbTask.id) || dbTask;
+          fresh = taskStore.getTask(dbTask.id, projectId) || dbTask;
           if (!transition.ok) {
             return res.status(400).json({
               success: false,
