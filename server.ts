@@ -49,7 +49,9 @@ import { createProjectRouter, parseProjectContextHeader } from './src/server/pro
 import { defaultProjectStore, ProjectApiError } from './src/server/projects/projectStore.js';
 
 app.use(requireAuth);
-app.use('/api', createProjectRouter());
+app.use('/api', createProjectRouter({
+  onProjectStateMutated: (projectId) => coordinator.reloadState(projectId),
+}));
 
 function projectContext(req: Request, res: Response, resourceProjectId?: string | null): string | null {
   try {
@@ -112,9 +114,12 @@ app.post('/api/orchestrate/state', (req: Request, res: Response) => {
 // Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
 app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Response) => {
   try {
-    const dbProjectId = taskStore.getProjectIdForTask(req.params.id);
-    const inCoordinator = coordinator.getState().tasks.some((t) => t.id === req.params.id || t.key === req.params.id);
-    const taskProjectId = dbProjectId || (inCoordinator ? 'default' : null);
+    const requestedProjectId = parseProjectContextHeader(req) || undefined;
+    const dbProjectId =
+      (requestedProjectId ? taskStore.getTaskScoped(req.params.id, requestedProjectId)?.projectId : undefined) ||
+      taskStore.getProjectIdForTask(req.params.id);
+    const inCoordinator = coordinator.getState(requestedProjectId || 'default').tasks.some((t) => t.id === req.params.id || t.key === req.params.id);
+    const taskProjectId = dbProjectId || (inCoordinator ? (requestedProjectId || 'default') : null);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
     const { status } = req.body;
@@ -190,7 +195,10 @@ app.post('/api/orchestrate/verify-task', async (req: Request, res: Response) => 
   try {
     const { task } = req.body;
     if (!task) return res.status(400).json({ error: 'task is required' });
-    const taskProjectId = taskStore.getProjectIdForTask(task.id || task.key);
+    const requestedProjectId = parseProjectContextHeader(req) || undefined;
+    const taskProjectId =
+      (requestedProjectId ? taskStore.getTaskScoped(task.id || task.key, requestedProjectId)?.projectId : undefined) ||
+      taskStore.getProjectIdForTask(task.id || task.key);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
 
@@ -274,7 +282,10 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
     if (!task || !agent) {
       return res.status(400).json({ error: 'task and agent are required' });
     }
-    const taskProjectId = taskStore.getProjectIdForTask(task.id || task.key);
+    const requestedProjectId = parseProjectContextHeader(req) || undefined;
+    const taskProjectId =
+      (requestedProjectId ? taskStore.getTaskScoped(task.id || task.key, requestedProjectId)?.projectId : undefined) ||
+      taskStore.getProjectIdForTask(task.id || task.key);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
 
@@ -400,7 +411,11 @@ app.post('/api/orchestrate/generate-report', async (req: Request, res: Response)
 // Endpoint: Atlassian Jira Cloud REST integration
 app.post('/api/integrations/jira/sync', async (req: Request, res: Response) => {
   try {
-    const taskProjectId = taskStore.getProjectIdForTask(req.body?.task?.id || req.body?.task?.key);
+    const requestedProjectId = parseProjectContextHeader(req) || undefined;
+    const taskRef = req.body?.task?.id || req.body?.task?.key;
+    const taskProjectId =
+      (requestedProjectId && taskRef ? taskStore.getTaskScoped(taskRef, requestedProjectId)?.projectId : undefined) ||
+      taskStore.getProjectIdForTask(taskRef);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
     const result = await syncJiraTask(req.body || {}, projectId);
@@ -416,6 +431,8 @@ app.post('/api/integrations/jira/sync', async (req: Request, res: Response) => {
 // Endpoint: Real Slack Block Kit Webhook Dispatcher
 app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
     const result = await dispatchSlack(req.body);
     res.status(result.status).json(result.body);
   } catch (error: any) {
@@ -427,17 +444,20 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
 app.post('/api/integrations/repository/dispatch', async (req: Request, res: Response) => {
   try {
     const { action = 'verify', repoConfig, task, allowOverwrite = false, runId, isApproved = false, approvedBy } = req.body || {};
+    const requestedProjectId = parseProjectContextHeader(req) || undefined;
+    const taskRef = task?.id || task?.key;
     const resourceProjectId =
       (runId ? taskStore.getProjectIdForRun(runId) : null) ||
-      taskStore.getProjectIdForTask(task?.id || task?.key);
+      (requestedProjectId && taskRef ? taskStore.getTaskScoped(taskRef, requestedProjectId)?.projectId : undefined) ||
+      taskStore.getProjectIdForTask(taskRef);
     const projectId = projectContext(req, res, resourceProjectId);
     if (!projectId) return;
 
     if (action === 'create_pr' || action === 'deliver') {
       const targetRun = runId
-        ? taskStore.getRun(runId)
+        ? taskStore.getRunScoped(runId, projectId)
         : task
-        ? (taskStore.getLatestRunForTask(task.id) || taskStore.getRun(task.id))
+        ? (taskStore.getLatestRunForTask(task.id, projectId) || taskStore.getRunScoped(task.id, projectId))
         : null;
 
       if (targetRun) {
@@ -486,12 +506,14 @@ app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
 // Endpoint: Read Run Details & Verification Evidence
 app.get('/api/runs/:id', (req: Request, res: Response) => {
   try {
-    const run = taskStore.getRun(req.params.id);
+    const runProjectId = taskStore.getProjectIdForRun(req.params.id);
+    const projectId = projectContext(req, res, runProjectId);
+    if (!projectId) return;
+    const run = taskStore.getRunScoped(req.params.id, projectId);
     if (!run) return res.status(404).json({ error: 'Run not found' });
-    if (!projectContext(req, res, run.projectId)) return;
-    const attempts = taskStore.listAttempts(run.id);
-    const verification = taskStore.getLatestVerification(run.id);
-    const delivery = taskStore.getDeliveryForRun(run.id);
+    const attempts = taskStore.listAttempts(run.id, projectId);
+    const verification = taskStore.getLatestVerification(run.id, projectId);
+    const delivery = taskStore.getDeliveryForRun(run.id, projectId);
     return res.json({ run, attempts, verification, delivery });
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Failed to get run') });
@@ -501,13 +523,17 @@ app.get('/api/runs/:id', (req: Request, res: Response) => {
 // Endpoint: Read Latest Run for Task
 app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
   try {
-    if (!projectContext(req, res, taskStore.getProjectIdForTask(req.params.id))) return;
-    const run = taskStore.getLatestRunForTask(req.params.id) || taskStore.getRun(req.params.id);
+    const requestedProjectId = parseProjectContextHeader(req) || undefined;
+    const taskProjectId =
+      (requestedProjectId ? taskStore.getTaskScoped(req.params.id, requestedProjectId)?.projectId : undefined) ||
+      taskStore.getProjectIdForTask(req.params.id);
+    const projectId = projectContext(req, res, taskProjectId);
+    if (!projectId) return;
+    const run = taskStore.getLatestRunForTask(req.params.id, projectId) || taskStore.getRunScoped(req.params.id, projectId);
     if (!run) return res.status(404).json({ error: 'No run found for task' });
-    if (!projectContext(req, res, run.projectId)) return;
-    const attempts = taskStore.listAttempts(run.id);
-    const verification = taskStore.getLatestVerification(run.id);
-    const delivery = taskStore.getDeliveryForRun(run.id);
+    const attempts = taskStore.listAttempts(run.id, projectId);
+    const verification = taskStore.getLatestVerification(run.id, projectId);
+    const delivery = taskStore.getDeliveryForRun(run.id, projectId);
     return res.json({ run, attempts, verification, delivery });
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Failed to get task runs') });
