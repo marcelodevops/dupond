@@ -499,7 +499,7 @@ export class ProjectStore {
     return this.txn(() => {
       const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as any;
       if (!row) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${projectId} not found.`);
-      if (projectId === 'default' && patch.name && patch.name.trim() !== 'Default Project') {
+      if (projectId === 'default' && patch.name && patch.name.trim() !== row.name) {
         throw new ProjectApiError(400, 'CANNOT_MODIFY_DEFAULT_IDENTITY', 'The default project fixed identity cannot be modified.');
       }
       if (patch.name !== undefined) {
