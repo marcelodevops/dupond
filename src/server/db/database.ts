@@ -125,6 +125,73 @@ export class TaskStore {
       this.db.exec('ROLLBACK;');
       throw error;
     }
+
+    // 2. Existing database migration: remove global key constraint if present
+    const indexes = this.db.prepare("PRAGMA index_list('tasks')").all() as any[];
+    let hasGlobalKeyConstraint = false;
+    for (const idx of indexes) {
+      if (idx.unique) {
+        const cols = this.db.prepare(`PRAGMA index_info('${idx.name}')`).all() as any[];
+        if (cols.length === 1 && cols[0].name === 'key') {
+          hasGlobalKeyConstraint = true;
+          break;
+        }
+      }
+    }
+
+    if (hasGlobalKeyConstraint) {
+      this.db.exec('PRAGMA foreign_keys = OFF;');
+      this.db.exec('BEGIN IMMEDIATE TRANSACTION;');
+      try {
+        this.db.exec(`
+          CREATE TABLE tasks_migration_tmp (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL DEFAULT 'default',
+            key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            epic_id TEXT,
+            status TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            estimated_hours INTEGER DEFAULT 4,
+            spent_hours INTEGER DEFAULT 0,
+            target_repo TEXT NOT NULL,
+            target_repo_path TEXT,
+            base_commit TEXT NOT NULL,
+            allowed_paths TEXT NOT NULL,
+            protected_paths TEXT NOT NULL,
+            verification_commands TEXT NOT NULL,
+            acceptance_criteria TEXT NOT NULL,
+            worker_config TEXT NOT NULL,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            timeout_seconds INTEGER NOT NULL DEFAULT 600,
+            require_approval INTEGER NOT NULL DEFAULT 1,
+            blocked_reason TEXT,
+            claimed_by TEXT,
+            claimed_at TEXT,
+            source_plan_id TEXT,
+            plan_revision INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (project_id, key)
+          );
+        `);
+        const oldCols = (this.db.prepare("PRAGMA table_info('tasks')").all() as any[]).map((c) => c.name);
+        const newCols = (this.db.prepare("PRAGMA table_info('tasks_migration_tmp')").all() as any[]).map((c) => c.name);
+        const commonCols = oldCols.filter((c) => newCols.includes(c));
+        this.db.exec(`INSERT INTO tasks_migration_tmp (${commonCols.join(', ')}) SELECT ${commonCols.join(', ')} FROM tasks;`);
+        this.db.exec('DROP TABLE tasks;');
+        this.db.exec('ALTER TABLE tasks_migration_tmp RENAME TO tasks;');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);');
+        this.db.exec('COMMIT;');
+      } catch (err) {
+        this.db.exec('ROLLBACK;');
+        throw err;
+      } finally {
+        this.db.exec('PRAGMA foreign_keys = ON;');
+      }
+    }
   }
 
   public getRawDb(): DatabaseSync {
@@ -234,17 +301,24 @@ export class TaskStore {
     if (projectId) {
       return this.getTaskScoped(idOrKey, projectId);
     }
+    // Strict project isolation:
+    // When projectId is omitted, lookup is ONLY permitted by exact primary key (id).
+    // Searching by human-readable key without project scope is strictly rejected
+    // to prevent cross-project task hijacking or leakage.
     const stmt = this.db.prepare(`
-      SELECT * FROM tasks WHERE id = ? OR key = ?
+      SELECT * FROM tasks WHERE id = ?
     `);
-    const row = stmt.get(idOrKey, idOrKey) as any;
+    const row = stmt.get(idOrKey) as any;
     if (!row) return null;
     return this.mapTaskRow(row);
   }
 
   public getProjectIdForTask(idOrKey: string): string | null {
-    const row = this.db.prepare('SELECT project_id FROM tasks WHERE id = ? OR key = ?').get(idOrKey, idOrKey) as any;
-    return row?.project_id || null;
+    const byId = this.db.prepare('SELECT project_id FROM tasks WHERE id = ?').get(idOrKey) as any;
+    if (byId?.project_id) return byId.project_id;
+    const rows = this.db.prepare('SELECT project_id FROM tasks WHERE key = ?').all(idOrKey) as any[];
+    if (rows.length === 1) return rows[0].project_id;
+    return null;
   }
 
   public listTasks(statusFilter?: string, projectId?: string): TaskRecord[] {

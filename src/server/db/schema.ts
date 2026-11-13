@@ -346,7 +346,6 @@ CREATE TABLE IF NOT EXISTS project_source_plans (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_run_attempts_run_id ON run_attempts(run_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_run_id ON verification_records(run_id);
