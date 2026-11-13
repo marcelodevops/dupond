@@ -90,6 +90,9 @@ export class TaskStore {
     try {
       for (const ddl of [
         "ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
+        "ALTER TABLE tasks ADD COLUMN epic_id TEXT;",
+        "ALTER TABLE tasks ADD COLUMN estimated_hours INTEGER DEFAULT 4;",
+        "ALTER TABLE tasks ADD COLUMN spent_hours INTEGER DEFAULT 0;",
         "ALTER TABLE tasks ADD COLUMN source_plan_id TEXT;",
         "ALTER TABLE tasks ADD COLUMN plan_revision INTEGER;",
         "ALTER TABLE task_runs ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
@@ -198,18 +201,25 @@ export class TaskStore {
     return record;
   }
 
-  public getTask(idOrKey: string): TaskRecord | null {
+  public getTaskScoped(idOrKey: string, projectId: string): TaskRecord | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM tasks WHERE (id = ? OR key = ?) AND project_id = ?
+    `);
+    const row = stmt.get(idOrKey, idOrKey, projectId) as any;
+    if (!row) return null;
+    return this.mapTaskRow(row);
+  }
+
+  public getTask(idOrKey: string, projectId?: string): TaskRecord | null {
+    if (projectId) {
+      return this.getTaskScoped(idOrKey, projectId);
+    }
     const stmt = this.db.prepare(`
       SELECT * FROM tasks WHERE id = ? OR key = ?
     `);
     const row = stmt.get(idOrKey, idOrKey) as any;
     if (!row) return null;
     return this.mapTaskRow(row);
-  }
-
-  public getTaskScoped(idOrKey: string, projectId: string): TaskRecord | null {
-    const task = this.getTask(idOrKey);
-    return task && task.projectId === projectId ? task : null;
   }
 
   public getProjectIdForTask(idOrKey: string): string | null {
@@ -1017,8 +1027,11 @@ export class TaskStore {
       key: row.key,
       title: row.title,
       description: row.description,
+      epicId: row.epic_id || undefined,
       status: row.status,
       priority: row.priority,
+      estimatedHours: row.estimated_hours != null ? Number(row.estimated_hours) : 4,
+      spentHours: row.spent_hours != null ? Number(row.spent_hours) : 0,
       targetRepo: row.target_repo,
       targetRepoPath: row.target_repo_path || undefined,
       baseCommit: row.base_commit,
@@ -1033,6 +1046,8 @@ export class TaskStore {
       blockedReason: row.blocked_reason,
       claimedBy: row.claimed_by,
       claimedAt: row.claimed_at,
+      sourcePlanId: row.source_plan_id || null,
+      planRevision: row.plan_revision != null ? Number(row.plan_revision) : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

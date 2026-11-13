@@ -32,7 +32,7 @@ import { apiFetch, getApiToken, isAuthRequired, onAuthStateChange, setApiToken }
 import { ProjectProvider, useProject } from './context/ProjectContext';
 import { ProjectWizardModal } from './components/ProjectWizardModal';
 import { ProjectLifecycleModal } from './components/ProjectLifecycleModal';
-import { getActiveProjectId, PROJECT_HEADER } from './lib/projectApi';
+import { getActiveProjectId, PROJECT_HEADER, projectApi } from './lib/projectApi';
 
 function AppWorkspace() {
   const {
@@ -496,13 +496,31 @@ function AppWorkspace() {
     showToast('Task Created', `${newTask.key}: ${newTask.title} added to sprint board.`, 'success');
   };
 
-  const handleAdoptPlan = (newEpics: Epic[], newTasks: Task[], planSummary: string) => {
-    setEpics(newEpics);
-    setTasks(newTasks);
-    setCustomPlanTitle(planSummary.slice(0, 50));
-    setCycleCount(1);
-    syncToServer({ epics: newEpics, tasks: newTasks });
-    showToast('Plan Adopted', `Generated ${newTasks.length} tasks across ${newEpics.length} epics.`, 'success');
+  const handleAdoptPlan = async (
+    newEpics: Epic[],
+    newTasks: Task[],
+    planSummary: string,
+    sourcePlanId?: string,
+    planRevision?: number
+  ) => {
+    const targetProjectId = currentProject?.id || 'default';
+    try {
+      const response = await projectApi.adoptPlan(targetProjectId, {
+        summary: planSummary,
+        epics: newEpics,
+        tasks: newTasks,
+        sourcePlanId,
+        planRevision,
+      });
+      setEpics(response.epics || newEpics);
+      setTasks(response.tasks || newTasks);
+      setCustomPlanTitle(planSummary.slice(0, 50));
+      setCycleCount(1);
+      showToast('Plan Adopted', `Adopted ${response.adoptedCount || newTasks.length} tasks across ${newEpics.length} epics.`, 'success');
+    } catch (err: any) {
+      showToast('Plan Adoption Failed', err.message || 'Server rejected plan adoption.', 'alert');
+      throw err;
+    }
   };
 
   const handleRebalanceComplete = (

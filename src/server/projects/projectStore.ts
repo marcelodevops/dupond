@@ -13,6 +13,7 @@ import {
   DEFAULT_PROJECT_ID,
   ProjectSourcePlan,
   PlanSourceStatus,
+  AdoptPlanResponse,
 } from '../../types/projectContract.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -205,6 +206,230 @@ export class ProjectStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  public updateSourcePlanStatus(id: string, updates: {
+    status: PlanSourceStatus;
+    summary?: string;
+    errorMessage?: string;
+    breakdownJson?: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE project_source_plans
+      SET status = ?, summary = COALESCE(?, summary), error_message = ?, breakdown_json = COALESCE(?, breakdown_json), updated_at = ?
+      WHERE id = ?
+    `).run(
+      updates.status,
+      updates.summary || null,
+      updates.errorMessage || null,
+      updates.breakdownJson || null,
+      now,
+      id
+    );
+  }
+
+  public adoptPlan(input: {
+    projectId: string;
+    sourcePlanId?: string;
+    planRevision?: number;
+    summary: string;
+    epics: Array<{ id: string; title: string; description?: string; color?: string }>;
+    tasks: Array<{
+      id: string;
+      key: string;
+      title: string;
+      description: string;
+      epicId: string;
+      priority?: 'critical' | 'high' | 'medium' | 'low';
+      estimatedHours?: number;
+      recommendedRole?: string;
+      dependencies?: string[];
+      tags?: string[];
+      subtasks?: Array<{ id: string; title: string; completed?: boolean; checkCommand?: string }>;
+    }>;
+    actor?: string;
+  }): AdoptPlanResponse {
+    const project = this.getProject(input.projectId);
+    if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${input.projectId} not found.`);
+    if (project.status === 'archived') {
+      throw new ProjectApiError(409, 'PROJECT_ARCHIVED', 'Cannot adopt plan into an archived project.');
+    }
+
+    if (!Array.isArray(input.tasks) || input.tasks.length === 0) {
+      throw new ProjectApiError(400, 'INVALID_REQUEST', 'Plan must contain at least one task.');
+    }
+    if (!Array.isArray(input.epics) || input.epics.length === 0) {
+      throw new ProjectApiError(400, 'INVALID_REQUEST', 'Plan must contain at least one epic.');
+    }
+
+    // 1. Dependency Validation & DAG Cycle Detection
+    const taskKeys = new Set(input.tasks.map((t) => t.key));
+    const taskIds = new Set(input.tasks.map((t) => t.id));
+    const epicIds = new Set(input.epics.map((e) => e.id));
+
+    // Graph for cycle detection
+    const adj = new Map<string, string[]>();
+    for (const t of input.tasks) {
+      if (!epicIds.has(t.epicId)) {
+        throw new ProjectApiError(400, 'INVALID_REQUEST', `Task ${t.key} references unknown epic ${t.epicId}`);
+      }
+      const deps = t.dependencies || [];
+      for (const d of deps) {
+        if (!taskKeys.has(d) && !taskIds.has(d)) {
+          // Check if dependency exists in project's existing DB tasks
+          const existingDep = this.store.getTaskScoped(d, input.projectId);
+          if (!existingDep) {
+            throw new ProjectApiError(400, 'INVALID_DEPENDENCIES', `Task ${t.key} references non-existent dependency "${d}"`);
+          }
+        }
+      }
+      adj.set(t.key, deps.map((d) => (taskKeys.has(d) ? d : input.tasks.find((it) => it.id === d)?.key || d)));
+    }
+
+    // Detect cycles via DFS
+    const visited = new Map<string, number>(); // 0: unvisited, 1: visiting, 2: visited
+    const hasCycle = (node: string, path: string[]): boolean => {
+      visited.set(node, 1);
+      const neighbors = adj.get(node) || [];
+      for (const neighbor of neighbors) {
+        if (!adj.has(neighbor)) continue; // external dep
+        if (visited.get(neighbor) === 1) {
+          path.push(neighbor);
+          return true;
+        }
+        if (visited.get(neighbor) !== 2) {
+          path.push(neighbor);
+          if (hasCycle(neighbor, path)) return true;
+          path.pop();
+        }
+      }
+      visited.set(node, 2);
+      return false;
+    };
+
+    for (const t of input.tasks) {
+      if (!visited.has(t.key)) {
+        const cyclePath = [t.key];
+        if (hasCycle(t.key, cyclePath)) {
+          throw new ProjectApiError(400, 'INVALID_DEPENDENCIES', `Circular dependency detected: ${cyclePath.join(' -> ')}`);
+        }
+      }
+    }
+
+    const now = new Date().toISOString();
+    return this.txn(() => {
+      // 2. Insert authoritative task rows
+      const insertedTasks: any[] = [];
+      for (const t of input.tasks) {
+        // Enforce task ID is scoped to this project
+        const scopedTaskId = t.id.startsWith(`task-${input.projectId}-`)
+          ? t.id
+          : `task-${input.projectId}-${t.id.replace(/^task-/, '')}`;
+
+        // Ensure key is unique within this project
+        const existing = this.store.getTaskScoped(t.key, input.projectId);
+        if (existing) {
+          // Invariant: Do not silently overwrite or duplicate
+          throw new ProjectApiError(409, 'TASK_KEY_CONFLICT', `Task key "${t.key}" already exists in project ${input.projectId}.`);
+        }
+
+        const initialStatus = (t.dependencies && t.dependencies.length > 0) ? 'backlog' : 'todo';
+        const cleanSubtasks = (t.subtasks || []).map((s) => ({
+          id: s.id,
+          title: s.title,
+          completed: false, // Invariant: newly adopted tasks NEVER start completed
+          ...(s.checkCommand ? { checkCommand: s.checkCommand } : {}),
+        }));
+
+        const cleanCriteria = cleanSubtasks.map((s) => ({
+          id: s.id,
+          title: s.title,
+          completed: false,
+          ...(s.checkCommand ? { checkCommand: s.checkCommand } : {}),
+        }));
+
+        this.db.prepare(`
+          INSERT INTO tasks (
+            id, key, title, description, epic_id, status, priority,
+            estimated_hours, spent_hours, worker_config,
+            target_repo, base_commit, allowed_paths, protected_paths,
+            verification_commands, acceptance_criteria,
+            project_id, source_plan_id, plan_revision,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', 'local', 'HEAD', '["src/**"]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+        `).run(
+          scopedTaskId,
+          t.key,
+          t.title,
+          t.description || '',
+          t.epicId || null,
+          initialStatus,
+          t.priority || 'medium',
+          t.estimatedHours || 4,
+          JSON.stringify(cleanCriteria),
+          input.projectId,
+          input.sourcePlanId || null,
+          input.planRevision || null,
+          now,
+          now
+        );
+
+        this.store.recordAudit({
+          taskId: scopedTaskId,
+          projectId: input.projectId,
+          eventType: 'TASK_CREATED',
+          actor: input.actor || 'plan-adoption',
+          details: { key: t.key, title: t.title, sourcePlanId: input.sourcePlanId, planRevision: input.planRevision },
+        });
+
+        insertedTasks.push({
+          id: scopedTaskId,
+          key: t.key,
+          title: t.title,
+          description: t.description || '',
+          epicId: t.epicId,
+          status: initialStatus,
+          priority: t.priority || 'medium',
+          estimatedHours: t.estimatedHours || 4,
+          spentHours: 0,
+          assignedAgentId: '',
+          dependencies: t.dependencies || [],
+          tags: t.tags || [],
+          subtasks: cleanSubtasks,
+          acceptanceCriteria: cleanCriteria,
+          jiraSynced: false,
+          slackNotified: false,
+          lastUpdated: 'Just now',
+        });
+      }
+
+      // 3. Mark source plan as adopted if sourcePlanId is provided
+      if (input.sourcePlanId) {
+        this.updateSourcePlanStatus(input.sourcePlanId, {
+          status: 'adopted',
+          summary: input.summary,
+        });
+      }
+
+      // 4. Project state to state_json
+      const currentState = this.getProjectState<any>(input.projectId, {});
+      const nextState = {
+        ...currentState,
+        tasks: insertedTasks,
+        epics: input.epics,
+        lastUpdated: now,
+      };
+      this.saveProjectState(input.projectId, nextState);
+
+      return {
+        success: true,
+        adoptedCount: insertedTasks.length,
+        sourcePlanRevision: input.planRevision,
+        tasks: insertedTasks,
+        epics: input.epics,
+      };
+    });
   }
 
   public createProject(input: {
