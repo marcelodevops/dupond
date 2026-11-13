@@ -118,8 +118,11 @@ app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Resp
     const dbProjectId =
       (requestedProjectId ? taskStore.getTaskScoped(req.params.id, requestedProjectId)?.projectId : undefined) ||
       taskStore.getProjectIdForTask(req.params.id);
-    const inCoordinator = coordinator.getState(requestedProjectId || 'default').tasks.some((t) => t.id === req.params.id || t.key === req.params.id);
-    const taskProjectId = dbProjectId || (inCoordinator ? (requestedProjectId || 'default') : null);
+    const inRequestedCoordinator = requestedProjectId
+      ? coordinator.getState(requestedProjectId).tasks.some((t) => t.id === req.params.id || t.key === req.params.id)
+      : false;
+    const inDefaultCoordinator = coordinator.getState('default').tasks.some((t) => t.id === req.params.id || t.key === req.params.id);
+    const taskProjectId = dbProjectId || (inRequestedCoordinator ? requestedProjectId! : inDefaultCoordinator ? 'default' : null);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
     const { status } = req.body;
