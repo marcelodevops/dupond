@@ -154,6 +154,7 @@ function fail(res: Response, err: any): void {
 export interface ProjectRouterDeps {
   store?: ProjectStore;
   provisioner?: JiraProvisioner;
+  onProjectStateMutated?: (projectId: string) => void;
 }
 
 export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
@@ -275,7 +276,7 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
         throw new ProjectApiError(409, 'INVALID_REQUEST', 'Project name confirmation does not match.');
       }
       const scopes = body.scopes || [
-        ...(body.scope?.wipeTasks ? ['tasks'] as const : []),
+        ...(body.scope?.wipeTasks ? ['tasks', 'runs'] as const : []),
         ...(body.scope?.wipeCycles ? ['cycles'] as const : []),
         ...(body.scope?.wipeWorktrees ? ['worktrees'] as const : []),
       ];
@@ -283,6 +284,7 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
         throw new ProjectApiError(400, 'INVALID_REQUEST', 'Reset requires explicit confirmation.');
       }
       const result = store.resetProject(req.params.projectId, Array.from(new Set(scopes)), 'api');
+      deps.onProjectStateMutated?.(req.params.projectId);
       res.json({
         projectId: result.projectId,
         resetAt: new Date().toISOString(),
@@ -424,6 +426,7 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
         planRevision,
         actor: 'operator',
       });
+      deps.onProjectStateMutated?.(req.params.projectId);
 
       res.status(201).json(result);
     } catch (err) {
