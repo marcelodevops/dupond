@@ -193,14 +193,45 @@ app.post('/api/orchestrate/verify-task', async (req: Request, res: Response) => 
 // Endpoint: Parse and decompose a curated plan into epics and tasks
 app.post('/api/orchestrate/parse-plan', async (req: Request, res: Response) => {
   try {
-    const { planText, currentAgents = [] } = req.body;
-    if (!planText || typeof planText !== 'string') {
-      return res.status(400).json({ error: 'planText is required' });
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
+    const { planText, currentAgents = [] } = req.body || {};
+    if (!planText || typeof planText !== 'string' || !planText.trim()) {
+      return res.status(400).json({ error: 'planText is required', code: 'INVALID_PLAN' });
     }
-    res.json(await parsePlan(planText, currentAgents));
+
+    const store = defaultProjectStore;
+    const savedPlan = store.saveSourcePlan({
+      projectId,
+      sourceText: planText,
+      status: 'submitted',
+    });
+
+    try {
+      const breakdown = await parsePlan(planText, currentAgents);
+      store.updateSourcePlanStatus(savedPlan.id, {
+        status: 'parsed',
+        summary: breakdown.summary,
+        breakdownJson: JSON.stringify(breakdown),
+      });
+      res.json({
+        ...breakdown,
+        sourcePlanId: savedPlan.id,
+        planRevision: savedPlan.revision,
+      });
+    } catch (parseErr: any) {
+      store.updateSourcePlanStatus(savedPlan.id, {
+        status: 'parse_failed',
+        errorMessage: parseErr.message,
+      });
+      throw parseErr;
+    }
   } catch (error: any) {
-    console.error('Error parsing plan:', error);
-    res.status(500).json({ error: toClientMessage(error, 'Failed to parse plan') });
+    if (error instanceof ProjectApiError) {
+      return res.status(error.httpStatus).json({ error: error.message, code: error.code });
+    }
+    res.status(500).json({ error: toClientMessage(error, 'Failed to parse plan'), code: 'PLAN_PARSING_FAILED' });
   }
 });
 

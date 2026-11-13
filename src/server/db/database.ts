@@ -90,15 +90,18 @@ export class TaskStore {
     try {
       for (const ddl of [
         "ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
+        "ALTER TABLE tasks ADD COLUMN source_plan_id TEXT;",
+        "ALTER TABLE tasks ADD COLUMN plan_revision INTEGER;",
         "ALTER TABLE task_runs ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
         "ALTER TABLE audit_events ADD COLUMN project_id TEXT DEFAULT 'default';",
         'ALTER TABLE jira_operations ADD COLUMN remote_id TEXT;',
         "ALTER TABLE projects ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}';",
+        "CREATE TABLE IF NOT EXISTS project_source_plans (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, revision INTEGER NOT NULL, source_text TEXT NOT NULL, summary TEXT, status TEXT NOT NULL DEFAULT 'submitted', error_message TEXT, breakdown_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (project_id, revision));",
       ]) {
         try {
           this.db.exec(ddl);
         } catch {
-          // Column already exists.
+          // Column or table already exists.
         }
       }
       this.db.exec("UPDATE tasks SET project_id = 'default' WHERE project_id IS NULL OR project_id = '';");
@@ -107,6 +110,7 @@ export class TaskStore {
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_task_runs_project ON task_runs(project_id);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id);');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_source_plans_project ON project_source_plans(project_id);');
       const now = new Date().toISOString();
       this.db.prepare(`
         INSERT OR IGNORE INTO projects

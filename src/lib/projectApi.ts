@@ -23,6 +23,11 @@ import {
   ProvisionJiraResponse,
   JiraMetadataResponse,
   ProjectApiErrorResponse,
+  PlanningReadiness,
+  ProjectSourcePlan,
+  ParsePlanRequest,
+  AdoptPlanRequest,
+  AdoptPlanResponse,
 } from '../types/projectContract';
 
 const ACTIVE_PROJECT_KEY = 'dupond_active_project_id';
@@ -286,6 +291,53 @@ export const projectApi = {
     return callProjectApi<JiraMetadataResponse>(
       '/api/integrations/jira/metadata',
       { method: 'GET' },
+      signal
+    );
+  },
+
+  /**
+   * Get planning engine readiness and effective model
+   */
+  async getPlanningReadiness(signal?: AbortSignal): Promise<PlanningReadiness> {
+    return callProjectApi<PlanningReadiness>(
+      '/api/planning/readiness',
+      { method: 'GET' },
+      signal
+    );
+  },
+
+  /**
+   * Get project source plan and revision history
+   */
+  async getProjectPlan(projectId: string, signal?: AbortSignal): Promise<{ latest: ProjectSourcePlan | null; history: ProjectSourcePlan[] }> {
+    return callProjectApi<{ latest: ProjectSourcePlan | null; history: ProjectSourcePlan[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/plan`,
+      {
+        method: 'GET',
+        headers: { [PROJECT_HEADER]: projectId },
+      },
+      signal
+    );
+  },
+
+  /**
+   * Parse and decompose a plan for a specific project
+   */
+  async parseProjectPlan(
+    projectId: string,
+    req: ParsePlanRequest,
+    signal?: AbortSignal
+  ): Promise<any> {
+    return callProjectApi<any>(
+      `/api/projects/${encodeURIComponent(projectId)}/plan/parse`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [PROJECT_HEADER]: projectId,
+        },
+        body: JSON.stringify(req),
+      },
       signal
     );
   },
