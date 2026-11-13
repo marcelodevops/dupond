@@ -309,6 +309,13 @@ export class ProjectStore {
           `Source plan revision mismatch: expected ${input.planRevision}, got ${plan.revision}.`,
         );
       }
+      if (plan.status === 'adopted') {
+        throw new ProjectApiError(
+          409,
+          'PLAN_ALREADY_ADOPTED',
+          `Source plan ${input.sourcePlanId} has already been adopted.`,
+        );
+      }
     }
 
     // 1. Dependency Validation & DAG Cycle Detection
@@ -367,7 +374,7 @@ export class ProjectStore {
 
     const now = new Date().toISOString();
     return this.txn(() => {
-      // Check for active execution runs or in-progress tasks before adoption
+      // Check for active execution runs before adoption
       const activeRuns = this.db.prepare(`
         SELECT count(*) as count FROM task_runs WHERE project_id = ? AND status IN ('pending', 'running')
       `).get(input.projectId) as any;
@@ -375,17 +382,7 @@ export class ProjectStore {
         throw new ProjectApiError(409, 'ACTIVE_RUNS_PRESENT', `Cannot adopt plan while project ${input.projectId} has active task runs.`);
       }
 
-      const inProgressTasks = this.db.prepare(`
-        SELECT count(*) as count FROM tasks WHERE project_id = ? AND status IN ('in_progress', 'review')
-      `).get(input.projectId) as any;
-      if (inProgressTasks && inProgressTasks.count > 0) {
-        throw new ProjectApiError(409, 'ACTIVE_TASKS_PRESENT', `Cannot adopt plan while project ${input.projectId} has tasks in progress or review.`);
-      }
-
-      // Authoritative state synchronization: remove existing unstarted tasks to prevent board divergence and ghost tasks
-      this.db.prepare("DELETE FROM tasks WHERE project_id = ? AND status IN ('todo', 'backlog')").run(input.projectId);
-
-      // 2. Insert authoritative task rows
+      // 2. Insert authoritative task rows (preserving existing tasks from prior adopted plans)
       const insertedTasks: any[] = [];
       for (const t of input.tasks) {
         // Enforce task ID is scoped to this project
@@ -421,9 +418,10 @@ export class ProjectStore {
             estimated_hours, spent_hours, worker_config,
             target_repo, base_commit, allowed_paths, protected_paths,
             verification_commands, acceptance_criteria,
+            dependencies, tags, recommended_role,
             project_id, source_plan_id, plan_revision,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', 'local', 'HEAD', '["src/**"]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', 'local', 'HEAD', '["src/**"]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           scopedTaskId,
           t.key,
@@ -434,6 +432,9 @@ export class ProjectStore {
           t.priority || 'medium',
           t.estimatedHours || 4,
           JSON.stringify(cleanCriteria),
+          JSON.stringify(t.dependencies || []),
+          JSON.stringify(t.tags || []),
+          (t as any).recommendedRole || null,
           input.projectId,
           input.sourcePlanId || null,
           input.planRevision || null,
@@ -483,23 +484,33 @@ export class ProjectStore {
       }
 
       // 4. Project state to state_json - synchronized directly from authoritative SQLite tasks
+      const currentState = this.getProjectState<any>(input.projectId, {});
+      const existingStateById = new Map<string, any>();
+      if (Array.isArray(currentState.tasks)) {
+        for (const existingTask of currentState.tasks) {
+          if (existingTask?.id) existingStateById.set(existingTask.id, existingTask);
+        }
+      }
+
       const authoritativeDbTasks = this.store.listTasks(undefined, input.projectId);
       const synchronizedTasks = authoritativeDbTasks.map((t) => {
         const found = insertedTasks.find((it) => it.id === t.id);
         if (found) return found;
+        const prev = existingStateById.get(t.id);
         return {
           id: t.id,
           key: t.key,
           title: t.title,
           description: t.description || '',
-          epicId: t.epicId || '',
+          epicId: t.epicId || prev?.epicId || '',
           status: t.status,
           priority: t.priority,
           estimatedHours: t.estimatedHours || 4,
           spentHours: t.spentHours || 0,
-          assignedAgentId: t.claimedBy || '',
-          dependencies: [],
-          tags: [],
+          assignedAgentId: t.claimedBy || prev?.assignedAgentId || '',
+          dependencies: t.dependencies || prev?.dependencies || [],
+          tags: t.tags || prev?.tags || [],
+          ...(t.recommendedRole ? { recommendedRole: t.recommendedRole } : {}),
           subtasks: (t.acceptanceCriteria || []).map((c) => ({
             id: c.id,
             title: c.title,
@@ -507,17 +518,26 @@ export class ProjectStore {
             ...(c.checkCommand ? { checkCommand: c.checkCommand } : {}),
           })),
           acceptanceCriteria: t.acceptanceCriteria || [],
-          jiraSynced: false,
-          slackNotified: false,
-          lastUpdated: 'Just now',
+          jiraSynced: Boolean(prev?.jiraSynced),
+          slackNotified: Boolean(prev?.slackNotified),
+          lastUpdated: prev?.lastUpdated || 'Just now',
         };
       });
 
-      const currentState = this.getProjectState<any>(input.projectId, {});
+      const mergedEpicsMap = new Map<string, any>();
+      if (Array.isArray(currentState.epics)) {
+        for (const epic of currentState.epics) {
+          if (epic?.id) mergedEpicsMap.set(epic.id, epic);
+        }
+      }
+      for (const epic of input.epics) {
+        mergedEpicsMap.set(epic.id, epic);
+      }
+
       const nextState = {
         ...currentState,
         tasks: synchronizedTasks,
-        epics: input.epics,
+        epics: Array.from(mergedEpicsMap.values()),
         lastUpdated: now,
       };
       this.saveProjectState(input.projectId, nextState);
@@ -894,6 +914,15 @@ export class ProjectStore {
       const runIds = runRows.map((r) => r.id);
       const taskRows = this.db.prepare('SELECT id, key FROM tasks WHERE project_id = ?').all(projectId) as any[];
 
+      if (scopes.includes('tasks') && !scopes.includes('runs') && runIds.length > 0) {
+        throw new ProjectApiError(
+          409,
+          'DEPENDENT_RUNS_PRESENT',
+          'Reset refused: cannot delete tasks while dependent runs exist. Include the "runs" scope to clear dependent execution history alongside tasks.',
+          { runIds },
+        );
+      }
+
       if (scopes.includes('cycles')) {
         const stateRow = this.db.prepare('SELECT state_json FROM projects WHERE id = ?').get(projectId) as any;
         try {
@@ -919,42 +948,45 @@ export class ProjectStore {
         if (!scopes.includes('evidence')) this.deleteWhereIn('verification_records', 'run_id', runIds);
         this.deleteWhereIn('run_attempts', 'run_id', runIds);
         cleared.runs = this.deleteWhereIn('task_runs', 'id', runIds);
-        for (const t of taskRows) {
-          this.db
-            .prepare("UPDATE tasks SET status = 'todo', claimed_by = NULL, claimed_at = NULL, blocked_reason = NULL, updated_at = ? WHERE id = ? AND status IN ('in_progress','review','done','blocked')")
-            .run(new Date().toISOString(), t.id);
-        }
-
-        if (scopes.includes('tasks')) {
-          const taskIds = taskRows.map((task) => task.id);
-          if (taskIds.length > 0) {
-            this.deleteWhereIn('run_attempts', 'run_id', runIds);
-            this.deleteWhereIn('verification_records', 'run_id', runIds);
-            this.deleteWhereIn('delivery_records', 'run_id', runIds);
-            this.deleteWhereIn('task_runs', 'id', runIds);
-            cleared.tasks = this.deleteWhereIn('tasks', 'id', taskIds);
+        if (!scopes.includes('tasks')) {
+          const now = new Date().toISOString();
+          for (const t of taskRows) {
+            this.db
+              .prepare("UPDATE tasks SET status = 'todo', claimed_by = NULL, claimed_at = NULL, blocked_reason = NULL, updated_at = ? WHERE id = ? AND status IN ('in_progress','review','done','blocked')")
+              .run(now, t.id);
           }
           const stateRow = this.db.prepare('SELECT state_json FROM projects WHERE id = ?').get(projectId) as any;
           try {
             const state = JSON.parse(stateRow?.state_json || '{}');
-            state.tasks = [];
-            state.communications = [];
-            this.db.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
-              .run(JSON.stringify(state), new Date().toISOString(), projectId);
+            if (Array.isArray(state.tasks)) {
+              state.tasks = state.tasks.map((task: any) =>
+                ['in_progress', 'review', 'done', 'blocked'].includes(task?.status)
+                  ? { ...task, status: 'todo', assignedAgentId: '' }
+                  : task,
+              );
+              this.db.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
+                .run(JSON.stringify(state), now, projectId);
+            }
           } catch {
-            // Local rows remain the authoritative reset target.
+            // Authoritative SQLite task rows remain updated.
           }
+        }
+      }
+
+      if (scopes.includes('tasks')) {
+        const taskIds = taskRows.map((task) => task.id);
+        if (taskIds.length > 0) {
+          cleared.tasks = this.deleteWhereIn('tasks', 'id', taskIds);
         }
         const stateRow = this.db.prepare('SELECT state_json FROM projects WHERE id = ?').get(projectId) as any;
         try {
           const state = JSON.parse(stateRow?.state_json || '{}');
-          if (Array.isArray(state.tasks)) state.tasks = [];
-          if (Array.isArray(state.communications)) state.communications = [];
-          state.cycleCount = 0;
+          state.tasks = [];
+          state.communications = [];
           this.db.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
             .run(JSON.stringify(state), new Date().toISOString(), projectId);
         } catch {
-          // A malformed state blob is not allowed to block local row cleanup.
+          // Local rows remain the authoritative reset target.
         }
       }
 
@@ -965,8 +997,8 @@ export class ProjectStore {
           try {
             if (fs.existsSync(run.worktree_path)) {
               fs.rmSync(run.worktree_path, { recursive: true, force: true });
+              removed += 1;
             }
-            removed += 1;
           } catch (err: any) {
             skipped.push({ scope: 'worktrees', reason: `worktree ${run.worktree_path}: ${err.message}` });
           }
