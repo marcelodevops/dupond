@@ -90,15 +90,21 @@ export class TaskStore {
     try {
       for (const ddl of [
         "ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
+        "ALTER TABLE tasks ADD COLUMN epic_id TEXT;",
+        "ALTER TABLE tasks ADD COLUMN estimated_hours INTEGER DEFAULT 4;",
+        "ALTER TABLE tasks ADD COLUMN spent_hours INTEGER DEFAULT 0;",
+        "ALTER TABLE tasks ADD COLUMN source_plan_id TEXT;",
+        "ALTER TABLE tasks ADD COLUMN plan_revision INTEGER;",
         "ALTER TABLE task_runs ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
         "ALTER TABLE audit_events ADD COLUMN project_id TEXT DEFAULT 'default';",
         'ALTER TABLE jira_operations ADD COLUMN remote_id TEXT;',
         "ALTER TABLE projects ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}';",
+        "CREATE TABLE IF NOT EXISTS project_source_plans (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, revision INTEGER NOT NULL, source_text TEXT NOT NULL, summary TEXT, status TEXT NOT NULL DEFAULT 'submitted', error_message TEXT, breakdown_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (project_id, revision));",
       ]) {
         try {
           this.db.exec(ddl);
         } catch {
-          // Column already exists.
+          // Column or table already exists.
         }
       }
       this.db.exec("UPDATE tasks SET project_id = 'default' WHERE project_id IS NULL OR project_id = '';");
@@ -107,6 +113,7 @@ export class TaskStore {
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_task_runs_project ON task_runs(project_id);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id);');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_source_plans_project ON project_source_plans(project_id);');
       const now = new Date().toISOString();
       this.db.prepare(`
         INSERT OR IGNORE INTO projects
@@ -117,6 +124,73 @@ export class TaskStore {
     } catch (error) {
       this.db.exec('ROLLBACK;');
       throw error;
+    }
+
+    // 2. Existing database migration: remove global key constraint if present
+    const indexes = this.db.prepare("PRAGMA index_list('tasks')").all() as any[];
+    let hasGlobalKeyConstraint = false;
+    for (const idx of indexes) {
+      if (idx.unique) {
+        const cols = this.db.prepare(`PRAGMA index_info('${idx.name}')`).all() as any[];
+        if (cols.length === 1 && cols[0].name === 'key') {
+          hasGlobalKeyConstraint = true;
+          break;
+        }
+      }
+    }
+
+    if (hasGlobalKeyConstraint) {
+      this.db.exec('PRAGMA foreign_keys = OFF;');
+      this.db.exec('BEGIN IMMEDIATE TRANSACTION;');
+      try {
+        this.db.exec(`
+          CREATE TABLE tasks_migration_tmp (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL DEFAULT 'default',
+            key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            epic_id TEXT,
+            status TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            estimated_hours INTEGER DEFAULT 4,
+            spent_hours INTEGER DEFAULT 0,
+            target_repo TEXT NOT NULL,
+            target_repo_path TEXT,
+            base_commit TEXT NOT NULL,
+            allowed_paths TEXT NOT NULL,
+            protected_paths TEXT NOT NULL,
+            verification_commands TEXT NOT NULL,
+            acceptance_criteria TEXT NOT NULL,
+            worker_config TEXT NOT NULL,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            timeout_seconds INTEGER NOT NULL DEFAULT 600,
+            require_approval INTEGER NOT NULL DEFAULT 1,
+            blocked_reason TEXT,
+            claimed_by TEXT,
+            claimed_at TEXT,
+            source_plan_id TEXT,
+            plan_revision INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (project_id, key)
+          );
+        `);
+        const oldCols = (this.db.prepare("PRAGMA table_info('tasks')").all() as any[]).map((c) => c.name);
+        const newCols = (this.db.prepare("PRAGMA table_info('tasks_migration_tmp')").all() as any[]).map((c) => c.name);
+        const commonCols = oldCols.filter((c) => newCols.includes(c));
+        this.db.exec(`INSERT INTO tasks_migration_tmp (${commonCols.join(', ')}) SELECT ${commonCols.join(', ')} FROM tasks;`);
+        this.db.exec('DROP TABLE tasks;');
+        this.db.exec('ALTER TABLE tasks_migration_tmp RENAME TO tasks;');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);');
+        this.db.exec('COMMIT;');
+      } catch (err) {
+        this.db.exec('ROLLBACK;');
+        throw err;
+      } finally {
+        this.db.exec('PRAGMA foreign_keys = ON;');
+      }
     }
   }
 
@@ -138,10 +212,30 @@ export class TaskStore {
   }
 
   // --- Task Methods ---
-  public createTask(task: Omit<TaskRecord, 'id' | 'createdAt' | 'updatedAt' | 'projectId'> & { id?: string; projectId?: string }): TaskRecord {
+  public createTask(
+    task: Partial<Omit<TaskRecord, 'id' | 'createdAt' | 'updatedAt' | 'projectId'>> & {
+      key: string;
+      title: string;
+      id?: string;
+      projectId?: string;
+    },
+  ): TaskRecord {
     const id = task.id || `task-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
     const record: TaskRecord = {
+      description: '',
+      status: 'todo',
+      priority: 'medium',
+      targetRepo: 'local',
+      baseCommit: 'HEAD',
+      allowedPaths: ['src/**'],
+      protectedPaths: [],
+      verificationCommands: [],
+      acceptanceCriteria: [],
+      workerConfig: { provider: 'default', model: 'default' },
+      maxAttempts: 3,
+      timeoutSeconds: 600,
+      requireApproval: true,
       ...task,
       id,
       projectId: task.projectId || 'default',
@@ -194,23 +288,37 @@ export class TaskStore {
     return record;
   }
 
-  public getTask(idOrKey: string): TaskRecord | null {
+  public getTaskScoped(idOrKey: string, projectId: string): TaskRecord | null {
     const stmt = this.db.prepare(`
-      SELECT * FROM tasks WHERE id = ? OR key = ?
+      SELECT * FROM tasks WHERE (id = ? OR key = ?) AND project_id = ?
     `);
-    const row = stmt.get(idOrKey, idOrKey) as any;
+    const row = stmt.get(idOrKey, idOrKey, projectId) as any;
     if (!row) return null;
     return this.mapTaskRow(row);
   }
 
-  public getTaskScoped(idOrKey: string, projectId: string): TaskRecord | null {
-    const task = this.getTask(idOrKey);
-    return task && task.projectId === projectId ? task : null;
+  public getTask(idOrKey: string, projectId?: string): TaskRecord | null {
+    if (projectId) {
+      return this.getTaskScoped(idOrKey, projectId);
+    }
+    // Strict project isolation:
+    // When projectId is omitted, lookup is ONLY permitted by exact primary key (id).
+    // Searching by human-readable key without project scope is strictly rejected
+    // to prevent cross-project task hijacking or leakage.
+    const stmt = this.db.prepare(`
+      SELECT * FROM tasks WHERE id = ?
+    `);
+    const row = stmt.get(idOrKey) as any;
+    if (!row) return null;
+    return this.mapTaskRow(row);
   }
 
   public getProjectIdForTask(idOrKey: string): string | null {
-    const row = this.db.prepare('SELECT project_id FROM tasks WHERE id = ? OR key = ?').get(idOrKey, idOrKey) as any;
-    return row?.project_id || null;
+    const byId = this.db.prepare('SELECT project_id FROM tasks WHERE id = ?').get(idOrKey) as any;
+    if (byId?.project_id) return byId.project_id;
+    const rows = this.db.prepare('SELECT project_id FROM tasks WHERE key = ?').all(idOrKey) as any[];
+    if (rows.length === 1) return rows[0].project_id;
+    return null;
   }
 
   public listTasks(statusFilter?: string, projectId?: string): TaskRecord[] {
@@ -375,6 +483,7 @@ export class TaskStore {
     taskId: string,
     updates: Partial<Pick<TaskRecord, 'acceptanceCriteria' | 'verificationCommands' | 'protectedPaths' | 'description'>>,
     actor: string = 'system',
+    projectId?: string,
   ): {
     updated: boolean;
     bindingChanged: boolean;
@@ -382,7 +491,7 @@ export class TaskStore {
     revokedAcceptanceFrom?: TaskRecord['status'];
   } {
     return this.transaction(() => {
-      const current = this.getTask(taskId);
+      const current = projectId ? this.getTaskScoped(taskId, projectId) : this.getTask(taskId);
       if (!current) return { updated: false, bindingChanged: false, invalidatedApprovalRunIds: [] };
 
       const before = computeEvidenceBinding(current);
@@ -1013,8 +1122,11 @@ export class TaskStore {
       key: row.key,
       title: row.title,
       description: row.description,
+      epicId: row.epic_id || undefined,
       status: row.status,
       priority: row.priority,
+      estimatedHours: row.estimated_hours != null ? Number(row.estimated_hours) : 4,
+      spentHours: row.spent_hours != null ? Number(row.spent_hours) : 0,
       targetRepo: row.target_repo,
       targetRepoPath: row.target_repo_path || undefined,
       baseCommit: row.base_commit,
@@ -1029,6 +1141,8 @@ export class TaskStore {
       blockedReason: row.blocked_reason,
       claimedBy: row.claimed_by,
       claimedAt: row.claimed_at,
+      sourcePlanId: row.source_plan_id || null,
+      planRevision: row.plan_revision != null ? Number(row.plan_revision) : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
