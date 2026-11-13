@@ -314,6 +314,12 @@ export class CoordinatorEngine {
     return defaultProjectStore.getProjectState(projectId, this.emptyState());
   }
 
+  public reloadState(projectId = this.activeProjectId): void {
+    if (projectId === this.activeProjectId) {
+      this.state = defaultProjectStore.getProjectState(projectId, this.emptyState());
+    }
+  }
+
   /**
    * State for client consumption. Server-held credentials are never included:
    * integrationConfig used to be returned verbatim by GET /api/orchestrate/state,
@@ -329,7 +335,7 @@ export class CoordinatorEngine {
   }
 
   public getIntegrationConfigView(projectId = this.activeProjectId): IntegrationConfig {
-    const config = this.getState(projectId).integrationConfig;
+    const config = this.getState(projectId).integrationConfig || this.emptyState().integrationConfig;
     return {
       ...config,
       jira: redactSecret(config.jira, 'apiToken'),
@@ -347,7 +353,7 @@ export class CoordinatorEngine {
    * this to a client.
    */
   public getIntegrationSecrets(projectId = this.activeProjectId): IntegrationConfig {
-    const config = this.getState(projectId).integrationConfig;
+    const config = this.getState(projectId).integrationConfig || this.emptyState().integrationConfig;
     return {
       ...config,
       jira: fillSection(config.jira),
@@ -582,15 +588,27 @@ export class CoordinatorEngine {
     error?: string;
   }> {
     const effectiveProjectId = projectId || this.activeProjectId;
-    const task = this.state.tasks.find((t) => t.id === taskId || t.key === taskId);
+    const projectState = this.getState(effectiveProjectId);
+    const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
       return { success: false, error: `Task ${taskId} not found` };
     }
 
+    const saveProjectTasks = (updatedTask: Task) => {
+      if (effectiveProjectId === this.activeProjectId) {
+        this.state.tasks = this.state.tasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
+        this.saveStateToDisk();
+      } else {
+        const latestState = this.getState(effectiveProjectId);
+        latestState.tasks = latestState.tasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
+        defaultProjectStore.saveProjectState(effectiveProjectId, latestState);
+      }
+    };
+
     // Tasks registered in the authoritative store transition only through the
     // lifecycle service, which gates Review/Done on bound verification evidence.
     // The JSON entry is updated as a projection of that outcome afterward.
-    const dbTask = taskStore.getTask(task.id, effectiveProjectId) || taskStore.getTask(task.key, effectiveProjectId);
+    const dbTask = taskStore.getTaskScoped(task.id, effectiveProjectId) || taskStore.getTaskScoped(task.key, effectiveProjectId);
     if (dbTask) {
       const outcome = defaultLifecycleService.transition({
         taskId: dbTask.id,
@@ -609,8 +627,7 @@ export class CoordinatorEngine {
         status: targetStatus,
         lastUpdated: 'Just now',
       };
-      this.state.tasks = this.state.tasks.map((t) => (t.id === task.id ? projected : t));
-      this.saveStateToDisk();
+      saveProjectTasks(projected);
       return { success: true, task: projected };
     }
 
@@ -631,8 +648,7 @@ export class CoordinatorEngine {
       lastUpdated: 'Just now',
     };
 
-    this.state.tasks = this.state.tasks.map((t) => (t.id === task.id ? updatedTask : t));
-    this.saveStateToDisk();
+    saveProjectTasks(updatedTask);
 
     return {
       success: true,
@@ -863,6 +879,7 @@ export class CoordinatorEngine {
     const testFilePath = path.resolve(taskArtifactDir, 'spec.test.js');
 
     const executionProjectId = projectId || task.projectId || this.activeProjectId;
+    const executionProjectConfig = this.getState(executionProjectId).integrationConfig;
     let storeTask = taskStore.getTaskScoped(task.key, executionProjectId) || taskStore.getTaskScoped(task.id, executionProjectId);
 
     // Pre-existing static artifact files are a legacy deliverable format used by
@@ -920,14 +937,14 @@ ${implementationCode.slice(0, 500)}...
 
     if (!storeTask) {
       const configuredRepo = task.targetRepo ||
-        this.state.integrationConfig?.repository?.repoUrl ||
+        executionProjectConfig?.repository?.repoUrl ||
         process.env.DUPOND_TARGET_REPO;
       const configuredRepoPath = task.targetRepoPath ||
-        (this.state.integrationConfig?.repository?.localPath && fs.existsSync(this.state.integrationConfig.repository.localPath)
-          ? this.state.integrationConfig.repository.localPath
+        (executionProjectConfig?.repository?.localPath && fs.existsSync(executionProjectConfig.repository.localPath)
+          ? executionProjectConfig.repository.localPath
           : undefined);
       const baseCommit = task.baseCommit ||
-        this.state.integrationConfig?.repository?.defaultBranch ||
+        executionProjectConfig?.repository?.defaultBranch ||
         'HEAD';
       const allowedPaths = task.allowedPaths && task.allowedPaths.length > 0
         ? task.allowedPaths
@@ -1005,10 +1022,10 @@ ${implementationCode.slice(0, 500)}...
 
     // Real Coding Worker Execution via isolated worktree and sandbox!
     const resolvedRepo = resolveTargetRepository({
-      targetRepo: task.targetRepo || this.state.integrationConfig?.repository?.repoUrl,
-      targetRepoPath: task.targetRepoPath || this.state.integrationConfig?.repository?.localPath,
-      integrationConfig: this.state.integrationConfig,
-      allowOrchestratorRepo: isOrchestratorSelfTarget(task.targetRepo || this.state.integrationConfig?.repository?.repoUrl),
+      targetRepo: task.targetRepo || executionProjectConfig?.repository?.repoUrl,
+      targetRepoPath: task.targetRepoPath || executionProjectConfig?.repository?.localPath,
+      integrationConfig: executionProjectConfig,
+      allowOrchestratorRepo: isOrchestratorSelfTarget(task.targetRepo || executionProjectConfig?.repository?.repoUrl),
     });
 
     const workspaceManager = new WorkspaceManager(resolvedRepo.repoPath);

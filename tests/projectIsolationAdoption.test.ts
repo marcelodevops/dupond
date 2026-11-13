@@ -279,15 +279,15 @@ test('Stage 2: Project Isolation & Authoritative Adoption Suite', async () => {
     });
     assert.strictEqual(gammaPlan.adoptedCount, 2);
 
-    // Verify OLD-101 is gone from DB:
+    // Verify OLD-101 is preserved alongside the newly adopted plan tasks:
     const oldGammaTask = rebootTaskStore.getTaskScoped('OLD-101', projGamma.id);
-    assert.strictEqual(oldGammaTask, null, 'Previous unstarted task must be cleanly replaced');
+    assert.ok(oldGammaTask, 'Previous task must be preserved when adopting a distinct plan');
 
     // Verify DB tasks and state_json.tasks match identically (zero divergence)
     const gammaDbTasks = rebootTaskStore.listTasks(undefined, projGamma.id);
     const gammaState = rebootProjectStore.getProjectState<any>(projGamma.id, {});
-    assert.strictEqual(gammaDbTasks.length, 2);
-    assert.strictEqual(gammaState.tasks.length, 2);
+    assert.strictEqual(gammaDbTasks.length, 3);
+    assert.strictEqual(gammaState.tasks.length, 3);
     assert.deepStrictEqual(
       gammaDbTasks.map((t) => t.key).sort(),
       gammaState.tasks.map((t: any) => t.key).sort(),

@@ -95,6 +95,9 @@ export class TaskStore {
         "ALTER TABLE tasks ADD COLUMN spent_hours INTEGER DEFAULT 0;",
         "ALTER TABLE tasks ADD COLUMN source_plan_id TEXT;",
         "ALTER TABLE tasks ADD COLUMN plan_revision INTEGER;",
+        "ALTER TABLE tasks ADD COLUMN dependencies TEXT NOT NULL DEFAULT '[]';",
+        "ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+        "ALTER TABLE tasks ADD COLUMN recommended_role TEXT;",
         "ALTER TABLE task_runs ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
         "ALTER TABLE audit_events ADD COLUMN project_id TEXT DEFAULT 'default';",
         'ALTER TABLE jira_operations ADD COLUMN remote_id TEXT;',
@@ -171,6 +174,9 @@ export class TaskStore {
             claimed_at TEXT,
             source_plan_id TEXT,
             plan_revision INTEGER,
+            dependencies TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]',
+            recommended_role TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE (project_id, key)
@@ -236,6 +242,8 @@ export class TaskStore {
       maxAttempts: 3,
       timeoutSeconds: 600,
       requireApproval: true,
+      dependencies: [],
+      tags: [],
       ...task,
       id,
       projectId: task.projectId || 'default',
@@ -245,11 +253,13 @@ export class TaskStore {
 
     const stmt = this.db.prepare(`
       INSERT INTO tasks (
-        id, project_id, key, title, description, status, priority, target_repo, target_repo_path, base_commit,
+        id, project_id, key, title, description, epic_id, status, priority,
+        estimated_hours, spent_hours, target_repo, target_repo_path, base_commit,
         allowed_paths, protected_paths, verification_commands, acceptance_criteria,
         worker_config, max_attempts, timeout_seconds, require_approval,
-        blocked_reason, claimed_by, claimed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        blocked_reason, claimed_by, claimed_at, source_plan_id, plan_revision,
+        dependencies, tags, recommended_role, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -258,8 +268,11 @@ export class TaskStore {
       record.key,
       record.title,
       record.description || '',
+      record.epicId || null,
       record.status || 'todo',
       record.priority || 'medium',
+      record.estimatedHours ?? 4,
+      record.spentHours ?? 0,
       record.targetRepo || '',
       record.targetRepoPath || null,
       record.baseCommit || 'HEAD',
@@ -274,11 +287,17 @@ export class TaskStore {
       record.blockedReason || null,
       record.claimedBy || null,
       record.claimedAt || null,
+      record.sourcePlanId || null,
+      record.planRevision ?? null,
+      JSON.stringify(record.dependencies || []),
+      JSON.stringify(record.tags || []),
+      record.recommendedRole || null,
       record.createdAt,
       record.updatedAt,
     );
 
     this.recordAudit({
+      projectId: record.projectId,
       taskId: id,
       eventType: 'TASK_CREATED',
       actor: 'system',
@@ -340,17 +359,27 @@ export class TaskStore {
    * Atomic task claim: claims the next available ready task.
    * Prevents double-scheduling or race conditions across concurrent workers.
    */
-  public claimTask(taskId: string, claimToken: string): boolean {
+  public claimTask(taskId: string, claimToken: string, projectId?: string): boolean {
     const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      UPDATE tasks
-      SET status = 'in_progress', claimed_by = ?, claimed_at = ?, updated_at = ?
-      WHERE id = ? AND status IN ('todo', 'backlog') AND claimed_by IS NULL
-    `);
-    const res = stmt.run(claimToken, now, now, taskId) as any;
+    const stmt = projectId
+      ? this.db.prepare(`
+          UPDATE tasks
+          SET status = 'in_progress', claimed_by = ?, claimed_at = ?, updated_at = ?
+          WHERE id = ? AND project_id = ? AND status IN ('todo', 'backlog') AND claimed_by IS NULL
+        `)
+      : this.db.prepare(`
+          UPDATE tasks
+          SET status = 'in_progress', claimed_by = ?, claimed_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('todo', 'backlog') AND claimed_by IS NULL
+        `);
+    const res = (projectId
+      ? stmt.run(claimToken, now, now, taskId, projectId)
+      : stmt.run(claimToken, now, now, taskId)) as any;
     const claimed = res.changes > 0;
     if (claimed) {
+      const task = this.getTask(taskId, projectId);
       this.recordAudit({
+        projectId: task?.projectId || projectId,
         taskId,
         eventType: 'TASK_CLAIMED',
         actor: claimToken,
@@ -360,15 +389,27 @@ export class TaskStore {
     return claimed;
   }
 
-  public unclaimTask(taskId: string, status: 'todo' | 'blocked' = 'todo', blockedReason?: string): void {
+  public unclaimTask(taskId: string, status: 'todo' | 'blocked' = 'todo', blockedReason?: string, projectId?: string): void {
+    const task = projectId ? this.getTaskScoped(taskId, projectId) : this.getTask(taskId);
+    if (projectId && !task) {
+      throw new DomainError(`Project ownership mismatch or task not found: ${taskId} in project ${projectId}`);
+    }
     const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      UPDATE tasks
-      SET status = ?, claimed_by = NULL, claimed_at = NULL, blocked_reason = ?, updated_at = ?
-      WHERE id = ?
-    `);
-    stmt.run(status, blockedReason || null, now, taskId);
+    const stmt = projectId
+      ? this.db.prepare(`
+          UPDATE tasks
+          SET status = ?, claimed_by = NULL, claimed_at = NULL, blocked_reason = ?, updated_at = ?
+          WHERE id = ? AND project_id = ?
+        `)
+      : this.db.prepare(`
+          UPDATE tasks
+          SET status = ?, claimed_by = NULL, claimed_at = NULL, blocked_reason = ?, updated_at = ?
+          WHERE id = ?
+        `);
+    if (projectId) stmt.run(status, blockedReason || null, now, taskId, projectId);
+    else stmt.run(status, blockedReason || null, now, taskId);
     this.recordAudit({
+      projectId: task?.projectId || projectId,
       taskId,
       eventType: 'TASK_UNCLAIMED',
       actor: 'system',
@@ -376,15 +417,27 @@ export class TaskStore {
     });
   }
 
-  public updateTaskStatus(taskId: string, status: TaskRecord['status'], blockedReason?: string): void {
+  public updateTaskStatus(taskId: string, status: TaskRecord['status'], blockedReason?: string, projectId?: string): void {
+    const task = projectId ? this.getTaskScoped(taskId, projectId) : this.getTask(taskId);
+    if (projectId && !task) {
+      throw new DomainError(`Project ownership mismatch or task not found: ${taskId} in project ${projectId}`);
+    }
     const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      UPDATE tasks
-      SET status = ?, blocked_reason = ?, updated_at = ?
-      WHERE id = ?
-    `);
-    stmt.run(status, blockedReason || null, now, taskId);
+    const stmt = projectId
+      ? this.db.prepare(`
+          UPDATE tasks
+          SET status = ?, blocked_reason = ?, updated_at = ?
+          WHERE id = ? AND project_id = ?
+        `)
+      : this.db.prepare(`
+          UPDATE tasks
+          SET status = ?, blocked_reason = ?, updated_at = ?
+          WHERE id = ?
+        `);
+    if (projectId) stmt.run(status, blockedReason || null, now, taskId, projectId);
+    else stmt.run(status, blockedReason || null, now, taskId);
     this.recordAudit({
+      projectId: task?.projectId || projectId,
       taskId,
       eventType: 'TASK_STATUS_UPDATED',
       actor: 'system',
@@ -406,6 +459,7 @@ export class TaskStore {
    */
   public transitionTaskCas(params: {
     taskId: string;
+    projectId?: string;
     expectedFrom: TaskRecord['status'][];
     to: TaskRecord['status'];
     actor: string;
@@ -422,14 +476,19 @@ export class TaskStore {
       return false;
     }
     return this.transaction(() => {
+      const snapshot = this.readLifecycleSnapshot(params.taskId);
+      if (params.projectId && snapshot.task && snapshot.task.projectId !== params.projectId) {
+        return false;
+      }
       if (params.guard) {
-        const decision = params.guard(this.readLifecycleSnapshot(params.taskId));
+        const decision = params.guard(snapshot);
         if (!decision.accept) return false;
       }
 
       const now = new Date().toISOString();
       const placeholders = params.expectedFrom.map(() => '?').join(', ');
       const clearClaim = params.clearClaim ? 1 : 0;
+      const projectClause = params.projectId ? ' AND project_id = ?' : '';
       const stmt = this.db.prepare(`
         UPDATE tasks
         SET status = ?,
@@ -437,19 +496,22 @@ export class TaskStore {
             claimed_by = CASE WHEN ? = 1 THEN NULL ELSE claimed_by END,
             claimed_at = CASE WHEN ? = 1 THEN NULL ELSE claimed_at END,
             updated_at = ?
-        WHERE id = ? AND status IN (${placeholders})
+        WHERE id = ?${projectClause} AND status IN (${placeholders})
       `);
-      const res = stmt.run(
+      const args: any[] = [
         params.to,
         params.blockedReason || null,
         clearClaim,
         clearClaim,
         now,
         params.taskId,
-        ...params.expectedFrom,
-      ) as any;
+      ];
+      if (params.projectId) args.push(params.projectId);
+      args.push(...params.expectedFrom);
+      const res = stmt.run(...args) as any;
       if (res.changes === 0) return false;
       this.recordAudit({
+        projectId: snapshot.task?.projectId || params.projectId,
         taskId: params.taskId,
         eventType: 'TASK_LIFECYCLE_TRANSITION',
         actor: params.actor,
@@ -643,6 +705,10 @@ export class TaskStore {
     return record;
   }
 
+  /**
+   * Restricted internal primary-key lookup by run UUID.
+   * Ordinary project-scoped operations MUST use `getRunScoped(id, projectId)`.
+   */
   public getRun(id: string): TaskRunRecord | null {
     const stmt = this.db.prepare('SELECT * FROM task_runs WHERE id = ?');
     const row = stmt.get(id) as any;
@@ -655,21 +721,24 @@ export class TaskStore {
     return run && run.projectId === projectId ? run : null;
   }
 
+  /** Restricted internal routing helper to resolve owning project from a run UUID. */
   public getProjectIdForRun(runId: string): string | null {
     const row = this.db.prepare('SELECT project_id FROM task_runs WHERE id = ?').get(runId) as any;
     return row?.project_id || null;
   }
 
-  public getLatestRunForTask(taskId: string): TaskRunRecord | null {
-    const stmt = this.db.prepare('SELECT * FROM task_runs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1');
-    const row = stmt.get(taskId) as any;
+  public getLatestRunForTask(taskId: string, projectId?: string): TaskRunRecord | null {
+    const stmt = projectId
+      ? this.db.prepare('SELECT * FROM task_runs WHERE task_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 1')
+      : this.db.prepare('SELECT * FROM task_runs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1');
+    const row = (projectId ? stmt.get(taskId, projectId) : stmt.get(taskId)) as any;
     if (!row) return null;
     return this.mapRunRow(row);
   }
 
-  public updateRun(id: string, updates: Partial<TaskRunRecord>): void {
-    const current = this.getRun(id);
-    if (!current) throw new DomainError(`Run ${id} not found`);
+  public updateRun(id: string, updates: Partial<TaskRunRecord>, projectId?: string): void {
+    const current = projectId ? this.getRunScoped(id, projectId) : this.getRun(id);
+    if (!current) throw new DomainError(`Run ${id} not found${projectId ? ` in project ${projectId}` : ''}`);
 
     const now = new Date().toISOString();
     const updated: TaskRunRecord = {
@@ -770,7 +839,8 @@ export class TaskStore {
     );
   }
 
-  public listAttempts(runId: string): RunAttemptRecord[] {
+  public listAttempts(runId: string, projectId?: string): RunAttemptRecord[] {
+    if (projectId && !this.getRunScoped(runId, projectId)) return [];
     const stmt = this.db.prepare('SELECT * FROM run_attempts WHERE run_id = ? ORDER BY attempt_number ASC');
     return (stmt.all(runId) as any[]).map(this.mapAttemptRow);
   }
@@ -813,7 +883,8 @@ export class TaskStore {
     return record;
   }
 
-  public getLatestVerification(runId: string): VerificationRecord | null {
+  public getLatestVerification(runId: string, projectId?: string): VerificationRecord | null {
+    if (projectId && !this.getRunScoped(runId, projectId)) return null;
     const stmt = this.db.prepare('SELECT * FROM verification_records WHERE run_id = ? ORDER BY verified_at DESC LIMIT 1');
     const row = stmt.get(runId) as any;
     if (!row) return null;
@@ -918,7 +989,8 @@ export class TaskStore {
     });
   }
 
-  public getDeliveryForRun(runId: string): DeliveryRecord | null {
+  public getDeliveryForRun(runId: string, projectId?: string): DeliveryRecord | null {
+    if (projectId && !this.getRunScoped(runId, projectId)) return null;
     // A run can accumulate several delivery records when a PR is advanced to
     // newer verified revisions; acceptance gates must resolve against the
     // most recent one, and history is preserved.
@@ -974,6 +1046,7 @@ export class TaskStore {
     deliveryId: string,
     approvedBy: string,
     expectation: ApprovalExpectation,
+    projectId?: string,
   ): { approved: boolean; delivery: DeliveryRecord | null; reason?: string; detail?: string } {
     return this.transaction(() => {
       const row = this.db.prepare('SELECT * FROM delivery_records WHERE id = ?').get(deliveryId) as any;
@@ -981,6 +1054,14 @@ export class TaskStore {
         return { approved: false, delivery: null, reason: 'not-found', detail: `Delivery record ${deliveryId} does not exist.` };
       }
       const current = this.mapDeliveryRow(row);
+      if (projectId && !this.getRunScoped(current.runId, projectId)) {
+        return {
+          approved: false,
+          delivery: null,
+          reason: 'project-mismatch',
+          detail: `Delivery ${deliveryId} does not belong to project ${projectId}.`,
+        };
+      }
       const taskId = this.getTaskIdForRun(current.runId) || undefined;
 
       const assessment = this.assessApprovalAgainstRun(current.runId, current.deliveredCommit, expectation);
@@ -1068,13 +1149,20 @@ export class TaskStore {
     );
   }
 
-  public listAuditEvents(taskId?: string): AuditEventRecord[] {
-    let stmt;
+  public listAuditEvents(taskId?: string, projectId?: string): AuditEventRecord[] {
+    if (taskId && projectId) {
+      const stmt = this.db.prepare('SELECT * FROM audit_events WHERE task_id = ? AND project_id = ? ORDER BY timestamp ASC');
+      return (stmt.all(taskId, projectId) as any[]).map(this.mapAuditRow);
+    }
     if (taskId) {
-      stmt = this.db.prepare('SELECT * FROM audit_events WHERE task_id = ? ORDER BY timestamp ASC');
+      const stmt = this.db.prepare('SELECT * FROM audit_events WHERE task_id = ? ORDER BY timestamp ASC');
       return (stmt.all(taskId) as any[]).map(this.mapAuditRow);
     }
-    stmt = this.db.prepare('SELECT * FROM audit_events ORDER BY timestamp DESC LIMIT 100');
+    if (projectId) {
+      const stmt = this.db.prepare('SELECT * FROM audit_events WHERE project_id = ? ORDER BY timestamp DESC LIMIT 100');
+      return (stmt.all(projectId) as any[]).map(this.mapAuditRow);
+    }
+    const stmt = this.db.prepare('SELECT * FROM audit_events ORDER BY timestamp DESC LIMIT 100');
     return (stmt.all() as any[]).map(this.mapAuditRow);
   }
 
@@ -1143,6 +1231,9 @@ export class TaskStore {
       claimedAt: row.claimed_at,
       sourcePlanId: row.source_plan_id || null,
       planRevision: row.plan_revision != null ? Number(row.plan_revision) : null,
+      dependencies: JSON.parse(row.dependencies || '[]'),
+      tags: JSON.parse(row.tags || '[]'),
+      recommendedRole: row.recommended_role || undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
