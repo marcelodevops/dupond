@@ -529,7 +529,9 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
       taskStore.getProjectIdForTask(req.params.id);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
-    const run = taskStore.getLatestRunForTask(req.params.id, projectId) || taskStore.getRunScoped(req.params.id, projectId);
+    const scopedTask = taskStore.getTaskScoped(req.params.id, projectId);
+    const lookupTaskId = scopedTask ? scopedTask.id : req.params.id;
+    const run = taskStore.getLatestRunForTask(lookupTaskId, projectId) || taskStore.getRunScoped(req.params.id, projectId);
     if (!run) return res.status(404).json({ error: 'No run found for task' });
     const attempts = taskStore.listAttempts(run.id, projectId);
     const verification = taskStore.getLatestVerification(run.id, projectId);
