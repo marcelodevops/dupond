@@ -11,7 +11,16 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const httpServer = http.createServer(app);
-const PORT = Number(process.env.PORT) || 3000;
+function resolveListenPort(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 3000;
+  const parsed = Number(raw);
+  // Port 0 is the kernel ephemeral assignment. `|| 3000` would discard it.
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) return 3000;
+  return parsed;
+}
+
+const PORT = resolveListenPort(process.env.PORT);
+const BIND_HOST = process.env.DUPOND_BIND_HOST?.trim() || '';
 const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(express.json({ limit: '10mb' }));
@@ -602,6 +611,18 @@ httpServer.on('error', (err: any) => {
   throw err;
 });
 
-httpServer.listen(PORT, () => {
-  console.log(`Dupond Orchestrator server running on http://0.0.0.0:${PORT}`);
-});
+const onListening = () => {
+  const addr = httpServer.address();
+  const boundPort = typeof addr === 'object' && addr ? addr.port : PORT;
+  const boundHost = typeof addr === 'object' && addr ? addr.address : (BIND_HOST || '0.0.0.0');
+  console.log(`Dupond Orchestrator server running on http://0.0.0.0:${boundPort}`);
+  console.log(`DUPOND_READY host=${boundHost} port=${boundPort}`);
+};
+
+// Default remains an unspecified bind. Tests set DUPOND_BIND_HOST so the
+// readiness probe targets the same address family the socket opened.
+if (BIND_HOST) {
+  httpServer.listen(PORT, BIND_HOST, onListening);
+} else {
+  httpServer.listen(PORT, onListening);
+}
