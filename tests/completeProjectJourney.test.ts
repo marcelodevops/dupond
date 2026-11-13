@@ -11,48 +11,166 @@ import { ProjectStore } from '../src/server/projects/projectStore';
 const TOKEN = 'complete-journey-test-token';
 const children: ChildProcess[] = [];
 const tempDirs: string[] = [];
+const OUTPUT_LIMIT = 8_000;
+const READY_BUDGET_MS = 15_000;
+const REQUEST_TIMEOUT_MS = 500;
 
-async function waitForServer(port: number): Promise<void> {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (response.ok) return;
-    } catch {
-      // Process is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error('Timed out waiting for Dupond server');
+interface StartedServer {
+  child: ChildProcess;
+  baseUrl: string;
+  port: number;
+}
+
+function appendBounded(current: string, chunk: Buffer | string): string {
+  const next = current + chunk.toString();
+  return next.length > OUTPUT_LIMIT ? next.slice(-OUTPUT_LIMIT) : next;
+}
+
+function formatHost(host: string): string {
+  return host.includes(':') ? `[${host}]` : host;
+}
+
+function startupFailure(details: {
+  output: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  status: number | null;
+  lastError: string | null;
+}): Error {
+  return new Error(
+    [
+      'Dupond server did not become ready',
+      `exitCode=${details.exitCode ?? 'none'}`,
+      `signal=${details.signal ?? 'none'}`,
+      `readinessStatus=${details.status ?? 'none'}`,
+      `lastError=${details.lastError ?? 'none'}`,
+      '--- child output ---',
+      details.output || '(no output)',
+    ].join('\n')
+  );
 }
 
 async function startServer(
   dbPath: string,
   statePath: string,
-  port: number,
   geminiKey?: string
-): Promise<ChildProcess> {
+): Promise<StartedServer> {
   const child = spawn(process.execPath, ['--import', 'tsx/esm', 'server.ts'], {
     cwd: path.resolve(__dirname, '..'),
     env: {
       ...process.env,
       NODE_ENV: 'production',
-      PORT: String(port),
+      // Kernel-assigned port. A fixed port can be owned by an IPv4 listener
+      // while listen() without a host opens the IPv6 wildcard, so 127.0.0.1
+      // never reaches this process and a longer poll cannot succeed.
+      PORT: '0',
+      DUPOND_BIND_HOST: '127.0.0.1',
       DUPOND_API_KEY: TOKEN,
       DUPOND_DB_PATH: dbPath,
       DUPOND_STATE_FILE: statePath,
       ...(geminiKey ? { GEMINI_API_KEY: geminiKey } : { GEMINI_API_KEY: '' }),
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   children.push(child);
-  await waitForServer(port);
-  return child;
+
+  const observed = {
+    output: '',
+    exitCode: null as number | null,
+    signal: null as NodeJS.Signals | null,
+    spawnError: null as Error | null,
+  };
+  child.stdout?.on('data', (chunk) => {
+    observed.output = appendBounded(observed.output, chunk);
+  });
+  child.stderr?.on('data', (chunk) => {
+    observed.output = appendBounded(observed.output, chunk);
+  });
+  child.once('error', (err) => {
+    observed.spawnError = err;
+  });
+  child.once('exit', (code, exitSignal) => {
+    observed.exitCode = code;
+    observed.signal = exitSignal;
+  });
+
+  const deadline = Date.now() + READY_BUDGET_MS;
+  let status: number | null = null;
+  let lastError: string | null = null;
+  while (Date.now() < deadline) {
+    const spawnFailure = observed.spawnError;
+    if (spawnFailure) {
+      throw startupFailure({
+        output: `${observed.output}\nspawn error: ${spawnFailure.message}`,
+        exitCode: observed.exitCode,
+        signal: observed.signal,
+        status,
+        lastError: spawnFailure.message,
+      });
+    }
+    if (observed.exitCode !== null || observed.signal) {
+      throw startupFailure({
+        output: observed.output,
+        exitCode: observed.exitCode,
+        signal: observed.signal,
+        status,
+        lastError,
+      });
+    }
+    const ready = observed.output.match(/DUPOND_READY host=(\S+) port=(\d+)/);
+    if (ready) {
+      const baseUrl = `http://${formatHost(ready[1])}:${ready[2]}`;
+      try {
+        const response = await fetch(`${baseUrl}/api/health`, {
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+        status = response.status;
+        if (response.ok) {
+          return { child, baseUrl, port: Number(ready[2]) };
+        }
+        lastError = `health HTTP ${response.status}`;
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw startupFailure({
+    output: observed.output,
+    exitCode: observed.exitCode,
+    signal: observed.signal,
+    status,
+    lastError,
+  });
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode) return;
+  try {
+    child.kill('SIGTERM');
+  } catch {
+    return;
+  }
+  const exited = Promise.race([
+    once(child, 'exit').then(() => true).catch(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ]);
+  if (await exited) return;
+  if (child.exitCode !== null || child.signalCode) return;
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    return;
+  }
+  await Promise.race([
+    once(child, 'exit').catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, 1_000)),
+  ]);
 }
 
 async function stopChildServers(): Promise<void> {
   for (const child of children.splice(0)) {
-    if (!child.killed) child.kill('SIGTERM');
-    await once(child, 'exit').catch(() => undefined);
+    await stopChild(child);
   }
 }
 
@@ -71,11 +189,9 @@ describe('Stage 5: Complete 10-Step Operator Journey Suite', () => {
     tempDirs.push(dir);
     const dbPath = path.join(dir, 'test.db');
     const statePath = path.join(dir, 'state.json');
-    const port = 38930;
-
     // Start server WITHOUT GEMINI_API_KEY initially to verify credential gating
-    let serverProc = await startServer(dbPath, statePath, port);
-    const baseUrl = `http://127.0.0.1:${port}`;
+    let started = await startServer(dbPath, statePath);
+    let baseUrl = started.baseUrl;
 
     // =========================================================================
     // STEP 1: CREATE PROJECT
@@ -341,10 +457,9 @@ Requirements:
     // Stop the running child server
     await stopChildServers();
 
-    // Restart server on a new port using the EXACT SAME database and state files
-    const restartPort = 38931;
-    serverProc = await startServer(dbPath, statePath, restartPort);
-    const restartedBaseUrl = `http://127.0.0.1:${restartPort}`;
+    // Restart server using the EXACT SAME database and state files
+    started = await startServer(dbPath, statePath);
+    const restartedBaseUrl = started.baseUrl;
 
     // Query Naviera project
     const restartedProjRes = await fetch(`${restartedBaseUrl}/api/projects/${navieraId}`, {
