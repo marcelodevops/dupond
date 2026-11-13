@@ -4,8 +4,11 @@ export interface TaskRecord {
   key: string;
   title: string;
   description: string;
+  epicId?: string;
   status: 'backlog' | 'todo' | 'in_progress' | 'review' | 'done' | 'blocked';
   priority: 'critical' | 'high' | 'medium' | 'low';
+  estimatedHours?: number;
+  spentHours?: number;
   targetRepo: string;
   targetRepoPath?: string;
   baseCommit: string;
@@ -173,11 +176,14 @@ export const DDL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL DEFAULT 'default',
-  key TEXT UNIQUE NOT NULL,
+  key TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT NOT NULL,
+  epic_id TEXT,
   status TEXT NOT NULL,
   priority TEXT NOT NULL,
+  estimated_hours INTEGER DEFAULT 4,
+  spent_hours INTEGER DEFAULT 0,
   target_repo TEXT NOT NULL,
   target_repo_path TEXT,
   base_commit TEXT NOT NULL,
@@ -192,8 +198,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   blocked_reason TEXT,
   claimed_by TEXT,
   claimed_at TEXT,
+  source_plan_id TEXT,
+  plan_revision INTEGER,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  UNIQUE (project_id, key)
 );
 
 CREATE TABLE IF NOT EXISTS task_runs (

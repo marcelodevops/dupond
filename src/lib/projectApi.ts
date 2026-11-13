@@ -341,4 +341,26 @@ export const projectApi = {
       signal
     );
   },
+
+  /**
+   * Atomically adopt planned epics and tasks into the project workspace
+   */
+  async adoptPlan(
+    projectId: string,
+    req: AdoptPlanRequest,
+    signal?: AbortSignal
+  ): Promise<AdoptPlanResponse> {
+    return callProjectApi<AdoptPlanResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/plan/adopt`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [PROJECT_HEADER]: projectId,
+        },
+        body: JSON.stringify(req),
+      },
+      signal
+    );
+  },
 };

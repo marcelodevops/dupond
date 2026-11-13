@@ -19,7 +19,7 @@ import {
 interface PlanIngestionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onAdoptPlan: (newEpics: Epic[], newTasks: Task[], planSummary: string, sourcePlanId?: string, planRevision?: number) => void;
+  onAdoptPlan: (newEpics: Epic[], newTasks: Task[], planSummary: string, sourcePlanId?: string, planRevision?: number) => Promise<boolean | void> | void;
   agents: Agent[];
 }
 
@@ -144,16 +144,24 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
     }
   };
 
-  const handleConfirmAdopt = () => {
+  const handleConfirmAdopt = async () => {
     if (!parsedResult || !parsedResult.tasks || !parsedResult.epics) return;
-    onAdoptPlan(
-      parsedResult.epics,
-      parsedResult.tasks,
-      parsedResult.summary || 'Custom Orchestrated Sprint Plan',
-      sourcePlanId || undefined,
-      sourcePlanRevision || undefined
-    );
-    onClose();
+    setIsDecomposing(true);
+    setErrorMessage(null);
+    try {
+      await onAdoptPlan(
+        parsedResult.epics,
+        parsedResult.tasks,
+        parsedResult.summary || 'Custom Orchestrated Sprint Plan',
+        sourcePlanId || undefined,
+        sourcePlanRevision || undefined
+      );
+      onClose();
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to adopt plan into project.');
+    } finally {
+      setIsDecomposing(false);
+    }
   };
 
   return (

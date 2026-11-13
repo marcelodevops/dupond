@@ -182,7 +182,7 @@ export class CoordinatorEngine {
   private projectAuthoritativeStatusesInternal(): number {
     let changed = 0;
     const nextTasks = this.state.tasks.map((task) => {
-      const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
+      const dbTask = taskStore.getTask(task.id, this.activeProjectId) || taskStore.getTask(task.key, this.activeProjectId);
       if (!dbTask) return task;
       const projected = this.toUiStatus(dbTask.status);
       const specMirrored = this.mirrorAuthoritativeSpec(task, dbTask);
@@ -428,7 +428,7 @@ export class CoordinatorEngine {
         // evidence binding and, when it changed, transactionally revokes the
         // Review/Done acceptance that the old spec authorized.
         let requirementsRebound = false;
-        const dbTaskForEdit = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+        const dbTaskForEdit = taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId);
         if (dbTaskForEdit) {
           // An acceptanceCriteria field that the caller sent is authoritative
           // for the contract — including when it is sent empty, which means
@@ -460,7 +460,7 @@ export class CoordinatorEngine {
             JSON.stringify(updates.verificationCommands) !== JSON.stringify(dbTaskForEdit.verificationCommands) ||
             JSON.stringify(updates.protectedPaths) !== JSON.stringify(dbTaskForEdit.protectedPaths);
           if (requirementsChanged) {
-            const outcome = taskStore.updateTaskRequirements(dbTaskForEdit.id, updates, 'ui');
+            const outcome = taskStore.updateTaskRequirements(dbTaskForEdit.id, updates, 'ui', this.activeProjectId);
             if (outcome.bindingChanged) {
               requirementsRebound = true;
               rejectTask(task.key);
@@ -473,7 +473,7 @@ export class CoordinatorEngine {
         // its evidence gates. A posted state blob is clamped to the persisted
         // status instead of independently granting Review or Done.
         if (task.status === 'review' || task.status === 'done') {
-          const dbTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+          const dbTask = taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId);
           if (dbTask && dbTask.status !== task.status) {
             rejectTask(task.key);
             return {
@@ -527,7 +527,7 @@ export class CoordinatorEngine {
           }
         }
         if (requirementsRebound) {
-          const reboundTask = taskStore.getTask(task.id || '') || taskStore.getTask(task.key || '');
+          const reboundTask = taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId);
           return {
             ...task,
             status: reboundTask ? this.toUiStatus(reboundTask.status) : task.status,
@@ -543,7 +543,7 @@ export class CoordinatorEngine {
       // revoked, or re-bound cannot keep being shown as if it were granted.
       validatedPartial.tasks = validatedPartial.tasks.map((task) => this.mirrorAuthoritativeSpec(
         task,
-        taskStore.getTask(task.id || '') || taskStore.getTask(task.key || ''),
+        taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId),
       ));
     }
 
@@ -589,7 +589,7 @@ export class CoordinatorEngine {
     // Tasks registered in the authoritative store transition only through the
     // lifecycle service, which gates Review/Done on bound verification evidence.
     // The JSON entry is updated as a projection of that outcome afterward.
-    const dbTask = taskStore.getTask(task.id) || taskStore.getTask(task.key);
+    const dbTask = taskStore.getTask(task.id, this.activeProjectId) || taskStore.getTask(task.key, this.activeProjectId);
     if (dbTask) {
       const outcome = defaultLifecycleService.transition({
         taskId: dbTask.id,

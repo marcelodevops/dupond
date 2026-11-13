@@ -384,5 +384,38 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
     }
   });
 
+  router.post('/projects/:projectId/plan/adopt', (req: Request, res: Response) => {
+    try {
+      const ctx = projectContext(req);
+      if (ctx !== req.params.projectId) {
+        throw new ProjectApiError(403, 'PROJECT_CONTEXT_MISMATCH', `Path project ${req.params.projectId} does not match ${PROJECT_CONTEXT_HEADER} context ${ctx}.`);
+      }
+      const project = store.getProject(req.params.projectId);
+      if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${req.params.projectId} not found.`);
+
+      const { summary, epics = [], tasks = [], sourcePlanId, planRevision } = req.body ?? {};
+      if (!Array.isArray(tasks) || tasks.length === 0) {
+        throw new ProjectApiError(400, 'INVALID_ADOPTION_INPUT', 'Tasks array is required and must not be empty.');
+      }
+      if (!Array.isArray(epics)) {
+        throw new ProjectApiError(400, 'INVALID_ADOPTION_INPUT', 'Epics must be an array.');
+      }
+
+      const result = store.adoptPlan({
+        projectId: req.params.projectId,
+        summary: summary || '',
+        epics,
+        tasks,
+        sourcePlanId,
+        planRevision,
+        actor: 'operator',
+      });
+
+      res.status(201).json(result);
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
   return router;
 }
