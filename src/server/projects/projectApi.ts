@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { ProjectStore, ProjectApiError, defaultProjectStore } from './projectStore.js';
 import { JiraProvisioner, defaultJiraProvisioner } from './jiraProvisioner.js';
 import { PROJECT_CONTEXT_HEADER, DEFAULT_PROJECT_ID } from '../../types/projectContract.js';
+import { getPlanningReadiness, parsePlan } from '../planning/planBreakdown.js';
 
 const RepositorySchema = z
   .object({
@@ -316,6 +317,71 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
         reason: 'Remote Jira creation requires a configured server-held connection and supported capability.',
       },
     });
+  });
+
+  router.get('/planning/readiness', (_req: Request, res: Response) => {
+    res.json(getPlanningReadiness());
+  });
+
+  router.get('/projects/:projectId/plan', (req: Request, res: Response) => {
+    try {
+      const ctx = projectContext(req);
+      if (ctx !== req.params.projectId) {
+        throw new ProjectApiError(403, 'PROJECT_CONTEXT_MISMATCH', `Path project ${req.params.projectId} does not match ${PROJECT_CONTEXT_HEADER} context ${ctx}.`);
+      }
+      const project = store.getProject(req.params.projectId);
+      if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${req.params.projectId} not found.`);
+
+      const latest = store.getLatestSourcePlan(req.params.projectId);
+      const history = store.listSourcePlans(req.params.projectId);
+      res.json({ latest, history });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.post('/projects/:projectId/plan/parse', async (req: Request, res: Response) => {
+    try {
+      const ctx = projectContext(req);
+      if (ctx !== req.params.projectId) {
+        throw new ProjectApiError(403, 'PROJECT_CONTEXT_MISMATCH', `Path project ${req.params.projectId} does not match ${PROJECT_CONTEXT_HEADER} context ${ctx}.`);
+      }
+      const project = store.getProject(req.params.projectId);
+      if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${req.params.projectId} not found.`);
+
+      const { planText, currentAgents = [] } = req.body ?? {};
+      if (!planText || typeof planText !== 'string' || !planText.trim()) {
+        throw new ProjectApiError(400, 'INVALID_PLAN', 'Plan text is required and cannot be empty.');
+      }
+
+      const savedPlan = store.saveSourcePlan({
+        projectId: req.params.projectId,
+        sourceText: planText,
+        status: 'submitted',
+      });
+
+      try {
+        const breakdown = await parsePlan(planText, currentAgents);
+        store.updateSourcePlanStatus(savedPlan.id, {
+          status: 'parsed',
+          summary: breakdown.summary,
+          breakdownJson: JSON.stringify(breakdown),
+        });
+        res.json({
+          ...breakdown,
+          sourcePlanId: savedPlan.id,
+          planRevision: savedPlan.revision,
+        });
+      } catch (parseErr: any) {
+        store.updateSourcePlanStatus(savedPlan.id, {
+          status: 'parse_failed',
+          errorMessage: parseErr.message,
+        });
+        throw parseErr;
+      }
+    } catch (err) {
+      fail(res, err);
+    }
   });
 
   return router;

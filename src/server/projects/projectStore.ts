@@ -11,6 +11,8 @@ import {
   ProjectResetScope,
   ProjectResetResult,
   DEFAULT_PROJECT_ID,
+  ProjectSourcePlan,
+  PlanSourceStatus,
 } from '../../types/projectContract.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -116,6 +118,93 @@ export class ProjectStore {
     if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${projectId} not found.`);
     this.db.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(state), new Date().toISOString(), projectId);
+  }
+
+  // --- Source Plans ---
+
+  public saveSourcePlan(input: {
+    projectId: string;
+    sourceText: string;
+    summary?: string;
+    status?: PlanSourceStatus;
+    errorMessage?: string;
+    breakdownJson?: string;
+  }): ProjectSourcePlan {
+    const project = this.getProject(input.projectId);
+    if (!project) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${input.projectId} not found.`);
+
+    const text = (input.sourceText || '').trim();
+    if (!text) throw new ProjectApiError(400, 'INVALID_REQUEST', 'Source plan text is required.');
+
+    const now = new Date().toISOString();
+    return this.txn(() => {
+      const maxRevRow = this.db
+        .prepare('SELECT MAX(revision) as maxRev FROM project_source_plans WHERE project_id = ?')
+        .get(input.projectId) as any;
+      const nextRevision = (maxRevRow?.maxRev ?? 0) + 1;
+      const id = `plan-${input.projectId}-rev${nextRevision}`;
+
+      this.db
+        .prepare(`
+          INSERT INTO project_source_plans (
+            id, project_id, revision, source_text, summary, status, error_message, breakdown_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          id,
+          input.projectId,
+          nextRevision,
+          text,
+          input.summary || null,
+          input.status || 'submitted',
+          input.errorMessage || null,
+          input.breakdownJson || null,
+          now,
+          now
+        );
+
+      return {
+        id,
+        projectId: input.projectId,
+        revision: nextRevision,
+        sourceText: text,
+        summary: input.summary,
+        status: input.status || 'submitted',
+        errorMessage: input.errorMessage,
+        breakdownJson: input.breakdownJson,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+  }
+
+  public getLatestSourcePlan(projectId: string): ProjectSourcePlan | null {
+    const row = this.db
+      .prepare('SELECT * FROM project_source_plans WHERE project_id = ? ORDER BY revision DESC LIMIT 1')
+      .get(projectId) as any;
+    return row ? this.toSourcePlanView(row) : null;
+  }
+
+  public listSourcePlans(projectId: string): ProjectSourcePlan[] {
+    const rows = this.db
+      .prepare('SELECT * FROM project_source_plans WHERE project_id = ? ORDER BY revision DESC')
+      .all(projectId) as any[];
+    return rows.map((r) => this.toSourcePlanView(r));
+  }
+
+  private toSourcePlanView(row: any): ProjectSourcePlan {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      revision: row.revision,
+      sourceText: row.source_text,
+      summary: row.summary || undefined,
+      status: row.status,
+      errorMessage: row.error_message || undefined,
+      breakdownJson: row.breakdown_json || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   public createProject(input: {

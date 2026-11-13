@@ -320,11 +320,27 @@ CREATE TABLE IF NOT EXISTS jira_operations (
   UNIQUE (project_id, id)
 );
 
+CREATE TABLE IF NOT EXISTS project_source_plans (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  revision INTEGER NOT NULL,
+  source_text TEXT NOT NULL,
+  summary TEXT,
+  status TEXT NOT NULL DEFAULT 'submitted',
+  error_message TEXT,
+  breakdown_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (project_id, revision)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_run_attempts_run_id ON run_attempts(run_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_run_id ON verification_records(run_id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_run_id ON delivery_records(run_id);
 CREATE INDEX IF NOT EXISTS idx_jira_connections_project ON jira_connections(project_id);
 CREATE INDEX IF NOT EXISTS idx_jira_operations_project ON jira_operations(project_id);
+CREATE INDEX IF NOT EXISTS idx_source_plans_project ON project_source_plans(project_id);
 `;
