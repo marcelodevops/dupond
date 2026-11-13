@@ -154,7 +154,7 @@ describe('Dupond correctness repairs regression suite', () => {
       worktreePath: path.join(dir, 'nonexistent-wt'),
       baseCommit: 'HEAD',
     });
-    taskStore.updateRun(run.id, { status: 'completed', finishedAt: new Date().toISOString() }, alpha.id);
+    taskStore.updateRun(run.id, { status: 'completed', durationMs: 100 }, alpha.id);
     taskStore.updateTaskStatus(alp3.id, 'done', undefined, alpha.id);
 
     assert.throws(
@@ -186,7 +186,7 @@ describe('Dupond correctness repairs regression suite', () => {
       worktreePath: path.join(dir, 'missing-wt'),
       baseCommit: 'HEAD',
     });
-    taskStore.updateRun(`run-${alpha.id}-2`, { status: 'failed', finishedAt: new Date().toISOString() }, alpha.id);
+    taskStore.updateRun(`run-${alpha.id}-2`, { status: 'failed', durationMs: 50 }, alpha.id);
 
     const port = await getFreePort();
     await startServer(dbPath, statePath, port);
@@ -241,13 +241,11 @@ describe('Dupond correctness repairs regression suite', () => {
     const planA = projectStore.saveSourcePlan({
       projectId: proj.id,
       sourceText: 'Plan A',
-      format: 'markdown',
       status: 'parsed',
     });
     const planB = projectStore.saveSourcePlan({
       projectId: proj.id,
       sourceText: 'Plan B',
-      format: 'markdown',
       status: 'parsed',
     });
 
@@ -623,9 +621,9 @@ describe('Dupond correctness repairs regression suite', () => {
 
     // First migration run
     const migratedStore = new TaskStore(legacyDbPath);
-    const fkRow = migratedStore.db.prepare('PRAGMA foreign_keys').get() as any;
+    const fkRow = (migratedStore as any).db.prepare('PRAGMA foreign_keys').get() as any;
     assert.strictEqual(fkRow.foreign_keys, 1);
-    const fkCheck = migratedStore.db.prepare('PRAGMA foreign_key_check').all();
+    const fkCheck = (migratedStore as any).db.prepare('PRAGMA foreign_key_check').all();
     assert.deepStrictEqual(fkCheck, [], 'PRAGMA foreign_key_check must return empty');
 
     const legacyTask = migratedStore.getTaskScoped('LEG-1', 'default');
@@ -653,7 +651,7 @@ describe('Dupond correctness repairs regression suite', () => {
 
     // Re-running migration on already-migrated DB must be idempotent
     const secondBoot = new TaskStore(legacyDbPath);
-    assert.deepStrictEqual(secondBoot.db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.deepStrictEqual((secondBoot as any).db.prepare('PRAGMA foreign_key_check').all(), []);
     assert.ok(secondBoot.getTaskScoped('LEG-1', 'default'));
     assert.ok(secondBoot.getTaskScoped('LEG-1', 'proj-2'));
   });
