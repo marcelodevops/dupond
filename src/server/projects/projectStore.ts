@@ -208,25 +208,51 @@ export class ProjectStore {
     };
   }
 
-  public updateSourcePlanStatus(id: string, updates: {
-    status: PlanSourceStatus;
-    summary?: string;
-    errorMessage?: string;
-    breakdownJson?: string;
-  }): void {
+  public getSourcePlan(id: string): ProjectSourcePlan | null {
+    const row = this.db.prepare('SELECT * FROM project_source_plans WHERE id = ?').get(id) as any;
+    if (!row) return null;
+    return this.toSourcePlanView(row);
+  }
+
+  public updateSourcePlanStatus(
+    id: string,
+    updates: {
+      status: PlanSourceStatus;
+      summary?: string;
+      errorMessage?: string;
+      breakdownJson?: string;
+    },
+    projectId?: string,
+  ): void {
     const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE project_source_plans
-      SET status = ?, summary = COALESCE(?, summary), error_message = ?, breakdown_json = COALESCE(?, breakdown_json), updated_at = ?
-      WHERE id = ?
-    `).run(
-      updates.status,
-      updates.summary || null,
-      updates.errorMessage || null,
-      updates.breakdownJson || null,
-      now,
-      id
-    );
+    if (projectId) {
+      this.db.prepare(`
+        UPDATE project_source_plans
+        SET status = ?, summary = COALESCE(?, summary), error_message = ?, breakdown_json = COALESCE(?, breakdown_json), updated_at = ?
+        WHERE id = ? AND project_id = ?
+      `).run(
+        updates.status,
+        updates.summary || null,
+        updates.errorMessage || null,
+        updates.breakdownJson || null,
+        now,
+        id,
+        projectId,
+      );
+    } else {
+      this.db.prepare(`
+        UPDATE project_source_plans
+        SET status = ?, summary = COALESCE(?, summary), error_message = ?, breakdown_json = COALESCE(?, breakdown_json), updated_at = ?
+        WHERE id = ?
+      `).run(
+        updates.status,
+        updates.summary || null,
+        updates.errorMessage || null,
+        updates.breakdownJson || null,
+        now,
+        id,
+      );
+    }
   }
 
   public adoptPlan(input: {
@@ -261,6 +287,28 @@ export class ProjectStore {
     }
     if (!Array.isArray(input.epics) || input.epics.length === 0) {
       throw new ProjectApiError(400, 'INVALID_REQUEST', 'Plan must contain at least one epic.');
+    }
+
+    // Source-plan ownership & revision verification
+    if (input.sourcePlanId) {
+      const plan = this.getSourcePlan(input.sourcePlanId);
+      if (!plan) {
+        throw new ProjectApiError(404, 'SOURCE_PLAN_NOT_FOUND', `Source plan ${input.sourcePlanId} not found.`);
+      }
+      if (plan.projectId !== input.projectId) {
+        throw new ProjectApiError(
+          403,
+          'PROJECT_CONTEXT_MISMATCH',
+          `Source plan ${input.sourcePlanId} belongs to project ${plan.projectId}, not ${input.projectId}.`,
+        );
+      }
+      if (input.planRevision != null && plan.revision !== input.planRevision) {
+        throw new ProjectApiError(
+          409,
+          'PLAN_REVISION_MISMATCH',
+          `Source plan revision mismatch: expected ${input.planRevision}, got ${plan.revision}.`,
+        );
+      }
     }
 
     // 1. Dependency Validation & DAG Cycle Detection
@@ -319,6 +367,24 @@ export class ProjectStore {
 
     const now = new Date().toISOString();
     return this.txn(() => {
+      // Check for active execution runs or in-progress tasks before adoption
+      const activeRuns = this.db.prepare(`
+        SELECT count(*) as count FROM task_runs WHERE project_id = ? AND status IN ('pending', 'running')
+      `).get(input.projectId) as any;
+      if (activeRuns && activeRuns.count > 0) {
+        throw new ProjectApiError(409, 'ACTIVE_RUNS_PRESENT', `Cannot adopt plan while project ${input.projectId} has active task runs.`);
+      }
+
+      const inProgressTasks = this.db.prepare(`
+        SELECT count(*) as count FROM tasks WHERE project_id = ? AND status IN ('in_progress', 'review')
+      `).get(input.projectId) as any;
+      if (inProgressTasks && inProgressTasks.count > 0) {
+        throw new ProjectApiError(409, 'ACTIVE_TASKS_PRESENT', `Cannot adopt plan while project ${input.projectId} has tasks in progress or review.`);
+      }
+
+      // Authoritative state synchronization: remove existing unstarted tasks to prevent board divergence and ghost tasks
+      this.db.prepare("DELETE FROM tasks WHERE project_id = ? AND status IN ('todo', 'backlog')").run(input.projectId);
+
       // 2. Insert authoritative task rows
       const insertedTasks: any[] = [];
       for (const t of input.tasks) {
@@ -406,17 +472,51 @@ export class ProjectStore {
 
       // 3. Mark source plan as adopted if sourcePlanId is provided
       if (input.sourcePlanId) {
-        this.updateSourcePlanStatus(input.sourcePlanId, {
-          status: 'adopted',
-          summary: input.summary,
-        });
+        this.updateSourcePlanStatus(
+          input.sourcePlanId,
+          {
+            status: 'adopted',
+            summary: input.summary,
+          },
+          input.projectId,
+        );
       }
 
-      // 4. Project state to state_json
+      // 4. Project state to state_json - synchronized directly from authoritative SQLite tasks
+      const authoritativeDbTasks = this.store.listTasks(undefined, input.projectId);
+      const synchronizedTasks = authoritativeDbTasks.map((t) => {
+        const found = insertedTasks.find((it) => it.id === t.id);
+        if (found) return found;
+        return {
+          id: t.id,
+          key: t.key,
+          title: t.title,
+          description: t.description || '',
+          epicId: t.epicId || '',
+          status: t.status,
+          priority: t.priority,
+          estimatedHours: t.estimatedHours || 4,
+          spentHours: t.spentHours || 0,
+          assignedAgentId: t.claimedBy || '',
+          dependencies: [],
+          tags: [],
+          subtasks: (t.acceptanceCriteria || []).map((c) => ({
+            id: c.id,
+            title: c.title,
+            completed: Boolean(c.completed),
+            ...(c.checkCommand ? { checkCommand: c.checkCommand } : {}),
+          })),
+          acceptanceCriteria: t.acceptanceCriteria || [],
+          jiraSynced: false,
+          slackNotified: false,
+          lastUpdated: 'Just now',
+        };
+      });
+
       const currentState = this.getProjectState<any>(input.projectId, {});
       const nextState = {
         ...currentState,
-        tasks: insertedTasks,
+        tasks: synchronizedTasks,
         epics: input.epics,
         lastUpdated: now,
       };
