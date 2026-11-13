@@ -145,10 +145,30 @@ export class TaskStore {
   }
 
   // --- Task Methods ---
-  public createTask(task: Omit<TaskRecord, 'id' | 'createdAt' | 'updatedAt' | 'projectId'> & { id?: string; projectId?: string }): TaskRecord {
+  public createTask(
+    task: Partial<Omit<TaskRecord, 'id' | 'createdAt' | 'updatedAt' | 'projectId'>> & {
+      key: string;
+      title: string;
+      id?: string;
+      projectId?: string;
+    },
+  ): TaskRecord {
     const id = task.id || `task-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
     const record: TaskRecord = {
+      description: '',
+      status: 'todo',
+      priority: 'medium',
+      targetRepo: 'local',
+      baseCommit: 'HEAD',
+      allowedPaths: ['src/**'],
+      protectedPaths: [],
+      verificationCommands: [],
+      acceptanceCriteria: [],
+      workerConfig: { provider: 'default', model: 'default' },
+      maxAttempts: 3,
+      timeoutSeconds: 600,
+      requireApproval: true,
       ...task,
       id,
       projectId: task.projectId || 'default',
@@ -389,6 +409,7 @@ export class TaskStore {
     taskId: string,
     updates: Partial<Pick<TaskRecord, 'acceptanceCriteria' | 'verificationCommands' | 'protectedPaths' | 'description'>>,
     actor: string = 'system',
+    projectId?: string,
   ): {
     updated: boolean;
     bindingChanged: boolean;
@@ -396,7 +417,7 @@ export class TaskStore {
     revokedAcceptanceFrom?: TaskRecord['status'];
   } {
     return this.transaction(() => {
-      const current = this.getTask(taskId);
+      const current = projectId ? this.getTaskScoped(taskId, projectId) : this.getTask(taskId);
       if (!current) return { updated: false, bindingChanged: false, invalidatedApprovalRunIds: [] };
 
       const before = computeEvidenceBinding(current);

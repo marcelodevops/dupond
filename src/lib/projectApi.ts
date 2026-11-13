@@ -14,6 +14,7 @@ import { apiFetch, registerProjectHeaderProvider } from './api';
 import {
   Project,
   ProjectSummary,
+  ProjectRepositoryConfig,
   CreateProjectRequest,
   UpdateProjectRequest,
   ArchiveProjectResponse,
