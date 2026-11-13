@@ -103,13 +103,15 @@ app.post('/api/orchestrate/state', (req: Request, res: Response) => {
 // Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
 app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Response) => {
   try {
-    const taskProjectId = taskStore.getProjectIdForTask(req.params.id);
+    const dbProjectId = taskStore.getProjectIdForTask(req.params.id);
+    const inCoordinator = coordinator.getState().tasks.some((t) => t.id === req.params.id || t.key === req.params.id);
+    const taskProjectId = dbProjectId || (inCoordinator ? 'default' : null);
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: 'status is required' });
 
-    const result = await coordinator.transitionTaskStatus(req.params.id, status);
+    const result = await coordinator.transitionTaskStatus(req.params.id, status, projectId);
     if (!result.success) {
       return res.status(422).json(result);
     }
@@ -238,6 +240,9 @@ app.post('/api/orchestrate/parse-plan', async (req: Request, res: Response) => {
 // Endpoint: AI-driven resource allocation & workload balancing (Connected to AEG-104 module)
 app.post('/api/orchestrate/allocate-resources', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { tasks = [], agents = [] } = req.body;
 
     if (tasks.length === 0 || agents.length === 0) {
@@ -370,6 +375,9 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
 // Endpoint: Automated status reporting for stakeholders
 app.post('/api/orchestrate/generate-report', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { tasks = [], agents = [], sprintNumber = 1, period = 'Current Sprint' } = req.body;
 
     const result = await generateStakeholderReport(tasks, agents, sprintNumber, period);
@@ -500,6 +508,9 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
 // Endpoint: Real Interactive Chat with Dupond Chief Orchestrator
 app.post('/api/orchestrate/chat', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { message, orchestratorConfig, tasks = [], agents = [] } = req.body;
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'message is required' });
@@ -515,6 +526,9 @@ app.post('/api/orchestrate/chat', async (req: Request, res: Response) => {
 // Endpoint: AI-Assisted Dynamic Role Suggestion
 app.post('/api/orchestrate/suggest-role', async (req: Request, res: Response) => {
   try {
+    const projectId = projectContext(req, res);
+    if (!projectId) return;
+
     const { agent, tasks = [], communications = [] } = req.body;
     if (!agent) return res.status(400).json({ error: 'agent is required' });
 
