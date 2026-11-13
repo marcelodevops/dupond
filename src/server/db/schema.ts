@@ -30,6 +30,9 @@ export interface TaskRecord {
   claimedAt?: string | null;
   sourcePlanId?: string | null;
   planRevision?: number | null;
+  dependencies?: string[]; // JSON array of task keys/IDs
+  tags?: string[]; // JSON array
+  recommendedRole?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -202,6 +205,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   claimed_at TEXT,
   source_plan_id TEXT,
   plan_revision INTEGER,
+  dependencies TEXT NOT NULL DEFAULT '[]',
+  tags TEXT NOT NULL DEFAULT '[]',
+  recommended_role TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE (project_id, key)
