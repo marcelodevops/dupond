@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/marcelodevops/dupond/compare/v0.8.0...v0.8.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **projects:** project correctness repairs ([adcf543](https://github.com/marcelodevops/dupond/commit/adcf54352df0a08724243e8acdd4647b4793ce3e))
+* **server:** check default coordinator tasks for cross-project transition mismatch ([251bda6](https://github.com/marcelodevops/dupond/commit/251bda6e398730c6b6a7573aeefcf8ce8c8b954b))
+
 ## [0.8.0](https://github.com/marcelodevops/dupond/compare/v0.7.1...v0.8.0) (2026-11-13)
 
 
