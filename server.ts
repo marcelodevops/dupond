@@ -30,7 +30,7 @@ import { defaultLifecycleService } from './src/server/lifecycle/lifecycleService
 import { handleRepositoryDispatch } from './src/server/deliveryHandler.js';
 import { taskStore } from './src/server/db/database.js';
 import { defaultGitHubDelivery } from './src/server/delivery/githubDelivery.js';
-import { requireAuth } from './src/server/auth.js';
+import { requireAuth, requireApprovalCredential } from './src/server/auth.js';
 import { hasGeminiKey } from './src/server/gemini.js';
 import { parsePlan } from './src/server/planning/planBreakdown.js';
 import { allocateResources } from './src/server/planning/resourceAllocation.js';
@@ -444,7 +444,7 @@ app.post('/api/integrations/slack/dispatch', async (req: Request, res: Response)
 });
 
 // Endpoint: Destination Repository & Delivery Dispatcher
-app.post('/api/integrations/repository/dispatch', async (req: Request, res: Response) => {
+app.post('/api/integrations/repository/dispatch', requireApprovalCredential, async (req: Request, res: Response) => {
   try {
     const { action = 'verify', repoConfig, task, allowOverwrite = false, runId, isApproved = false, approvedBy } = req.body || {};
     const requestedProjectId = parseProjectContextHeader(req) || undefined;
@@ -486,7 +486,7 @@ app.post('/api/integrations/repository/dispatch', async (req: Request, res: Resp
 });
 
 // Endpoint: Explicit Pull Request Delivery Dispatcher
-app.post('/api/delivery/dispatch', async (req: Request, res: Response) => {
+app.post('/api/delivery/dispatch', requireApprovalCredential, async (req: Request, res: Response) => {
   try {
     const { runId, isApproved = false, approvedBy, repoUrl, targetBaseBranch } = req.body || {};
     if (!runId) return res.status(400).json({ error: 'runId is required' });

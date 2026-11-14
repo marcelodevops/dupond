@@ -49,6 +49,55 @@ export function validateAuthToken(token: string | undefined | null): boolean {
 }
 
 /**
+ * Distinct operator approval credential. The API token grants execution; only
+ * this token (when configured) may grant delivery approval, so the approval
+ * recorded on the audit trail is backed by a capability the execution callers
+ * do not hold.
+ */
+export function getApprovalToken(): string | null {
+  const token = process.env.DUPOND_APPROVAL_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
+
+export function validateApprovalToken(token: string | undefined | null): boolean {
+  const expected = getApprovalToken();
+  if (!expected || !token) return false;
+  const clean = token.replace(/^Bearer\s+/i, '').trim();
+  if (clean.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(clean), Buffer.from(expected));
+}
+
+/**
+ * Middleware for delivery-dispatch endpoints: requests that attempt to approve
+ * a delivery (isApproved: true) must present the operator approval credential
+ * via X-Dupond-Approval-Token. Fails closed when no approval credential is
+ * configured; unapproved dispatches are unaffected.
+ */
+export function requireApprovalCredential(req: Request, res: Response, next: NextFunction): void {
+  const body = (req.body || {}) as { isApproved?: unknown };
+  if (body.isApproved !== true) return next();
+
+  if (!getApprovalToken()) {
+    res.status(503).json({
+      error: 'Approval credential not configured: set DUPOND_APPROVAL_TOKEN to enable operator approval via the API.',
+      code: 'APPROVAL_CREDENTIAL_UNCONFIGURED',
+    });
+    return;
+  }
+
+  const header = req.header('X-Dupond-Approval-Token') || req.header('Authorization');
+  if (!header || !validateApprovalToken(header)) {
+    res.status(403).json({
+      error: 'Forbidden: approving a delivery requires the operator approval credential via X-Dupond-Approval-Token.',
+      code: 'APPROVAL_CREDENTIAL_REQUIRED',
+    });
+    return;
+  }
+
+  next();
+}
+
+/**
  * Authentication middleware for mutating and executing endpoints.
  * Requires Authorization: Bearer <token> or X-Dupond-Token: <token>.
  */

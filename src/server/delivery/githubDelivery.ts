@@ -608,8 +608,11 @@ ${task.acceptanceCriteria.map((c) => `- [x] ${c.title}`).join('\n')}
       prNumber,
       prUrl,
       ciStatus,
-      approvalStatus: 'approved',
-      approvedBy: options.approvedBy || 'authorized-operator',
+      // Honest approval record: a task that does not require approval is
+      // delivered without operator sign-off, so the audit trail must not
+      // fabricate an approval identity that never consented.
+      approvalStatus: task.requireApproval ? 'approved' : 'not_required',
+      approvedBy: task.requireApproval ? options.approvedBy : undefined,
     }, approvalExpectation);
 
     if (task.requireApproval && deliveryRecord.approvalStatus !== 'approved') {
