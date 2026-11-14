@@ -3,6 +3,8 @@ import http from 'http';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { z } from 'zod';
+import { isSafeGitRef } from './src/server/utils/gitRefs.js';
 
 dotenv.config();
 
@@ -49,6 +51,37 @@ import { createProjectRouter, parseProjectContextHeader } from './src/server/pro
 import { defaultProjectStore, ProjectApiError } from './src/server/projects/projectStore.js';
 
 app.use(requireAuth);
+
+// Security-critical field validation for /api/orchestrate/agent-step. The task
+// blob is client-supplied and flows into run ids, worktree paths, branch names,
+// and git argv (via task.key / task.baseCommit), so its identifiers must be
+// safe path components / safe git refs. Remaining fields pass through.
+const AgentStepTaskSchema = z.object({
+  key: z.string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'task.key must be a safe identifier (letters, digits, underscore, dash)')
+    .max(64),
+  baseCommit: z.string().max(256)
+    .refine(isSafeGitRef, 'task.baseCommit must be a valid git revision')
+    .optional(),
+  targetBranch: z.string().max(256)
+    .refine(isSafeGitRef, 'task.targetBranch must be a valid git refname')
+    .optional(),
+  targetRepo: z.string().max(300).optional(),
+  targetRepoPath: z.string().max(1024).optional(),
+  status: z.string().max(32).optional(),
+  title: z.string().max(300).optional(),
+  description: z.string().max(20000).optional(),
+  allowedPaths: z.array(z.string().max(512)).max(50).optional(),
+  protectedPaths: z.array(z.string().max(512)).max(50).optional(),
+  verificationCommands: z.array(z.unknown()).max(20).optional(),
+  acceptanceCriteria: z.array(z.unknown()).max(200).optional(),
+  subtasks: z.array(z.unknown()).max(200).optional(),
+}).passthrough();
+
+const AgentStepAgentSchema = z.object({
+  role: z.string().max(120).optional(),
+  name: z.string().max(120).optional(),
+}).passthrough();
 app.use('/api', createProjectRouter({
   onProjectStateMutated: (projectId) => coordinator.reloadState(projectId),
 }));
@@ -280,7 +313,16 @@ app.post('/api/orchestrate/allocate-resources', async (req: Request, res: Respon
 // Endpoint: Agent step execution (Enforced via coordinator quality gate)
 app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
   try {
-    const { task, agent } = req.body;
+    const rawTask = AgentStepTaskSchema.safeParse(req.body?.task);
+    const rawAgent = AgentStepAgentSchema.safeParse(req.body?.agent);
+    if (!rawTask.success || !rawAgent.success) {
+      const detail = [...(rawTask.success ? [] : rawTask.error.issues), ...(rawAgent.success ? [] : rawAgent.error.issues)]
+        .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('; ');
+      return res.status(400).json({ error: `Invalid agent-step request: ${detail}` });
+    }
+    const task = rawTask.data as Record<string, any>;
+    const agent = rawAgent.data as Record<string, any>;
 
     if (!task || !agent) {
       return res.status(400).json({ error: 'task and agent are required' });
@@ -294,7 +336,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
 
     try {
       // Execute the real worker step through the central coordinator
-      const workerResult = await coordinator.executeWorkerStep(task, agent, projectId);
+      const workerResult = await coordinator.executeWorkerStep(task as any, agent as any, projectId);
 
       // Store-backed tasks advance only through the authoritative lifecycle
       // service: Review requires evidence bound to the current spec, and Done
@@ -353,7 +395,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
           deliverables: [...(task.deliverables || []), workerResult.deliverableContent],
         };
 
-        const verification = await coordinator.verifyTaskQualityGates(taskForVerification);
+        const verification = await coordinator.verifyTaskQualityGates(taskForVerification as any);
         if (!verification.passed) {
           const failedRules = verification.checks
             .filter((c: any) => !c.passed)

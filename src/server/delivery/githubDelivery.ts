@@ -11,6 +11,7 @@ import {
   verifiedRefForRun,
 } from '../verification/evidenceBinding.js';
 import { LifecycleService } from '../lifecycle/lifecycleService.js';
+import { isSafeGitRef } from '../utils/gitRefs.js';
 import { normalizeRepoSlug, isLocalRemoteOrigin, areRepoSlugsCompatible } from '../workspace/targetRepositoryResolver.js';
 
 export interface DispatchDeliveryOptions {
@@ -47,6 +48,18 @@ export class GitHubDeliveryService {
   }
 
   public async dispatchDelivery(options: DispatchDeliveryOptions): Promise<DispatchDeliveryResult> {
+    // The base branch reaches `git fetch` and `gh pr create --base` argv from
+    // HTTP request bodies; a value like `--upload-pack=<cmd>` would be parsed
+    // as a git option. Fail closed on anything that is not a plain refname.
+    if (options.targetBaseBranch !== undefined && !isSafeGitRef(options.targetBaseBranch)) {
+      return {
+        success: false,
+        status: 400,
+        blocked: true,
+        error: `Delivery blocked: targetBaseBranch "${options.targetBaseBranch}" is not a valid git refname.`,
+      };
+    }
+
     const run = this.store.getRun(options.runId);
     if (!run) {
       return { success: false, status: 404, error: `Run ${options.runId} not found` };
