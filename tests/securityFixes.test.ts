@@ -1,7 +1,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert';
 import { coordinator, isMaskedSecret } from '../src/server/coordinator.ts';
-import { validateAuthToken, getExpectedToken, requireAuth } from '../src/server/auth.ts';
+import { validateAuthToken, getExpectedToken, requireAuth, requireApprovalCredential, getApprovalToken, validateApprovalToken } from '../src/server/auth.ts';
 
 async function main() {
   console.log('=== RUNNING SECURITY & CORRECTNESS REGRESSION TESTS ===\n');
@@ -118,6 +118,77 @@ async function main() {
   requireAuth(authedReq, mockRes, () => { nextCalled = true; });
   assert.strictEqual(nextCalled, true, 'requireAuth must allow valid Bearer token');
   console.log('✔ [PASS] requireAuth middleware enforces 401 on unauthorized API requests');
+
+  // Test 7: Approval credential validation (distinct from the API token)
+  const approvalSentinel = 'dp_approval_secret_test_credential_0123456789';
+  process.env.DUPOND_APPROVAL_TOKEN = approvalSentinel;
+  try {
+    assert.strictEqual(getApprovalToken(), approvalSentinel, 'Approval token read from environment');
+    assert.strictEqual(validateApprovalToken(approvalSentinel), true, 'Valid approval token accepted');
+    assert.strictEqual(validateApprovalToken(`Bearer ${approvalSentinel}`), true, 'Bearer approval token accepted');
+    assert.strictEqual(validateApprovalToken(token), false, 'API token must not satisfy the approval credential');
+    assert.strictEqual(validateApprovalToken(''), false, 'Empty approval token rejected');
+    assert.strictEqual(validateApprovalToken(undefined), false, 'Undefined approval token rejected');
+
+    // Test 8: requireApprovalCredential gates only approval attempts (isApproved: true)
+    const approvalRes: any = {
+      code: 0,
+      status(code: number) {
+        this.code = code;
+        return { json: () => {} };
+      },
+    };
+    const approvalNext = () => { approvalNextCalled = true; };
+    let approvalNextCalled = false;
+
+    // 8a: Unapproved dispatch passes without the credential
+    requireApprovalCredential({ body: { isApproved: false }, header: () => undefined } as any, approvalRes, approvalNext);
+    assert.strictEqual(approvalNextCalled, true, 'Unapproved dispatch must not require the approval credential');
+
+    // 8b: Approval attempt without the credential is refused with 403
+    approvalNextCalled = false;
+    requireApprovalCredential({ body: { isApproved: true }, header: () => undefined } as any, approvalRes, approvalNext);
+    assert.strictEqual(approvalRes.code, 403, 'Approval attempt without credential must be refused with 403');
+    assert.strictEqual(approvalNextCalled, false, 'Approval attempt without credential must not proceed');
+
+    // 8c: Approval attempt with the API token is refused (distinct capability)
+    approvalNextCalled = false;
+    requireApprovalCredential(
+      { body: { isApproved: true }, header: (n: string) => (n.toLowerCase() === 'x-dupond-approval-token' ? token : undefined) } as any,
+      approvalRes,
+      approvalNext,
+    );
+    assert.strictEqual(approvalRes.code, 403, 'API token must not be accepted as the approval credential');
+    assert.strictEqual(approvalNextCalled, false, 'API-token approval attempt must not proceed');
+
+    // 8d: Approval attempt with the correct approval credential proceeds
+    approvalNextCalled = false;
+    requireApprovalCredential(
+      { body: { isApproved: true }, header: (n: string) => (n.toLowerCase() === 'x-dupond-approval-token' ? approvalSentinel : undefined) } as any,
+      approvalRes,
+      approvalNext,
+    );
+    assert.strictEqual(approvalNextCalled, true, 'Correct approval credential must proceed');
+
+    console.log('✔ [PASS] requireApprovalCredential enforces a distinct operator approval credential');
+
+    // Test 9: Approval gate fails closed when no approval credential is configured
+    delete process.env.DUPOND_APPROVAL_TOKEN;
+    approvalNextCalled = false;
+    const unconfiguredRes: any = {
+      code: 0,
+      status(code: number) {
+        this.code = code;
+        return { json: () => {} };
+      },
+    };
+    requireApprovalCredential({ body: { isApproved: true }, header: () => approvalSentinel } as any, unconfiguredRes, approvalNext);
+    assert.strictEqual(unconfiguredRes.code, 503, 'Approval must fail closed when DUPOND_APPROVAL_TOKEN is unconfigured');
+    assert.strictEqual(approvalNextCalled, false, 'Unconfigured approval credential must not proceed');
+    console.log('✔ [PASS] Approval gate fails closed when the approval credential is unconfigured');
+  } finally {
+    delete process.env.DUPOND_APPROVAL_TOKEN;
+  }
 
   // Clean up test task
   coordinator.updateState({
