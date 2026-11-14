@@ -1,4 +1,6 @@
 import { DomainError } from '../utils/errors';
+import { isSafeGitRef } from '../utils/gitRefs.js';
+import { isSafePathSegment, isPathLexicallyContained } from '../artifactPaths.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
@@ -32,8 +34,25 @@ export class WorkspaceManager {
    * Prepares an isolated Git worktree pinned to the given base commit.
    */
   public createWorktree(runId: string, branchName: string, baseCommit: string): WorktreeInfo {
+    // runId becomes a path component under worktreesRoot: a key like `../../x`
+    // must not be able to place (or delete via cleanup) worktrees outside the
+    // managed root. Branch names and base commits become git argv: leading
+    // dashes would be parsed as git options.
+    if (!isSafePathSegment(runId)) {
+      throw new DomainError(`Worktree blocked: run id "${runId}" is not a safe path component (letters, digits, underscore, dash only).`);
+    }
+    if (!isSafeGitRef(branchName)) {
+      throw new DomainError(`Worktree blocked: branch name "${branchName}" is not a valid git refname.`);
+    }
+    if (!isSafeGitRef(baseCommit)) {
+      throw new DomainError(`Worktree blocked: base commit "${baseCommit}" is not a valid git revision.`);
+    }
+
     this.ensureWorktreesRoot();
     const worktreePath = path.resolve(this.worktreesRoot, runId);
+    if (!isPathLexicallyContained(this.worktreesRoot, worktreePath) || worktreePath === path.resolve(this.worktreesRoot)) {
+      throw new DomainError(`Worktree blocked: resolved worktree path escapes the managed worktrees root.`);
+    }
 
     // If a worktree already exists at this path from an interrupted run, clean it up first
     if (fs.existsSync(worktreePath)) {

