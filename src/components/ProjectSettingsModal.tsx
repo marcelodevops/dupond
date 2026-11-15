@@ -63,6 +63,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   const [planningReadiness, setPlanningReadiness] = useState<PlanningReadiness | null>(null);
   const [geminiStatus, setGeminiStatus] = useState<GeminiCredentialStatus | null>(null);
   const [isLoadingReadiness, setIsLoadingReadiness] = useState(false);
+  const [readinessLoadError, setReadinessLoadError] = useState<string | null>(null);
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [isSavingGemini, setIsSavingGemini] = useState(false);
   const [isDeletingGemini, setIsDeletingGemini] = useState(false);
@@ -97,9 +98,17 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
 
   // Load planning readiness and Gemini credential status on open
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setPlanningReadiness(null);
+      setGeminiStatus(null);
+      setReadinessLoadError(null);
+      return;
+    }
     let mounted = true;
     setIsLoadingReadiness(true);
+    setReadinessLoadError(null);
+    setPlanningReadiness(null);
+    setGeminiStatus(null);
     Promise.all([
       projectApi.getPlanningReadiness(),
       projectApi.getGeminiCredentialStatus(),
@@ -108,17 +117,14 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
         if (mounted) {
           setPlanningReadiness(readinessRes);
           setGeminiStatus(credRes);
+          setReadinessLoadError(null);
         }
       })
       .catch((err) => {
         if (mounted) {
-          setPlanningReadiness({
-            provider: 'gemini',
-            model: 'gemini-3.8-flash',
-            ready: false,
-            error: err.message || 'Failed to read provider readiness',
-          });
-          setGeminiError(err.message || 'Failed to load Gemini credential status.');
+          const msg = err?.message || 'Failed to load Gemini credential status.';
+          setReadinessLoadError(msg);
+          setGeminiError(msg);
         }
       })
       .finally(() => {
@@ -460,8 +466,21 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                     <span className="font-semibold text-white">Gemini API Credential</span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {isLoadingReadiness ? (
-                      <RotateCw className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                    {isLoadingReadiness || (!geminiStatus && !readinessLoadError) ? (
+                      <span
+                        data-testid="gemini-saved-badge"
+                        className="px-2 py-0.5 rounded text-[10px] font-bold border bg-slate-800/80 text-slate-300 border-slate-700 inline-flex items-center gap-1"
+                      >
+                        <RotateCw className="w-3 h-3 animate-spin text-slate-400" />
+                        <span>Loading...</span>
+                      </span>
+                    ) : readinessLoadError && !geminiStatus ? (
+                      <span
+                        data-testid="gemini-saved-badge"
+                        className="px-2 py-0.5 rounded text-[10px] font-bold border bg-rose-500/20 text-rose-300 border-rose-500/30"
+                      >
+                        Status Unavailable
+                      </span>
                     ) : (
                       <>
                         <span
@@ -688,8 +707,15 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                     <Cpu className="w-4 h-4 text-indigo-400" />
                     <span className="font-semibold text-white">AI Planning Readiness</span>
                   </div>
-                  {isLoadingReadiness ? (
-                    <RotateCw className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                  {isLoadingReadiness || (!planningReadiness && !readinessLoadError) ? (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700 inline-flex items-center gap-1">
+                      <RotateCw className="w-3 h-3 animate-spin text-slate-400" />
+                      <span>Checking...</span>
+                    </span>
+                  ) : readinessLoadError && !planningReadiness ? (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                      Error
+                    </span>
                   ) : planningReadiness?.ready ? (
                     <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                       Ready

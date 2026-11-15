@@ -41,6 +41,8 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
   const [isDecomposing, setIsDecomposing] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [readiness, setReadiness] = useState<PlanningReadiness | null>(null);
+  const [isLoadingReadiness, setIsLoadingReadiness] = useState<boolean>(false);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
   const [sourcePlanId, setSourcePlanId] = useState<string | null>(null);
   const [sourcePlanRevision, setSourcePlanRevision] = useState<number | null>(null);
   const [parsedResult, setParsedResult] = useState<{
@@ -57,22 +59,31 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
 
   // Fetch planning readiness on modal open or credential refresh
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setReadiness(null);
+      setReadinessError(null);
+      setIsLoadingReadiness(false);
+      return;
+    }
     let mounted = true;
+    setIsLoadingReadiness(true);
+    setReadinessError(null);
     projectApi
       .getPlanningReadiness()
       .then((data) => {
-        if (mounted) setReadiness(data);
+        if (mounted) {
+          setReadiness(data);
+          setReadinessError(null);
+        }
       })
       .catch((err) => {
         if (mounted) {
-          setReadiness({
-            provider: 'gemini',
-            model: 'gemini-3.8-flash',
-            ready: false,
-            error: err.message || 'Could not verify planning service status.',
-          });
+          setReadiness(null);
+          setReadinessError(err?.message || 'Could not verify planning service status.');
         }
+      })
+      .finally(() => {
+        if (mounted) setIsLoadingReadiness(false);
       });
     return () => {
       mounted = false;
@@ -200,13 +211,24 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
         {/* Modal Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1">
           {/* Provider Readiness Status Bar */}
-          <div className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-3 ${
-            readiness?.ready
-              ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-300'
-              : 'bg-amber-950/30 border-amber-800/60 text-amber-300'
-          }`}>
+          <div
+            data-testid="plan-readiness-bar"
+            className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-3 ${
+              isLoadingReadiness || (!readiness && !readinessError)
+                ? 'bg-slate-900/60 border-slate-700 text-slate-300'
+                : readinessError
+                  ? 'bg-rose-950/30 border-rose-800/60 text-rose-300'
+                  : readiness?.ready
+                    ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-300'
+                    : 'bg-amber-950/30 border-amber-800/60 text-amber-300'
+            }`}
+          >
             <div className="flex items-center space-x-2">
-              {readiness?.ready ? (
+              {isLoadingReadiness || (!readiness && !readinessError) ? (
+                <RotateCw className="w-4 h-4 text-slate-400 animate-spin shrink-0" />
+              ) : readinessError ? (
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : readiness?.ready ? (
                 <Check className="w-4 h-4 text-emerald-400 shrink-0" />
               ) : (
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
@@ -214,7 +236,11 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
               <span>
                 <strong>Planning Engine:</strong> {readiness?.provider || 'gemini'} ({readiness?.model || 'gemini-3.8-flash'})
                 {' — '}
-                {readiness?.ready ? (
+                {isLoadingReadiness || (!readiness && !readinessError) ? (
+                  <span className="text-slate-300 font-semibold">Checking readiness...</span>
+                ) : readinessError ? (
+                  <span className="text-rose-300 font-semibold">Readiness Check Failed ({readinessError})</span>
+                ) : readiness?.ready ? (
                   <span className="text-emerald-400 font-semibold">
                     Ready for decomposition ({readiness.source === 'environment' ? 'env key' : 'saved key'})
                   </span>
@@ -324,8 +350,14 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
           <div className="flex justify-center">
             <button
               onClick={handleDecomposePlan}
-              disabled={isDecomposing || !planTextInput.trim() || readiness?.ready === false}
-              title={readiness?.ready === false ? 'GEMINI_API_KEY must be configured on the server' : undefined}
+              disabled={isDecomposing || !planTextInput.trim() || !readiness?.ready}
+              title={
+                !readiness
+                  ? readinessError || 'Checking planning readiness...'
+                  : readiness.ready === false
+                    ? 'A Gemini API key must be configured on the server'
+                    : undefined
+              }
               className="flex items-center space-x-2 px-6 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white text-xs font-bold rounded-xl shadow-lg shadow-indigo-600/30 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isDecomposing ? (
