@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.9.0](https://github.com/marcelodevops/dupond/compare/v0.8.4...v0.9.0) (2026-11-15)
+
+
+### Features
+
+* **credentials:** add encrypted app_credentials store and key rotation support ([2c91059](https://github.com/marcelodevops/dupond/commit/2c910599e357f95de2c2a97b2c8c2158ed055d18))
+* **gemini:** add encrypted Gemini credential onboarding and browser verification ([8982fce](https://github.com/marcelodevops/dupond/commit/8982fce1480900f828b6c3da94bd9ec175d87704))
+* **gemini:** unify credential resolver, cache invalidation, and credential API ([ded91f5](https://github.com/marcelodevops/dupond/commit/ded91f56e7b540982dcb8654af4a52a4559d60cf))
+* **ui:** add Gemini credential management in settings and onboarding from plan ingestion ([a458ed6](https://github.com/marcelodevops/dupond/commit/a458ed64d7b794981e97e88ba4acdf098c0847b5))
+
+
+### Bug Fixes
+
+* **crypto:** fail closed on key persistence failure and serialize concurrent first-key creation ([14e0462](https://github.com/marcelodevops/dupond/commit/14e04629a36eed195e9bef1ca8f1e5ff43509e4e))
+* **e2e:** settle delayed route continuation before unrouting ([edfc958](https://github.com/marcelodevops/dupond/commit/edfc958a9dc31a3c19b10337a7b2670cfccc8761))
+* **e2e:** terminate server process group and wait for port release before restart ([8a3fb54](https://github.com/marcelodevops/dupond/commit/8a3fb54b35fff27fffa14aa61d46a35f820d95f5))
+* **gemini:** bind credential test outcomes to version, fingerprint, and model ([4f4333d](https://github.com/marcelodevops/dupond/commit/4f4333d718214fc8231720ae36721b7622ae3bb8))
+* **ui:** refresh projects on operator auth and allow readiness settings before project load ([fad1b84](https://github.com/marcelodevops/dupond/commit/fad1b8480b79b2850d4f6598b9a50869e9a96dbd))
+* **ui:** represent loading and error readiness states explicitly instead of Not Configured ([39f7a51](https://github.com/marcelodevops/dupond/commit/39f7a51355cd4da85e461c276b96fdea8318a9d2))
+
 ## [0.8.4](https://github.com/marcelodevops/dupond/compare/v0.8.3...v0.8.4) (2026-11-15)
 
 
