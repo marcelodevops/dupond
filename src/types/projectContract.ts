@@ -145,10 +145,43 @@ export interface AdoptPlanResponse {
   epics: any[];
 }
 
+export type GeminiCredentialSource = 'environment' | 'saved' | 'none';
+export type GeminiTestOutcome = 'passed' | 'failed';
+
+export interface GeminiCredentialStatus {
+  provider: 'gemini';
+  model: string;
+  source: GeminiCredentialSource;
+  configured: boolean;
+  ready: boolean;
+  hasSavedKey: boolean;
+  environmentControlled: boolean;
+  scope: 'application';
+  lastTestedAt: string | null;
+  lastTestOutcome: GeminiTestOutcome | null;
+  lastTestError: string | null;
+  error?: string;
+}
+
+export interface GeminiTestResult {
+  ok: boolean;
+  source: GeminiCredentialSource;
+  model: string;
+  testedAt: string;
+  error?: string;
+}
+
 export interface PlanningReadiness {
   provider: string;
   model: string;
   ready: boolean;
+  configured?: boolean;
+  source?: GeminiCredentialSource;
+  hasSavedKey?: boolean;
+  environmentControlled?: boolean;
+  lastTestedAt?: string | null;
+  lastTestOutcome?: GeminiTestOutcome | null;
+  lastTestError?: string | null;
   error?: string;
 }
 
