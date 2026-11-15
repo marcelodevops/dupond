@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.3](https://github.com/marcelodevops/dupond/compare/v0.8.2...v0.8.3) (2026-11-15)
+
+
+### Bug Fixes
+
+* **security:** crash-recoverable connection-key rotation ([6250501](https://github.com/marcelodevops/dupond/commit/6250501394235517b298b5de11f66699f545c913))
+* **security:** enforce app exclusion, snapshot validation, and recovery identity ([f42d3a0](https://github.com/marcelodevops/dupond/commit/f42d3a06a650c2585d3c7428cbad4cf6dc42c0bf))
+* **security:** implement crash-recoverable connection-key rotation ([852a724](https://github.com/marcelodevops/dupond/commit/852a7242424020ca2af41d22fa9f00719b88da05))
+* **security:** refuse ambiguous missing-metadata recovery when .next exists ([a3f2285](https://github.com/marcelodevops/dupond/commit/a3f2285983ef5fa1f57c38f99559ba980f7c6ac4))
+* **types:** resolve TypeScript checks in rotateConnKey and tests ([8e2b2d0](https://github.com/marcelodevops/dupond/commit/8e2b2d07c0b22805cfba368d6ea1b6f77309d3ca))
+
 ## [0.8.2](https://github.com/marcelodevops/dupond/compare/v0.8.1...v0.8.2) (2026-11-15)
 
 
