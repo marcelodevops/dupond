@@ -54,7 +54,7 @@ function setupFixture(dir: string, secrets: Array<{ id: string; token: string; l
   const proj = projectStore.createProject({ name: 'Synthetic Project', actor: 'test' });
 
   const now = new Date().toISOString();
-  const insert = taskStore.db.prepare(`
+  const insert = (taskStore as any).db.prepare(`
     INSERT INTO jira_connections (id, project_id, host_url, user_email, api_token_enc, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
@@ -62,7 +62,7 @@ function setupFixture(dir: string, secrets: Array<{ id: string; token: string; l
     const stored = s.legacyPlaintext ? s.token : encryptSynthetic(s.token, initialKey);
     insert.run(s.id, proj.id, 'https://example.atlassian.net', 'bot@example.test', stored, now, now);
   }
-  taskStore.db.close();
+  (taskStore as any).db.close();
 
   return { keyPath, dbPath, initialKey, projectId: proj.id };
 }
@@ -305,7 +305,7 @@ describe('scripts/rotateConnKey.ts safe rotation & recovery', () => {
       assert.ok(readBack);
       assert.strictEqual(readBack.apiToken, sec1);
     } finally {
-      taskStore.db.close();
+      (taskStore as any).db.close();
     }
   });
 
