@@ -69,9 +69,10 @@ npx tsx scripts/rotateConnKey.ts --recover
 ```
 
 Recovery validates the `.state.json` schema (`version === 1`), verifies that the current `dbPath` and `keyPath` match the recorded paths, and verifies that candidate keys match the recorded `oldKeyFingerprint`/`newKeyFingerprint` before touching the active key. It then probes the database (read-only) against `.prev` and `.next`:
-- **Partial staging before `.state.json` creation:** If interrupted before `.state.json` was written, conservative recovery checks whether `.prev` matches the active key and all DB rows decrypt cleanly, and rolls back partial staging artifacts.
-- **DB did not commit** (rows still decrypt with `.prev`): restores `.prev` atomically to `data/.dupond_conn_key` if needed, verifies all rows decrypt, and cleans up staging files.
-- **DB already committed** (rows decrypt with `.next`): atomically replaces `data/.dupond_conn_key` with `.next`, verifies all rows decrypt, and cleans up staging files.
+- **Partial early staging before `.next` and `.state.json` creation:** If interrupted when only `.prev` exists (no `.next`, no `.state.json`), automatic rollback is permitted **only** if the active key is intact, matches `.prev`, and decrypts every row in `jira_connections`.
+- **Missing `.state.json` when `.next` exists:** `--recover` **refuses** to modify the active key or delete any recovery files (even if the supplied DB has zero encrypted rows or decrypts with a candidate key), because database identity and commit stage cannot be verified without `.state.json`. **Manual recovery procedure:** confirm which database was being rotated, check which candidate key (`.prev` vs `.next`) decrypts its `jira_connections` rows, and atomically restore that key (`0600`) to `data/.dupond_conn_key` before cleaning up `.prev`/`.next`/`.lock`.
+- **DB did not commit** (with valid `.state.json`, rows decrypt with `.prev`): restores `.prev` atomically to `data/.dupond_conn_key` if needed, verifies all rows decrypt, and cleans up staging files.
+- **DB already committed** (with valid `.state.json`, rows decrypt with `.next`): atomically replaces `data/.dupond_conn_key` with `.next`, verifies all rows decrypt, and cleans up staging files.
 - **Ambiguous/corrupt/mismatched state** (path mismatch, fingerprint mismatch, malformed state file, or neither key decrypts all rows): aborts with a non-zero exit code and preserves all recovery files for manual inspection.
 
 **When recovery material can safely be removed:** Only after `npx tsx scripts/rotateConnKey.ts --verify` (or `--recover`) exits `0` and confirms the active key decrypts every row in `jira_connections`. Never delete `.prev`, `.next`, or `.state.json` manually prior to verification.
