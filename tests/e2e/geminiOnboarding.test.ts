@@ -360,7 +360,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
 
       // Close settings -> back on Plan Ingestion; plan text preserved; no auto-ingest happened
-      await page.getByRole('button', { name: 'Cancel' }).last().click();
+      await page.getByTestId('close-app-settings-btn').click();
       assert.strictEqual(await textarea.inputValue(), customPlan);
       assert.strictEqual(await decomposeBtn.isEnabled(), true);
 
@@ -381,8 +381,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await stopAppServer();
       await startAppServer();
       await page.reload({ waitUntil: 'networkidle' });
-      await page.getByRole('button', { name: /Settings/i }).click();
-      await page.getByRole('button', { name: /Readiness/i }).click();
+      await page.getByTestId('open-app-settings-btn').click();
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Saved');
       await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
 
@@ -415,8 +414,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await startAppServer();
 
       await page.reload({ waitUntil: 'networkidle' });
-      await page.getByRole('button', { name: /Settings/i }).click();
-      await page.getByRole('button', { name: /Readiness/i }).click();
+      await page.getByTestId('open-app-settings-btn').click();
       await page.getByTestId('test-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
 
@@ -441,7 +439,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await page.getByTestId('delete-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Not Configured');
-      await page.getByRole('button', { name: 'Cancel' }).click();
+      await page.getByTestId('close-app-settings-btn').click();
       await page.getByRole('button', { name: /Ingest Plan/i }).click();
       await page.getByTestId('configure-gemini-btn').waitFor({ state: 'visible' });
 
@@ -466,8 +464,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       };
       await page.route('**/api/credentials/gemini', delayedRouteHandler);
 
-      await page.getByRole('button', { name: /Settings/i }).click();
-      await page.getByRole('button', { name: /Readiness/i }).click();
+      await page.getByTestId('open-app-settings-btn').click();
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Loading...');
       releaseDelayedCred();
       await routeHandled;
@@ -477,9 +474,8 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await pwExpect(page.getByTestId('gemini-env-precedence-notice')).toBeVisible();
 
       // Reopen Settings modal and verify Env Active persists cleanly
-      await page.getByRole('button', { name: 'Cancel' }).last().click();
-      await page.getByRole('button', { name: /Settings/i }).click();
-      await page.getByRole('button', { name: /Readiness/i }).click();
+      await page.getByTestId('close-app-settings-btn').click();
+      await page.getByTestId('open-app-settings-btn').click();
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Env Active');
 
       // Saving a key in UI while env key is set does NOT override env key
@@ -491,7 +487,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       assert.strictEqual(mockState.requests[mockState.requests.length - 1].apiKey, SYNTH_ENV_KEY);
 
       // Test failed readiness response: UI must show explicit error, NEVER Not Configured
-      await page.getByRole('button', { name: 'Cancel' }).last().click();
+      await page.getByTestId('close-app-settings-btn').click();
       await page.route('**/api/credentials/gemini', async (route) => {
         await route.fulfill({
           status: 500,
@@ -499,8 +495,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
           body: JSON.stringify({ error: 'Injected readiness failure', code: 'INTERNAL' }),
         });
       });
-      await page.getByRole('button', { name: /Settings/i }).click();
-      await page.getByRole('button', { name: /Readiness/i }).click();
+      await page.getByTestId('open-app-settings-btn').click();
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Status Unavailable');
       await pwExpect(page.getByTestId('gemini-error-banner')).toBeVisible();
       await page.unroute('**/api/credentials/gemini');

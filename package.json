@@ -11,8 +11,8 @@
     "clean": "rm -rf dist server.js",
     "prepare:sandbox": "tsx scripts/prepareSandbox.ts",
     "release:check": "tsx scripts/release.ts consistency",
-    "test": "vitest run --exclude tests/e2e/**",
-    "test:e2e": "vitest run tests/e2e/geminiOnboarding.test.ts",
+    "test": "vitest run --exclude 'tests/e2e/**'",
+    "test:e2e": "vitest run tests/e2e/",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

@@ -189,7 +189,7 @@ export function getGeminiCredentialStatus(store: AppCredentialStore = defaultApp
     lastTestedAt: null,
     lastTestOutcome: null,
     lastTestError: null,
-    error: 'No Gemini API key is configured. Set GEMINI_API_KEY on the server or save an application key in Project Settings.',
+    error: 'No Gemini API key is configured. Set GEMINI_API_KEY on the server or save an application key in Application Settings.',
   };
 }
 

@@ -228,6 +228,12 @@ export interface UpdateProjectRequest {
   name?: string;
   description?: string;
   repository?: ProjectRepositoryConfig;
+  jira?: {
+    connectionId?: string | null;
+    projectKey?: string | null;
+    epicKey?: string | null;
+  };
+  preferences?: ProjectPreferences;
   agentPreferences?: ProjectAgentPreferences;
 }
 

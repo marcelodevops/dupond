@@ -33,6 +33,7 @@ import { ProjectProvider, useProject } from './context/ProjectContext';
 import { ProjectWizardModal } from './components/ProjectWizardModal';
 import { ProjectLifecycleModal } from './components/ProjectLifecycleModal';
 import { ProjectSettingsModal, type SettingsTab } from './components/ProjectSettingsModal';
+import { ApplicationSettingsModal } from './components/ApplicationSettingsModal';
 import { getActiveProjectId, PROJECT_HEADER, projectApi } from './lib/projectApi';
 
 function AppWorkspace() {
@@ -229,6 +230,7 @@ function AppWorkspace() {
   const [isIngestModalOpen, setIsIngestModalOpen] = useState<boolean>(false);
   const [isAddTaskModalOpen, setIsAddTaskModalOpen] = useState<boolean>(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
+  const [isAppSettingsModalOpen, setIsAppSettingsModalOpen] = useState<boolean>(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('general');
   const [readinessRefreshKey, setReadinessRefreshKey] = useState<number>(0);
 
@@ -726,7 +728,8 @@ function AppWorkspace() {
         }}
         onRunSingleStep={handleRunServerCycle}
         isProcessingStep={isProcessingStep}
-        onOpenSettings={() => setIsSettingsModalOpen(true)}
+        onOpenProjectSettings={() => setIsSettingsModalOpen(true)}
+        onOpenApplicationSettings={() => setIsAppSettingsModalOpen(true)}
         onOpenIngestModal={() => setIsIngestModalOpen(true)}
         onOpenReportModal={() => setActiveTab('reports')}
         projectTitle={projectTitle}
@@ -879,8 +882,7 @@ function AppWorkspace() {
         agents={agents}
         readinessRefreshKey={readinessRefreshKey}
         onOpenGeminiSettings={() => {
-          setSettingsInitialTab('readiness');
-          setIsSettingsModalOpen(true);
+          setIsAppSettingsModalOpen(true);
         }}
       />
 
@@ -916,10 +918,18 @@ function AppWorkspace() {
       <ProjectSettingsModal
         isOpen={isSettingsModalOpen}
         initialTab={settingsInitialTab}
-        onGeminiCredentialChanged={() => setReadinessRefreshKey((k) => k + 1)}
         onClose={() => {
           setIsSettingsModalOpen(false);
           setSettingsInitialTab('general');
+        }}
+      />
+
+      {/* Application Settings Modal (Server-Wide) */}
+      <ApplicationSettingsModal
+        isOpen={isAppSettingsModalOpen}
+        onGeminiCredentialChanged={() => setReadinessRefreshKey((k) => k + 1)}
+        onClose={() => {
+          setIsAppSettingsModalOpen(false);
           setReadinessRefreshKey((k) => k + 1);
         }}
       />
