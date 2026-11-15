@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/marcelodevops/dupond/compare/v0.8.1...v0.8.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* **security:** security tier1 execution boundaries v2 ([b1a4286](https://github.com/marcelodevops/dupond/commit/b1a428629d36a5c53808484c126ac34cf485dbfe))
+
 ## [0.8.1](https://github.com/marcelodevops/dupond/compare/v0.8.0...v0.8.1) (2026-11-13)
 
 
