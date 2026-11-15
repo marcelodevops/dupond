@@ -447,6 +447,34 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
         return { status: 'verified', rowCount: rows.length, keyFingerprint: keyFingerprint(activeKey) };
       }
 
+      if (!state) {
+        // Missing .state.json: cannot establish recorded dbPath, keyPath, or commit stage.
+        // Only permit automatic rollback when ONLY .prev exists (partial early staging before .next
+        // was written) AND activeKey is intact and identical to .prev AND all DB rows decrypt.
+        if (nextKey || fs.existsSync(nextPath)) {
+          throw new Error(
+            'Ambiguous recovery state: .state.json is missing while .next exists, so database identity and commit stage cannot be verified. ' +
+              'Refusing to modify the active key or delete recovery files. ' +
+              'Manual recovery: verify which database was being rotated, check which candidate key (.prev vs .next) decrypts its jira_connections rows, and atomically restore that key to the active key path.',
+          );
+        }
+        if (
+          prevKey &&
+          activeKey &&
+          keyFingerprint(activeKey) === keyFingerprint(prevKey) &&
+          canDecryptAll(rows, activeKey, false)
+        ) {
+          cleanupRecoveryArtifacts({ nextPath, prevPath, statePath }, Boolean(options.keepBackup));
+          log(`Recovered rollback from partial early staging (${rows.length} row(s), fp=${keyFingerprint(activeKey)}).`);
+          return { status: 'recovered_rollback', rowCount: rows.length, keyFingerprint: keyFingerprint(activeKey) };
+        }
+        throw new Error(
+          'Ambiguous recovery state: .state.json is missing and partial-staging safety invariants are not met. ' +
+            'Refusing to modify the active key or delete recovery files. ' +
+            'Manual recovery: verify the target database and compare candidate keys before replacing the active key.',
+        );
+      }
+
       const encryptedRows = rows.filter((r) => r.api_token_enc.startsWith('v1:'));
 
       // Determine whether DB rows are encrypted under newKey or oldKey
