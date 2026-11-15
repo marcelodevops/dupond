@@ -226,6 +226,21 @@ describe('multi-project backend', () => {
     });
     assert.equal(reset.status, 409);
     assert.equal((await reset.json()).code, 'ACTIVE_RUNS_PRESENT');
+
+    const patchExecBlocked = await fetch(`${base}/api/projects/${project.id}`, {
+      method: 'PATCH',
+      headers: { ...headers(project.id), 'content-type': 'application/json' },
+      body: JSON.stringify({ repository: { defaultBranch: 'develop' } }),
+    });
+    assert.equal(patchExecBlocked.status, 409);
+    assert.equal((await patchExecBlocked.json()).code, 'ACTIVE_RUNS_PRESENT');
+
+    const patchMetadataAllowed = await fetch(`${base}/api/projects/${project.id}`, {
+      method: 'PATCH',
+      headers: { ...headers(project.id), 'content-type': 'application/json' },
+      body: JSON.stringify({ description: 'Safe metadata update during active run' }),
+    });
+    assert.equal(patchMetadataAllowed.status, 200);
   });
 
   it('validates Jira links, persists retry identity, and never uses real network transport', async () => {
