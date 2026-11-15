@@ -354,9 +354,13 @@ CREATE TABLE IF NOT EXISTS project_source_plans (
 CREATE TABLE IF NOT EXISTS app_credentials (
   provider TEXT PRIMARY KEY,
   api_key_enc TEXT NOT NULL,
+  credential_version TEXT,
+  key_fingerprint TEXT,
   last_tested_at TEXT,
   last_test_outcome TEXT,
   last_test_error TEXT,
+  last_test_model TEXT,
+  last_test_seq INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

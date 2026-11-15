@@ -165,6 +165,8 @@ export interface GeminiCredentialStatus {
 
 export interface GeminiTestResult {
   ok: boolean;
+  stale?: boolean;
+  outcome?: 'passed' | 'failed' | 'stale';
   source: GeminiCredentialSource;
   model: string;
   testedAt: string;

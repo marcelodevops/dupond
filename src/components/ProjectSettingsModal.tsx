@@ -610,7 +610,9 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                           setGeminiStatus(res.status);
                           const refreshed = await projectApi.getPlanningReadiness();
                           setPlanningReadiness(refreshed);
-                          if (res.ok) {
+                          if (res.stale || res.outcome === 'stale') {
+                            setGeminiError(res.error || 'Connection test result was superseded by a newer credential change.');
+                          } else if (res.ok) {
                             setGeminiSuccess(`Connection verified (${res.source} credential, model ${res.model}).`);
                           } else {
                             setGeminiError(res.error || 'Connection test failed.');

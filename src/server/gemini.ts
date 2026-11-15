@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
 import { GoogleGenAI } from '@google/genai';
-import { defaultAppCredentialStore, type GeminiTestOutcome } from './projects/appCredentialStore.js';
+import {
+  AppCredentialStore,
+  defaultAppCredentialStore,
+  type GeminiTestOutcome,
+} from './projects/appCredentialStore.js';
 import type { GeminiCredentialSource, GeminiCredentialStatus, GeminiTestResult } from '../types/projectContract.js';
 
 export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
@@ -8,21 +12,31 @@ export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 interface ResolvedCredential {
   apiKey: string | null;
   source: GeminiCredentialSource;
+  version: string | null;
+  fingerprint: string | null;
 }
 
 interface EnvTestState {
   fingerprint: string;
+  model: string;
+  seq: number;
   testedAt: string;
   outcome: GeminiTestOutcome;
   error: string | null;
 }
 
 const cachedClients = new Map<string, { fingerprint: string; client: GoogleGenAI }>();
+const latestCompletedTestSeqByKey = new Map<string, number>();
 let testClientOverride: any = null;
 let envTestState: EnvTestState | null = null;
+let nextTestSeq = 0;
 
 function fingerprintSecret(secret: string): string {
-  return crypto.createHash('sha256').update(secret).digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(secret).digest('hex');
+}
+
+function activeModelName(): string {
+  return process.env.GEMINI_MODEL?.trim() || GEMINI_MODEL;
 }
 
 /**
@@ -49,26 +63,50 @@ export function sanitizeGeminiError(rawMessage: string | undefined | null, activ
   return msg;
 }
 
-export function resolveGeminiCredential(): ResolvedCredential {
+export function resolveGeminiCredential(store: AppCredentialStore = defaultAppCredentialStore): ResolvedCredential {
   const envKey = process.env.GEMINI_API_KEY?.trim();
   if (envKey) {
-    return { apiKey: envKey, source: 'environment' };
+    const fp = fingerprintSecret(envKey);
+    return {
+      apiKey: envKey,
+      source: 'environment',
+      version: `env:${fp}`,
+      fingerprint: fp,
+    };
   }
-  const savedKey = defaultAppCredentialStore.getGeminiKey()?.trim();
-  if (savedKey) {
-    return { apiKey: savedKey, source: 'saved' };
+  const saved = store.getGeminiKeySnapshot();
+  if (saved && saved.apiKey.trim()) {
+    return {
+      apiKey: saved.apiKey.trim(),
+      source: 'saved',
+      version: saved.credentialVersion,
+      fingerprint: saved.keyFingerprint,
+    };
   }
-  return { apiKey: null, source: 'none' };
+  return { apiKey: null, source: 'none', version: null, fingerprint: null };
 }
 
 export function invalidateGeminiClientCache(): void {
   cachedClients.clear();
 }
 
-export function getGeminiClient(options?: { userAgent?: string }): GoogleGenAI | null {
+function buildClientForKey(apiKey: string, userAgent: string): GoogleGenAI {
+  const baseUrl = resolveTestBaseUrl();
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': userAgent,
+      },
+      ...(baseUrl ? { baseUrl } : {}),
+    },
+  });
+}
+
+export function getGeminiClient(options?: { userAgent?: string; store?: AppCredentialStore }): GoogleGenAI | null {
   if (testClientOverride) return testClientOverride;
 
-  const { apiKey } = resolveGeminiCredential();
+  const { apiKey } = resolveGeminiCredential(options?.store);
   if (!apiKey) {
     cachedClients.clear();
     return null;
@@ -83,15 +121,7 @@ export function getGeminiClient(options?: { userAgent?: string }): GoogleGenAI |
     return existing.client;
   }
 
-  const client = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': userAgent,
-      },
-      ...(baseUrl ? { baseUrl } : {}),
-    },
-  });
+  const client = buildClientForKey(apiKey, userAgent);
   cachedClients.set(userAgent, { fingerprint: fp, client });
   return client;
 }
@@ -104,16 +134,20 @@ export function hasGeminiKey(): boolean {
   return resolveGeminiCredential().apiKey !== null;
 }
 
-export function getGeminiCredentialStatus(): GeminiCredentialStatus {
+export function getGeminiCredentialStatus(store: AppCredentialStore = defaultAppCredentialStore): GeminiCredentialStatus {
   const envKey = process.env.GEMINI_API_KEY?.trim() || '';
-  const meta = defaultAppCredentialStore.getGeminiMetadata();
+  const model = activeModelName();
+  const meta = store.getGeminiMetadata();
 
   if (envKey) {
     const envFp = fingerprintSecret(envKey);
-    const currentEnvTest = envTestState && envTestState.fingerprint === envFp ? envTestState : null;
+    const currentEnvTest =
+      envTestState && envTestState.fingerprint === envFp && envTestState.model === model
+        ? envTestState
+        : null;
     return {
       provider: 'gemini',
-      model: GEMINI_MODEL,
+      model,
       source: 'environment',
       configured: true,
       ready: true,
@@ -127,24 +161,25 @@ export function getGeminiCredentialStatus(): GeminiCredentialStatus {
   }
 
   if (meta.hasSavedKey) {
+    const modelMatches = !meta.lastTestModel || meta.lastTestModel === model;
     return {
       provider: 'gemini',
-      model: GEMINI_MODEL,
+      model,
       source: 'saved',
       configured: true,
       ready: true,
       hasSavedKey: true,
       environmentControlled: false,
       scope: 'application',
-      lastTestedAt: meta.lastTestedAt,
-      lastTestOutcome: meta.lastTestOutcome,
-      lastTestError: meta.lastTestError,
+      lastTestedAt: modelMatches ? meta.lastTestedAt : null,
+      lastTestOutcome: modelMatches ? meta.lastTestOutcome : null,
+      lastTestError: modelMatches ? meta.lastTestError : null,
     };
   }
 
   return {
     provider: 'gemini',
-    model: GEMINI_MODEL,
+    model,
     source: 'none',
     configured: false,
     ready: false,
@@ -158,78 +193,145 @@ export function getGeminiCredentialStatus(): GeminiCredentialStatus {
   };
 }
 
-export async function testGeminiConnection(): Promise<GeminiTestResult> {
-  const testedAt = new Date().toISOString();
-  const { apiKey, source } = resolveGeminiCredential();
+export async function testGeminiConnection(options?: { store?: AppCredentialStore }): Promise<GeminiTestResult> {
+  const store = options?.store ?? defaultAppCredentialStore;
+  const seq = ++nextTestSeq;
+  const modelToTest = activeModelName();
+  const snapshot = resolveGeminiCredential(store);
 
-  if (!apiKey || source === 'none') {
+  if (!snapshot.apiKey || snapshot.source === 'none' || !snapshot.version || !snapshot.fingerprint) {
     return {
       ok: false,
+      outcome: 'failed',
       source: 'none',
-      model: GEMINI_MODEL,
-      testedAt,
+      model: modelToTest,
+      testedAt: new Date().toISOString(),
       error: 'No Gemini API key is configured.',
     };
   }
 
-  const client = getGeminiClient();
-  if (!client) {
-    return {
-      ok: false,
-      source,
-      model: GEMINI_MODEL,
-      testedAt,
-      error: 'Failed to initialize Gemini client with configured credential.',
-    };
-  }
+  const client = testClientOverride || buildClientForKey(snapshot.apiKey, 'aistudio-build');
+  let outcome: GeminiTestOutcome = 'passed';
+  let sanitizedError: string | null = null;
 
   try {
     await callGeminiWithTimeout(
       client.models.generateContent({
-        model: GEMINI_MODEL,
+        model: modelToTest,
         contents: 'Reply with OK.',
       }),
       15000,
     );
-
-    if (source === 'saved') {
-      defaultAppCredentialStore.recordGeminiTestResult('passed', null);
-    } else {
-      envTestState = {
-        fingerprint: fingerprintSecret(apiKey),
-        testedAt,
-        outcome: 'passed',
-        error: null,
-      };
-    }
-
-    return {
-      ok: true,
-      source,
-      model: GEMINI_MODEL,
-      testedAt,
-    };
   } catch (err: any) {
-    const sanitized = sanitizeGeminiError(err?.message || String(err), apiKey);
-    if (source === 'saved') {
-      defaultAppCredentialStore.recordGeminiTestResult('failed', sanitized);
-    } else {
-      envTestState = {
-        fingerprint: fingerprintSecret(apiKey),
-        testedAt,
-        outcome: 'failed',
-        error: sanitized,
-      };
-    }
+    outcome = 'failed';
+    sanitizedError = sanitizeGeminiError(err?.message || String(err), snapshot.apiKey);
+  }
 
+  const testedAt = new Date().toISOString();
+  const current = resolveGeminiCredential(store);
+  const currentModel = activeModelName();
+
+  const stillCurrent =
+    current.source === snapshot.source &&
+    current.version === snapshot.version &&
+    current.fingerprint === snapshot.fingerprint &&
+    currentModel === modelToTest;
+
+  if (!stillCurrent) {
     return {
       ok: false,
-      source,
-      model: GEMINI_MODEL,
+      stale: true,
+      outcome: 'stale',
+      source: snapshot.source,
+      model: modelToTest,
       testedAt,
-      error: sanitized,
+      error: 'Credential test result was superseded because the active Gemini credential or model changed while the test was in flight.',
     };
   }
+
+  if (snapshot.source === 'saved') {
+    const completionKey = `${snapshot.version}|${modelToTest}`;
+    const prevCompletedSeq = latestCompletedTestSeqByKey.get(completionKey) ?? 0;
+    if (prevCompletedSeq >= seq) {
+      return {
+        ok: false,
+        stale: true,
+        outcome: 'stale',
+        source: snapshot.source,
+        model: modelToTest,
+        testedAt,
+        error: 'Credential test result was superseded by a newer overlapping test.',
+      };
+    }
+
+    const persisted = store.recordGeminiTestResultIfCurrent({
+      expectedVersion: snapshot.version,
+      expectedFingerprint: snapshot.fingerprint,
+      expectedModel: modelToTest,
+      testSeq: seq,
+      outcome,
+      error: sanitizedError,
+      testedAt,
+    });
+    if (!persisted) {
+      return {
+        ok: false,
+        stale: true,
+        outcome: 'stale',
+        source: snapshot.source,
+        model: modelToTest,
+        testedAt,
+        error: 'Credential test result was superseded by a newer credential change or overlapping test.',
+      };
+    }
+    latestCompletedTestSeqByKey.set(completionKey, seq);
+  } else {
+    if (
+      envTestState &&
+      envTestState.fingerprint === snapshot.fingerprint &&
+      envTestState.model === modelToTest &&
+      envTestState.seq >= seq
+    ) {
+      return {
+        ok: false,
+        stale: true,
+        outcome: 'stale',
+        source: snapshot.source,
+        model: modelToTest,
+        testedAt,
+        error: 'Credential test result was superseded by a newer overlapping test.',
+      };
+    }
+    envTestState = {
+      fingerprint: snapshot.fingerprint,
+      model: modelToTest,
+      seq,
+      testedAt,
+      outcome,
+      error: sanitizedError,
+    };
+  }
+
+  if (outcome === 'failed') {
+    return {
+      ok: false,
+      stale: false,
+      outcome: 'failed',
+      source: snapshot.source,
+      model: modelToTest,
+      testedAt,
+      error: sanitizedError || 'Connection test failed.',
+    };
+  }
+
+  return {
+    ok: true,
+    stale: false,
+    outcome: 'passed',
+    source: snapshot.source,
+    model: modelToTest,
+    testedAt,
+  };
 }
 
 export async function callGeminiWithTimeout<T>(promise: Promise<T>, timeoutMs = 45000): Promise<T> {
