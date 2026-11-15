@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.4](https://github.com/marcelodevops/dupond/compare/v0.8.3...v0.8.4) (2026-11-15)
+
+
+### Bug Fixes
+
+* **ui:** use Dupond character portrait as visible application logo ([2644d71](https://github.com/marcelodevops/dupond/commit/2644d711606a7b9b5817d2cab8ac6f94e99c9c9a))
+
 ## [0.8.3](https://github.com/marcelodevops/dupond/compare/v0.8.2...v0.8.3) (2026-11-15)
 
 
