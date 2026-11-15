@@ -278,15 +278,53 @@ function parseAndValidateRotationState(
   return parsed as RotationState;
 }
 
-interface ConnectionRowSnapshot {
-  id: string;
-  api_token_enc: string;
-  updated_at: string;
+interface EncryptedSecretRow {
+  table: 'jira_connections' | 'app_credentials';
+  pkColumn: 'id' | 'provider';
+  secretColumn: 'api_token_enc' | 'api_key_enc';
+  pkValue: string;
+  ciphertext: string;
+  updatedAt: string;
+}
+
+function readSecretRows(db: DatabaseSync, hasAppCredentialsTable: boolean): EncryptedSecretRow[] {
+  const jiraRows = db
+    .prepare('SELECT id, api_token_enc, updated_at FROM jira_connections ORDER BY id ASC')
+    .all() as Array<{ id: string; api_token_enc: string; updated_at: string }>;
+
+  const rows: EncryptedSecretRow[] = jiraRows.map((r) => ({
+    table: 'jira_connections',
+    pkColumn: 'id',
+    secretColumn: 'api_token_enc',
+    pkValue: r.id,
+    ciphertext: r.api_token_enc,
+    updatedAt: r.updated_at,
+  }));
+
+  if (hasAppCredentialsTable) {
+    const appRows = db
+      .prepare('SELECT provider, api_key_enc, updated_at FROM app_credentials ORDER BY provider ASC')
+      .all() as Array<{ provider: string; api_key_enc: string; updated_at: string }>;
+
+    for (const r of appRows) {
+      rows.push({
+        table: 'app_credentials',
+        pkColumn: 'provider',
+        secretColumn: 'api_key_enc',
+        pkValue: r.provider,
+        ciphertext: r.api_key_enc,
+        updatedAt: r.updated_at,
+      });
+    }
+  }
+
+  return rows;
 }
 
 function openConnectionsDb(dbPath: string): {
   db: DatabaseSync;
-  rows: ConnectionRowSnapshot[];
+  rows: EncryptedSecretRow[];
+  hasAppCredentialsTable: boolean;
 } {
   if (!fs.existsSync(dbPath)) {
     throw new Error(`Database not found at ${dbPath}; aborting without modifying key material.`);
@@ -299,10 +337,13 @@ function openConnectionsDb(dbPath: string): {
     if (!tableExists) {
       throw new Error(`Table jira_connections not found in ${dbPath}; aborting without modifying key material.`);
     }
-    const rows = db
-      .prepare('SELECT id, api_token_enc, updated_at FROM jira_connections ORDER BY id ASC')
-      .all() as unknown as ConnectionRowSnapshot[];
-    return { db, rows };
+    const appCredTableExists = Boolean(
+      db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'app_credentials'")
+        .get(),
+    );
+    const rows = readSecretRows(db, appCredTableExists);
+    return { db, rows, hasAppCredentialsTable: appCredTableExists };
   } catch (err) {
     try {
       db.close();
@@ -314,16 +355,16 @@ function openConnectionsDb(dbPath: string): {
 }
 
 function canDecryptAll(
-  rows: Array<{ id: string; api_token_enc: string }>,
+  rows: Array<{ ciphertext: string }>,
   key: Buffer,
   requireV1 = false,
 ): boolean {
   for (const row of rows) {
-    if (requireV1 && !row.api_token_enc.startsWith('v1:')) {
+    if (requireV1 && !row.ciphertext.startsWith('v1:')) {
       return false;
     }
     try {
-      decryptV1(row.api_token_enc, key);
+      decryptV1(row.ciphertext, key);
     } catch {
       return false;
     }
@@ -475,7 +516,7 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
         );
       }
 
-      const encryptedRows = rows.filter((r) => r.api_token_enc.startsWith('v1:'));
+      const encryptedRows = rows.filter((r) => r.ciphertext.startsWith('v1:'));
 
       // Determine whether DB rows are encrypted under newKey or oldKey
       const oldCandidate = prevKey || activeKey;
@@ -547,18 +588,20 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
     const oldKey = readKeyFile(keyPath, 'Existing connection key', true);
     const opened = openConnectionsDb(dbPath);
     db = opened.db;
-    const { rows } = opened;
+    const { rows, hasAppCredentialsTable } = opened;
 
-    log(`Found ${rows.length} connection row(s) to re-encrypt.`);
+    log(`Found ${rows.length} encrypted secret row(s) to re-encrypt.`);
 
     // Decrypt and validate every row before any filesystem or DB mutation
-    const plaintexts: Array<{ id: string; token: string }> = [];
+    const plaintexts: Array<{ row: EncryptedSecretRow; secret: string }> = [];
     for (const row of rows) {
       try {
-        const { plaintext } = decryptV1(row.api_token_enc, oldKey);
-        plaintexts.push({ id: row.id, token: plaintext });
+        const { plaintext } = decryptV1(row.ciphertext, oldKey);
+        plaintexts.push({ row, secret: plaintext });
       } catch (err: any) {
-        throw new Error(`Failed to decrypt row ${row.id} with existing key (${err?.message || 'decrypt error'}). Aborting without changes.`);
+        throw new Error(
+          `Failed to decrypt row ${row.table}.${row.pkValue} with existing key (${err?.message || 'decrypt error'}). Aborting without changes.`,
+        );
       }
     }
 
@@ -566,13 +609,13 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
     const now = new Date().toISOString();
 
     // Pre-encrypt and round-trip verify under nextKey before touching DB or staging
-    const reencrypted = plaintexts.map(({ id, token }) => {
-      const ciphertext = encryptV1(token, nextKey);
+    const reencrypted = plaintexts.map(({ row, secret }) => {
+      const ciphertext = encryptV1(secret, nextKey);
       const check = decryptV1(ciphertext, nextKey);
-      if (check.plaintext !== token) {
-        throw new Error(`Round-trip verification failed for row ${id} prior to staging.`);
+      if (check.plaintext !== secret) {
+        throw new Error(`Round-trip verification failed for ${row.table}.${row.pkValue} prior to staging.`);
       }
-      return { id, ciphertext };
+      return { row, ciphertext };
     });
 
     // Stage 1: Durable staging of .prev, .next, and .state.json (active key & DB untouched)
@@ -599,26 +642,33 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
     emitFaultHook('before_db_commit', options.onStage);
     db.exec('BEGIN IMMEDIATE');
     try {
-      const currentRows = db
-        .prepare('SELECT id, api_token_enc, updated_at FROM jira_connections ORDER BY id ASC')
-        .all() as unknown as ConnectionRowSnapshot[];
+      const currentRows = readSecretRows(db, hasAppCredentialsTable);
       if (currentRows.length !== rows.length) {
         throw new Error(`Concurrent modification detected: expected ${rows.length} row(s), found ${currentRows.length}.`);
       }
       for (let i = 0; i < rows.length; i += 1) {
         if (
-          currentRows[i].id !== rows[i].id ||
-          currentRows[i].api_token_enc !== rows[i].api_token_enc ||
-          currentRows[i].updated_at !== rows[i].updated_at
+          currentRows[i].table !== rows[i].table ||
+          currentRows[i].pkValue !== rows[i].pkValue ||
+          currentRows[i].ciphertext !== rows[i].ciphertext ||
+          currentRows[i].updatedAt !== rows[i].updatedAt
         ) {
           throw new Error(
-            `Concurrent modification detected on row ${rows[i].id}: database state changed after snapshot acquisition.`,
+            `Concurrent modification detected on ${rows[i].table}.${rows[i].pkValue}: database state changed after snapshot acquisition.`,
           );
         }
       }
-      const update = db.prepare('UPDATE jira_connections SET api_token_enc = ?, updated_at = ? WHERE id = ?');
+      const updateJira = db.prepare('UPDATE jira_connections SET api_token_enc = ?, updated_at = ? WHERE id = ?');
+      const updateAppCred = hasAppCredentialsTable
+        ? db.prepare('UPDATE app_credentials SET api_key_enc = ?, updated_at = ? WHERE provider = ?')
+        : null;
+
       for (const item of reencrypted) {
-        update.run(item.ciphertext, now, item.id);
+        if (item.row.table === 'jira_connections') {
+          updateJira.run(item.ciphertext, now, item.row.pkValue);
+        } else if (updateAppCred) {
+          updateAppCred.run(item.ciphertext, now, item.row.pkValue);
+        }
       }
       db.exec('COMMIT');
     } catch (err) {
@@ -649,9 +699,7 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
     if (keyFingerprint(activeAfter) !== state.newKeyFingerprint) {
       throw new Error('Post-rotation verification failed: active key fingerprint mismatch.');
     }
-    const verifyRows = db
-      .prepare('SELECT id, api_token_enc FROM jira_connections ORDER BY id ASC')
-      .all() as Array<{ id: string; api_token_enc: string }>;
+    const verifyRows = readSecretRows(db, hasAppCredentialsTable);
     if (!canDecryptAll(verifyRows, activeAfter, true)) {
       throw new Error('Post-rotation verification failed: one or more rows failed decryption under the new key.');
     }
