@@ -1,8 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { CONN_KEY_FILE } from '../db/database.js';
 import { withApplicationConnectionKeyLease } from './connectionKeyLock.js';
+
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const CONN_KEY_FILE = path.resolve(DATA_DIR, '.dupond_conn_key');
 
 export function connectionKeyPath(): string {
   return process.env.DUPOND_CONN_KEY_PATH

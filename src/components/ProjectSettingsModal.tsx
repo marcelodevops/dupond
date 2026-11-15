@@ -129,21 +129,23 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
     };
   }, [isOpen]);
 
-  if (!isOpen || !currentProject) return null;
+  if (!isOpen) return null;
 
-  const isDefaultProject = currentProject.id === 'default';
+  const isDefaultProject = (currentProject?.id || 'default') === 'default';
 
   // Dirty detection
-  const origRepo = currentProject.repository || {};
-  const isDirty =
-    name !== (currentProject.name || '') ||
-    description !== (currentProject.description || '') ||
+  const origRepo = currentProject?.repository || {};
+  const isDirty = Boolean(currentProject) && (
+    name !== (currentProject?.name || '') ||
+    description !== (currentProject?.description || '') ||
     localPath !== (origRepo.localPath || origRepo.path || '') ||
     repoUrl !== (origRepo.repoUrl || '') ||
     defaultBranch !== (origRepo.defaultBranch || 'main') ||
-    localWriteMode !== (origRepo.localWriteMode || 'worktree');
+    localWriteMode !== (origRepo.localWriteMode || 'worktree')
+  );
 
   const handleVerifyRepo = async () => {
+    if (!currentProject) return;
     setIsVerifying(true);
     setErrorBanner(null);
     setVerificationResult(null);
@@ -172,6 +174,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   };
 
   const handleSave = async () => {
+    if (!currentProject) return;
     setIsSaving(true);
     setErrorBanner(null);
     setSuccessBanner(null);
@@ -209,7 +212,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
-                Project Settings: {currentProject.name}
+                Project Settings: {currentProject?.name || 'Application'}
                 {isDefaultProject && (
                   <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
                     Default Project
@@ -316,15 +319,15 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
               <div className="p-3.5 bg-slate-950/60 border border-slate-800 rounded-xl space-y-1.5 text-[11px] text-slate-400">
                 <div className="flex justify-between">
                   <span className="text-slate-500">Project Identifier:</span>
-                  <code className="text-indigo-300 font-mono">{currentProject.id}</code>
+                  <code className="text-indigo-300 font-mono">{currentProject?.id || 'default'}</code>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Status:</span>
-                  <span className="capitalize text-emerald-400 font-semibold">{currentProject.status}</span>
+                  <span className="capitalize text-emerald-400 font-semibold">{currentProject?.status || 'active'}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Created At:</span>
-                  <span>{new Date(currentProject.createdAt).toLocaleString()}</span>
+                  <span>{currentProject ? new Date(currentProject.createdAt).toLocaleString() : '—'}</span>
                 </div>
               </div>
             </div>

@@ -46,6 +46,7 @@ function AppWorkspace() {
     openResetModal,
     isCreateWizardOpen,
     setIsCreateWizardOpen,
+    refreshProjects,
   } = useProject();
 
   const [activeTab, setActiveTab] = useState<string>('kanban');
@@ -250,6 +251,7 @@ function AppWorkspace() {
 
   const handleConnect = () => {
     setApiToken(tokenDraft);
+    void refreshProjects();
     showToast('Token stored', 'Re-syncing with the server…', 'info');
   };
 
