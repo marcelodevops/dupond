@@ -5,9 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { spawn } from 'node:child_process';
 import { TaskStore } from '../src/server/db/database.js';
 import { AppCredentialStore } from '../src/server/projects/appCredentialStore.js';
+import { ProjectStore } from '../src/server/projects/projectStore.js';
+import { decryptSecret, getConnectionKey } from '../src/server/projects/secretCrypto.js';
 import {
   getGeminiClient,
   getGeminiCredentialStatus,
@@ -236,4 +238,160 @@ describe('Gemini credential storage, precedence, cache invalidation, and key rot
     assert.strictEqual(credStore2.getGeminiKey(), geminiSecret);
     store2.getRawDb().close();
   });
+
+  it('rejects stale/superseded test results across replacement, delete/recreate, deletion, and overlapping tests', async () => {
+    const store = new TaskStore(dbPath);
+    const credStore = new AppCredentialStore(store);
+
+    const keyA = 'AIzaSyStaleTestKeyA11111111111';
+    const keyB = 'AIzaSyStaleTestKeyB22222222222';
+
+    const pendingRequests: Array<{ apiKey: string | undefined; release: (status: number) => void }> = [];
+    const mockServer = http.createServer((req, res) => {
+      const apiKey = typeof req.headers['x-goog-api-key'] === 'string' ? req.headers['x-goog-api-key'] : undefined;
+      pendingRequests.push({
+        apiKey,
+        release: (status: number) => {
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          if (status === 200) {
+            res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'OK' }], role: 'model' } }] }));
+          } else {
+            res.end(JSON.stringify({ error: { code: status, message: 'Mock auth failure' } }));
+          }
+        },
+      });
+    });
+
+    await new Promise<void>((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
+    const port = (mockServer.address() as { port: number }).port;
+    process.env.DUPOND_ALLOW_TEST_GEMINI_ENDPOINT = '1';
+    process.env.DUPOND_GEMINI_TEST_BASE_URL = `http://127.0.0.1:${port}`;
+
+    try {
+      // 1. Replace A with B while A's test is pending -> A's late 200 must NOT verify B
+      credStore.saveGeminiKey(keyA);
+      const testAPromise = testGeminiConnection({ store: credStore });
+      while (pendingRequests.length < 1) await new Promise((r) => setTimeout(r, 10));
+
+      credStore.saveGeminiKey(keyB);
+      pendingRequests.shift()!.release(200);
+      const resA = await testAPromise;
+      assert.strictEqual(resA.ok, false);
+      assert.strictEqual(resA.stale, true);
+      assert.strictEqual(resA.outcome, 'stale');
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestOutcome, null);
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestedAt, null);
+
+      // 2. Delete B and recreate with the SAME key B while test is pending -> stale
+      const testBPromise = testGeminiConnection({ store: credStore });
+      while (pendingRequests.length < 1) await new Promise((r) => setTimeout(r, 10));
+      credStore.deleteGeminiKey();
+      credStore.saveGeminiKey(keyB);
+      pendingRequests.shift()!.release(200);
+      const resB = await testBPromise;
+      assert.strictEqual(resB.stale, true);
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestOutcome, null);
+
+      // 3. Delete while in flight -> late failure must return stale and keep hasSavedKey=false
+      const testDelPromise = testGeminiConnection({ store: credStore });
+      while (pendingRequests.length < 1) await new Promise((r) => setTimeout(r, 10));
+      credStore.deleteGeminiKey();
+      pendingRequests.shift()!.release(401);
+      const resDel = await testDelPromise;
+      assert.strictEqual(resDel.stale, true);
+      assert.strictEqual(credStore.getGeminiMetadata().hasSavedKey, false);
+
+      // 4. Overlapping tests on the same key: newer succeeds first, older fails later -> older is stale, passed preserved
+      credStore.saveGeminiKey(keyB);
+      const olderPromise = testGeminiConnection({ store: credStore });
+      while (pendingRequests.length < 1) await new Promise((r) => setTimeout(r, 10));
+      const olderReq = pendingRequests.shift()!;
+
+      const newerPromise = testGeminiConnection({ store: credStore });
+      while (pendingRequests.length < 1) await new Promise((r) => setTimeout(r, 10));
+      const newerReq = pendingRequests.shift()!;
+
+      newerReq.release(200);
+      const newerRes = await newerPromise;
+      assert.strictEqual(newerRes.ok, true);
+      assert.strictEqual(newerRes.outcome, 'passed');
+
+      olderReq.release(500);
+      const olderRes = await olderPromise;
+      assert.strictEqual(olderRes.stale, true);
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestOutcome, 'passed');
+    } finally {
+      mockServer.close();
+      store.getRawDb().close();
+    }
+  });
+
+  it('fails closed when key file persistence fails (Gemini and Jira) and handles concurrent first-key creation', async () => {
+    // 1. Inject key-write failure by pointing DUPOND_CONN_KEY_PATH inside a regular file
+    const blockerFile = path.join(tmpDir, 'not-a-directory');
+    fs.writeFileSync(blockerFile, 'blocker', 'utf-8');
+    const unwritableKeyPath = path.join(blockerFile, 'nested', '.dupond_conn_key');
+    process.env.DUPOND_CONN_KEY_PATH = unwritableKeyPath;
+
+    const store = new TaskStore(dbPath);
+    const credStore = new AppCredentialStore(store);
+    const projectStore = new ProjectStore(store);
+    const now = new Date().toISOString();
+    store.getRawDb()
+      .prepare("INSERT OR IGNORE INTO projects (id, name, description, status, created_at, updated_at) VALUES ('default', 'Default', '', 'active', ?, ?)")
+      .run(now, now);
+
+    assert.throws(() => credStore.saveGeminiKey('AIzaSyShouldFailClosed12345'));
+    assert.strictEqual(credStore.getGeminiMetadata().hasSavedKey, false);
+
+    assert.throws(() =>
+      projectStore.saveJiraConnection(
+        'default',
+        {
+          hostUrl: 'https://jira.example.test',
+          userEmail: 'test@example.com',
+          apiToken: 'jira-token-should-fail-closed',
+        },
+        'test-actor',
+      ),
+    );
+    const jiraCount = store.getRawDb().prepare('SELECT COUNT(*) as c FROM jira_connections').get() as { c: number };
+    assert.strictEqual(jiraCount.c, 0);
+    store.getRawDb().close();
+
+    // 2. Concurrent multi-process first-key initialization must agree on one key without overwriting
+    const raceKeyPath = path.join(tmpDir, 'race', '.dupond_conn_key');
+    process.env.DUPOND_CONN_KEY_PATH = raceKeyPath;
+
+    const runWorker = () =>
+      new Promise<string>((resolve, reject) => {
+        const script = `
+          import { encryptSecret } from './src/server/projects/secretCrypto.js';
+          const enc = encryptSecret('shared-secret-' + process.pid);
+          console.log(JSON.stringify({ pid: process.pid, enc }));
+        `;
+        const child = spawn('npx', ['tsx', '--input-type=module', '-e', script], {
+          cwd: process.cwd(),
+          env: { ...process.env, DUPOND_CONN_KEY_PATH: raceKeyPath },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', (d) => (out += d.toString()));
+        child.stderr.on('data', (d) => (err += d.toString()));
+        child.on('exit', (code) => {
+          if (code !== 0) reject(new Error(`Child exited ${code}: ${err}`));
+          else resolve(out.trim());
+        });
+      });
+
+    const outputs = await Promise.all([runWorker(), runWorker(), runWorker()]);
+    const persistedKey = getConnectionKey();
+    assert.strictEqual(persistedKey.length, 32);
+
+    for (const out of outputs) {
+      const parsed = JSON.parse(out) as { pid: number; enc: string };
+      assert.strictEqual(decryptSecret(parsed.enc), `shared-secret-${parsed.pid}`);
+    }
+  }, 20000);
 });

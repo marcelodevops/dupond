@@ -15,18 +15,45 @@ const SYNTH_GOOD_KEY_1 = 'AIzaSyFakeValidKey1111111111112';
 const SYNTH_GOOD_KEY_2 = 'AIzaSyFakeValidKey2222222222223';
 const SYNTH_ENV_KEY = 'AIzaSyFakeEnvMasterKey999999999';
 const SYNTH_OPERATOR_TOKEN = 'dp_e2e_synthetic_operator_token_12345';
-const ALL_SYNTHETIC_SECRETS = [SYNTH_BAD_KEY, SYNTH_GOOD_KEY_1, SYNTH_GOOD_KEY_2, SYNTH_ENV_KEY];
+const ALL_GEMINI_SECRETS = [SYNTH_BAD_KEY, SYNTH_GOOD_KEY_1, SYNTH_GOOD_KEY_2, SYNTH_ENV_KEY];
+const ALL_DIAGNOSTIC_SECRETS = [...ALL_GEMINI_SECRETS, SYNTH_OPERATOR_TOKEN];
 
 interface MockGeminiState {
   requests: Array<{ apiKey: string | undefined; path: string; body: string }>;
 }
 
-function assertNoSecretLeak(label: string, text: string): void {
-  for (const secret of ALL_SYNTHETIC_SECRETS) {
+function assertNoSecretLeak(label: string, text: string, secrets: string[] = ALL_GEMINI_SECRETS): void {
+  for (const secret of secrets) {
     assert.ok(
       !text.includes(secret),
       `Security violation: synthetic secret leaked in ${label}`,
     );
+  }
+}
+
+function redactSecrets(text: string): string {
+  let out = text;
+  for (const secret of ALL_DIAGNOSTIC_SECRETS) {
+    out = out.split(secret).join('[REDACTED]');
+  }
+  return out;
+}
+
+function assertNoSecretArtifactsOnDisk(dir: string): void {
+  if (!fs.existsSync(dir)) return;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      assertNoSecretArtifactsOnDisk(fullPath);
+      continue;
+    }
+    assert.ok(
+      !/\.(zip|har|webm)$/i.test(entry.name),
+      `Security violation: secret-bearing diagnostic archive retained on disk (${fullPath})`,
+    );
+    const content = fs.readFileSync(fullPath).toString('latin1');
+    assertNoSecretLeak(`diagnostic artifact ${fullPath}`, content, ALL_DIAGNOSTIC_SECRETS);
   }
 }
 
@@ -209,8 +236,10 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
   });
 
   it('exercises scenarios A-L end-to-end in Chromium without secret leaks', async () => {
+    const outDir = path.join(process.cwd(), 'test-results', 'e2e');
+    // Capture policy: do NOT enable Playwright tracing/HAR/video during secret-bearing
+    // credential or operator-token flows, because action arguments and snapshots retain raw inputs.
     const context: BrowserContext = await browser.newContext();
-    await context.tracing.start({ screenshots: true, snapshots: true });
     const page: Page = await context.newPage();
 
     const apiBodies: string[] = [];
@@ -385,16 +414,24 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       const storageDump = await page.evaluate(() =>
         JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }),
       );
-      assertNoSecretLeak('DOM HTML', domHtml);
-      assertNoSecretLeak('browser storage', storageDump);
-      assertNoSecretLeak('API responses', apiBodies.join('\n'));
-      assertNoSecretLeak('browser console logs', consoleLogs.join('\n'));
-      assertNoSecretLeak('server stdout/stderr logs', serverLogs);
-    } catch (err) {
-      const outDir = path.join(process.cwd(), 'test-results', 'e2e');
+      assertNoSecretLeak('DOM HTML', domHtml, ALL_DIAGNOSTIC_SECRETS);
+      assertNoSecretLeak('browser storage', storageDump, ALL_GEMINI_SECRETS);
+      assertNoSecretLeak('API responses', apiBodies.join('\n'), ALL_DIAGNOSTIC_SECRETS);
+      assertNoSecretLeak('browser console logs', consoleLogs.join('\n'), ALL_DIAGNOSTIC_SECRETS);
+      assertNoSecretLeak('server stdout/stderr logs', serverLogs, ALL_DIAGNOSTIC_SECRETS);
+      assertNoSecretArtifactsOnDisk(outDir);
+    } catch (err: any) {
       fs.mkdirSync(outDir, { recursive: true });
-      await page.screenshot({ path: path.join(outDir, 'gemini-onboarding-failure.png'), fullPage: true });
-      await context.tracing.stop({ path: path.join(outDir, 'gemini-onboarding-trace.zip') });
+      const sanitizedReport = redactSecrets(
+        [
+          `Failure: ${err?.stack || err?.message || String(err)}`,
+          `URL: ${page.url()}`,
+          `Console: ${consoleLogs.join('\n')}`,
+          `Server Logs: ${serverLogs}`,
+        ].join('\n\n'),
+      );
+      fs.writeFileSync(path.join(outDir, 'gemini-onboarding-failure.txt'), sanitizedReport, 'utf-8');
+      assertNoSecretArtifactsOnDisk(outDir);
       throw err;
     } finally {
       await context.close();

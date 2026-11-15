@@ -20,9 +20,10 @@ Dupond resolves the active Gemini API key through a single unified resolver (`sr
 - Reads and writes acquire `withApplicationConnectionKeyLease` (`src/server/projects/secretCrypto.ts`) and return `503 KEY_ROTATION_IN_PROGRESS` while `scripts/rotateConnKey.ts` is rotating or recovering keys.
 - `scripts/rotateConnKey.ts` (normal rotation, `--verify`, and `--recover`) re-encrypts and validates `app_credentials` atomically alongside `jira_connections` in the same `BEGIN IMMEDIATE ... COMMIT` SQLite transaction.
 
-## 4. Controlled vs. Live Verification
+## 4. Controlled vs. Live Verification & Diagnostic Capture Policy
 
-- **Automated CI / Browser Tests (`tests/e2e/geminiOnboarding.test.ts`)**: Runs the real Vite-built frontend and Express backend against isolated temporary storage (`DUPOND_DB_PATH`, `DUPOND_STATE_FILE`, `DUPOND_CONN_KEY_PATH`) and a local mock Gemini HTTP server gated strictly by `DUPOND_ALLOW_TEST_GEMINI_ENDPOINT=1` + `DUPOND_GEMINI_TEST_BASE_URL` (never exposed to HTTP or UI).
+- **Controlled Browser & Unit Tests (`tests/e2e/geminiOnboarding.test.ts`)**: Runs the real Vite-built frontend and Express backend against isolated temporary storage (`DUPOND_DB_PATH`, `DUPOND_STATE_FILE`, `DUPOND_CONN_KEY_PATH`) and a local mock Gemini HTTP server gated strictly by `DUPOND_ALLOW_TEST_GEMINI_ENDPOINT=1` + `DUPOND_GEMINI_TEST_BASE_URL` (never exposed to HTTP or UI).
+- **Diagnostic Secrecy Policy**: Playwright tracing (`context.tracing`), HAR recording, and video capture must remain **disabled** during credential and operator-token flows because trace action arguments (`fill`), request bodies, and snapshots record raw secrets regardless of `type="password"` masking. Failure output is restricted to redacted text summaries, and tests assert that no `.zip`/`.har`/`.webm` archives or raw secret strings exist in on-disk diagnostic artifacts.
 - **Opt-In Live Smoke Test (`scripts/smokeGemini.ts`)**: Disabled in CI. Operators with an authorized key can run:
   ```bash
   DUPOND_ALLOW_LIVE_GEMINI_SMOKE=1 GEMINI_API_KEY="AIza..." npx tsx scripts/smokeGemini.ts
