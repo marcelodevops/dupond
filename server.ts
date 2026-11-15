@@ -114,9 +114,15 @@ function projectContext(req: Request, res: Response, resourceProjectId?: string 
 
 // Health check endpoint
 app.get('/api/health', (_req: Request, res: Response) => {
+  let geminiReady = false;
+  try {
+    geminiReady = hasGeminiKey();
+  } catch {
+    geminiReady = false;
+  }
   res.json({
     status: 'healthy',
-    hasGeminiKey: hasGeminiKey(),
+    hasGeminiKey: geminiReady,
     daemonRunning: coordinator.isDaemonRunning(),
     timestamp: new Date().toISOString(),
   });

@@ -75,6 +75,10 @@ export class TaskStore {
       'ALTER TABLE delivery_records ADD COLUMN approval_revision_sha TEXT;',
       'ALTER TABLE delivery_records ADD COLUMN approval_verification_id TEXT;',
       'ALTER TABLE delivery_records ADD COLUMN approval_binding_version TEXT;',
+      'ALTER TABLE app_credentials ADD COLUMN credential_version TEXT;',
+      'ALTER TABLE app_credentials ADD COLUMN key_fingerprint TEXT;',
+      'ALTER TABLE app_credentials ADD COLUMN last_test_model TEXT;',
+      'ALTER TABLE app_credentials ADD COLUMN last_test_seq INTEGER;',
     ]) {
       try {
         this.db.exec(column);

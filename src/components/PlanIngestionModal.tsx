@@ -21,6 +21,8 @@ interface PlanIngestionModalProps {
   onClose: () => void;
   onAdoptPlan: (newEpics: Epic[], newTasks: Task[], planSummary: string, sourcePlanId?: string, planRevision?: number) => Promise<boolean | void> | void;
   agents: Agent[];
+  onOpenGeminiSettings?: () => void;
+  readinessRefreshKey?: number;
 }
 
 export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
@@ -28,6 +30,8 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
   onClose,
   onAdoptPlan,
   agents,
+  onOpenGeminiSettings,
+  readinessRefreshKey = 0,
 }) => {
   const { currentProject } = useProject();
   const currentProjectId = currentProject?.id || 'default';
@@ -37,6 +41,8 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
   const [isDecomposing, setIsDecomposing] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [readiness, setReadiness] = useState<PlanningReadiness | null>(null);
+  const [isLoadingReadiness, setIsLoadingReadiness] = useState<boolean>(false);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
   const [sourcePlanId, setSourcePlanId] = useState<string | null>(null);
   const [sourcePlanRevision, setSourcePlanRevision] = useState<number | null>(null);
   const [parsedResult, setParsedResult] = useState<{
@@ -51,29 +57,38 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
   const activeProjectRef = useRef<string>(currentProjectId);
   activeProjectRef.current = currentProjectId;
 
-  // Fetch planning readiness on modal open
+  // Fetch planning readiness on modal open or credential refresh
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setReadiness(null);
+      setReadinessError(null);
+      setIsLoadingReadiness(false);
+      return;
+    }
     let mounted = true;
+    setIsLoadingReadiness(true);
+    setReadinessError(null);
     projectApi
       .getPlanningReadiness()
       .then((data) => {
-        if (mounted) setReadiness(data);
+        if (mounted) {
+          setReadiness(data);
+          setReadinessError(null);
+        }
       })
       .catch((err) => {
         if (mounted) {
-          setReadiness({
-            provider: 'gemini',
-            model: 'gemini-3.8-flash',
-            ready: false,
-            error: err.message || 'Could not verify planning service status.',
-          });
+          setReadiness(null);
+          setReadinessError(err?.message || 'Could not verify planning service status.');
         }
+      })
+      .finally(() => {
+        if (mounted) setIsLoadingReadiness(false);
       });
     return () => {
       mounted = false;
     };
-  }, [isOpen]);
+  }, [isOpen, readinessRefreshKey]);
 
   // Load existing source plan if available on open or project switch
   useEffect(() => {
@@ -196,13 +211,24 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
         {/* Modal Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1">
           {/* Provider Readiness Status Bar */}
-          <div className={`p-3 rounded-xl border text-xs flex items-center justify-between ${
-            readiness?.ready
-              ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-300'
-              : 'bg-amber-950/30 border-amber-800/60 text-amber-300'
-          }`}>
+          <div
+            data-testid="plan-readiness-bar"
+            className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-3 ${
+              isLoadingReadiness || (!readiness && !readinessError)
+                ? 'bg-slate-900/60 border-slate-700 text-slate-300'
+                : readinessError
+                  ? 'bg-rose-950/30 border-rose-800/60 text-rose-300'
+                  : readiness?.ready
+                    ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-300'
+                    : 'bg-amber-950/30 border-amber-800/60 text-amber-300'
+            }`}
+          >
             <div className="flex items-center space-x-2">
-              {readiness?.ready ? (
+              {isLoadingReadiness || (!readiness && !readinessError) ? (
+                <RotateCw className="w-4 h-4 text-slate-400 animate-spin shrink-0" />
+              ) : readinessError ? (
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : readiness?.ready ? (
                 <Check className="w-4 h-4 text-emerald-400 shrink-0" />
               ) : (
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
@@ -210,32 +236,62 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
               <span>
                 <strong>Planning Engine:</strong> {readiness?.provider || 'gemini'} ({readiness?.model || 'gemini-3.8-flash'})
                 {' — '}
-                {readiness?.ready ? (
-                  <span className="text-emerald-400 font-semibold">Ready for decomposition</span>
+                {isLoadingReadiness || (!readiness && !readinessError) ? (
+                  <span className="text-slate-300 font-semibold">Checking readiness...</span>
+                ) : readinessError ? (
+                  <span className="text-rose-300 font-semibold">Readiness Check Failed ({readinessError})</span>
+                ) : readiness?.ready ? (
+                  <span className="text-emerald-400 font-semibold">
+                    Ready for decomposition ({readiness.source === 'environment' ? 'env key' : 'saved key'})
+                  </span>
                 ) : (
                   <span className="text-amber-400 font-semibold">Key Not Configured ({readiness?.error || 'Unavailable'})</span>
                 )}
               </span>
             </div>
-            {sourcePlanRevision && (
-              <span className="text-[11px] font-mono bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-300">
-                Revision #{sourcePlanRevision}
-              </span>
-            )}
+            <div className="flex items-center gap-2 shrink-0">
+              {readiness && !readiness.ready && onOpenGeminiSettings && (
+                <button
+                  type="button"
+                  data-testid="configure-gemini-btn"
+                  onClick={onOpenGeminiSettings}
+                  className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold transition-colors"
+                >
+                  Configure Gemini
+                </button>
+              )}
+              {sourcePlanRevision && (
+                <span className="text-[11px] font-mono bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-300">
+                  Revision #{sourcePlanRevision}
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Persistent Actionable Error Banner */}
           {errorMessage && (
             <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-800/80 text-rose-200 text-xs space-y-1.5 animate-fadeIn">
-              <div className="flex items-center space-x-2 font-bold text-rose-100">
-                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-                <span>Plan Decomposition Failed</span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center space-x-2 font-bold text-rose-100">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>Plan Decomposition Failed</span>
+                </div>
+                {onOpenGeminiSettings && (
+                  <button
+                    type="button"
+                    data-testid="error-configure-gemini-btn"
+                    onClick={onOpenGeminiSettings}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold transition-colors"
+                  >
+                    Configure Gemini
+                  </button>
+                )}
               </div>
               <p className="leading-relaxed text-rose-300">
                 {errorMessage}
               </p>
               <p className="text-[11px] text-rose-400">
-                Your submitted plan text is preserved below. Configure <code>GEMINI_API_KEY</code> on the server to enable autonomous decomposition.
+                Your submitted plan text is preserved below. Configure a Gemini API key in Settings or via server <code>GEMINI_API_KEY</code> and retry.
               </p>
             </div>
           )}
@@ -294,8 +350,14 @@ export const PlanIngestionModal: React.FC<PlanIngestionModalProps> = ({
           <div className="flex justify-center">
             <button
               onClick={handleDecomposePlan}
-              disabled={isDecomposing || !planTextInput.trim() || readiness?.ready === false}
-              title={readiness?.ready === false ? 'GEMINI_API_KEY must be configured on the server' : undefined}
+              disabled={isDecomposing || !planTextInput.trim() || !readiness?.ready}
+              title={
+                !readiness
+                  ? readinessError || 'Checking planning readiness...'
+                  : readiness.ready === false
+                    ? 'A Gemini API key must be configured on the server'
+                    : undefined
+              }
               className="flex items-center space-x-2 px-6 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white text-xs font-bold rounded-xl shadow-lg shadow-indigo-600/30 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isDecomposing ? (

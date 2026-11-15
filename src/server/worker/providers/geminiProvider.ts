@@ -1,5 +1,6 @@
 import { DomainError } from '../../utils/errors';
 import { GoogleGenAI } from '@google/genai';
+import { getGeminiClient, resolveGeminiCredential } from '../../gemini.js';
 import {
   ModelProviderAdapter,
   ProviderTurnInput,
@@ -21,26 +22,22 @@ export class GeminiProviderAdapter implements ModelProviderAdapter {
   }
 
   private getClient(): GoogleGenAI {
-    if (!this.client) {
-      const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-      this.client = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'dupond-coding-worker-gemini',
-          },
-        },
-      });
+    if (this.client) {
+      return this.client;
     }
-    return this.client;
+    const resolved = getGeminiClient({ userAgent: 'dupond-coding-worker-gemini' });
+    if (!resolved) {
+      throw new DomainError('Gemini API key is not configured on the server.');
+    }
+    return resolved;
   }
 
   public async isAvailable(): Promise<{ available: boolean; error?: string }> {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key || !key.trim()) {
+    const resolved = resolveGeminiCredential();
+    if (!resolved.apiKey) {
       return {
         available: false,
-        error: 'Prerequisite missing: GEMINI_API_KEY is not set in environment or .env. A valid Gemini API key is required.',
+        error: 'Prerequisite missing: GEMINI_API_KEY is not set in environment or .env, and no saved application Gemini key is configured.',
       };
     }
     return { available: true };

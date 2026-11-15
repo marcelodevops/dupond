@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { GEMINI_MODEL, getGeminiClient } from '../gemini.js';
+import {
+  GEMINI_MODEL,
+  getGeminiClient,
+  getGeminiCredentialStatus,
+  resolveGeminiCredential,
+  sanitizeGeminiError,
+} from '../gemini.js';
 import { ProjectApiError } from '../projects/projectStore.js';
 import type { PlanningReadiness } from '../../types/projectContract.js';
 
@@ -46,19 +52,19 @@ export type PlanDecompositionResult = z.infer<typeof PlanDecompositionSchema>;
  * Note: AI planning currently only supports Gemini.
  */
 export function getPlanningReadiness(): PlanningReadiness {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) {
-    return {
-      provider: 'gemini',
-      model: GEMINI_MODEL,
-      ready: false,
-      error: 'GEMINI_API_KEY is not configured on the server. AI plan decomposition is unavailable.',
-    };
-  }
+  const status = getGeminiCredentialStatus();
   return {
-    provider: 'gemini',
-    model: GEMINI_MODEL,
-    ready: true,
+    provider: status.provider,
+    model: status.model,
+    ready: status.ready,
+    configured: status.configured,
+    source: status.source,
+    hasSavedKey: status.hasSavedKey,
+    environmentControlled: status.environmentControlled,
+    lastTestedAt: status.lastTestedAt,
+    lastTestOutcome: status.lastTestOutcome,
+    lastTestError: status.lastTestError,
+    ...(status.error ? { error: status.error } : {}),
   };
 }
 
@@ -72,12 +78,12 @@ export async function parsePlan(planText: string, currentAgents: any[] = []): Pr
     throw new ProjectApiError(400, 'INVALID_PLAN', 'Plan text is required and cannot be empty.');
   }
 
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) {
+  const resolved = resolveGeminiCredential();
+  if (!resolved.apiKey) {
     throw new ProjectApiError(
       503,
       'PLANNER_UNAVAILABLE',
-      'AI plan decomposition is unavailable: GEMINI_API_KEY is not configured on the server.'
+      'AI plan decomposition is unavailable: no Gemini API key is configured on the server (set GEMINI_API_KEY or save an application key in Settings).'
     );
   }
 
@@ -106,7 +112,7 @@ export async function parsePlan(planText: string, currentAgents: any[] = []): Pr
     throw new ProjectApiError(
       502,
       'PLAN_PARSING_FAILED',
-      `AI plan decomposition request failed: ${apiErr?.message || 'Upstream provider error'}`
+      `AI plan decomposition request failed: ${sanitizeGeminiError(apiErr?.message || 'Upstream provider error', resolved.apiKey)}`
     );
   }
 

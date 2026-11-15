@@ -351,6 +351,20 @@ CREATE TABLE IF NOT EXISTS project_source_plans (
   UNIQUE (project_id, revision)
 );
 
+CREATE TABLE IF NOT EXISTS app_credentials (
+  provider TEXT PRIMARY KEY,
+  api_key_enc TEXT NOT NULL,
+  credential_version TEXT,
+  key_fingerprint TEXT,
+  last_tested_at TEXT,
+  last_test_outcome TEXT,
+  last_test_error TEXT,
+  last_test_model TEXT,
+  last_test_seq INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_run_attempts_run_id ON run_attempts(run_id);

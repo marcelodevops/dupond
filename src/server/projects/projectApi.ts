@@ -1,9 +1,12 @@
 import { Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { ProjectStore, ProjectApiError, defaultProjectStore } from './projectStore.js';
+import { KeyRotationInProgressError } from './secretCrypto.js';
+import { AppCredentialStore, AppCredentialValidationError, defaultAppCredentialStore } from './appCredentialStore.js';
 import { JiraProvisioner, defaultJiraProvisioner } from './jiraProvisioner.js';
 import { PROJECT_CONTEXT_HEADER, DEFAULT_PROJECT_ID } from '../../types/projectContract.js';
 import { getPlanningReadiness, parsePlan } from '../planning/planBreakdown.js';
+import { getGeminiCredentialStatus, invalidateGeminiClientCache, testGeminiConnection } from '../gemini.js';
 
 const RepositorySchema = z
   .object({
@@ -133,6 +136,13 @@ function fail(res: Response, err: any): void {
       error: err.message,
       code: err.code,
       ...(err.details !== undefined ? { details: err.details } : {}),
+    });
+    return;
+  }
+  if (err instanceof KeyRotationInProgressError || err instanceof AppCredentialValidationError) {
+    res.status(err.httpStatus).json({
+      error: err.message,
+      code: err.code,
     });
     return;
   }
@@ -336,7 +346,52 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
   });
 
   router.get('/planning/readiness', (_req: Request, res: Response) => {
-    res.json(getPlanningReadiness());
+    try {
+      res.json(getPlanningReadiness());
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.get('/credentials/gemini', (_req: Request, res: Response) => {
+    try {
+      res.json(getGeminiCredentialStatus());
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.put('/credentials/gemini', (req: Request, res: Response) => {
+    try {
+      const parsed = z.object({ apiKey: z.string() }).strict().parse(req.body ?? {});
+      defaultAppCredentialStore.saveGeminiKey(parsed.apiKey);
+      invalidateGeminiClientCache();
+      res.json(getGeminiCredentialStatus());
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.delete('/credentials/gemini', (_req: Request, res: Response) => {
+    try {
+      defaultAppCredentialStore.deleteGeminiKey();
+      invalidateGeminiClientCache();
+      res.json(getGeminiCredentialStatus());
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.post('/credentials/gemini/test', async (_req: Request, res: Response) => {
+    try {
+      const result = await testGeminiConnection();
+      res.json({
+        ...result,
+        status: getGeminiCredentialStatus(),
+      });
+    } catch (err) {
+      fail(res, err);
+    }
   });
 
   router.get('/projects/:projectId/plan', (req: Request, res: Response) => {
