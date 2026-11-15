@@ -256,13 +256,27 @@ describe('Project Settings vs Application Settings E2E', () => {
         await page.screenshot({ path: path.join(screenshotDir, 'project-settings-desktop.png') });
       }
 
-      // 4. Dirty-state dismissal on Project Settings + Keyboard Escape
-      await page.getByTestId('project-description-input').fill('Alpha unsaved draft');
+      // 4. Focus stability on char-by-char typing, Tab navigation, dirty-state Escape, & focus restoration
+      const descInput = page.getByTestId('project-description-input');
+      await descInput.click();
+      await descInput.fill('');
+      await descInput.pressSequentially('Alpha unsaved draft');
+      // Typing char-by-char (flipping isDirty false->true) must NOT steal focus away from textarea
+      assert.strictEqual(
+        await page.evaluate(() => document.activeElement?.getAttribute('data-testid')),
+        'project-description-input',
+      );
+      await page.keyboard.press('Tab');
+      assert.notStrictEqual(
+        await page.evaluate(() => document.activeElement?.getAttribute('data-testid')),
+        'project-description-input',
+      );
+
       await page.keyboard.press('Escape');
       await pwExpect(page.getByTestId('project-settings-discard-confirm')).toBeVisible();
       await page.getByTestId('project-settings-keep-editing-btn').click();
       await pwExpect(page.getByTestId('project-settings-discard-confirm')).toBeHidden();
-      await pwExpect(page.getByTestId('project-description-input')).toHaveValue('Alpha unsaved draft');
+      await pwExpect(descInput).toHaveValue('Alpha unsaved draft');
 
       // Failed save preserves unsaved input & shows persistent error
       await page.route(`**/api/projects/${projA.id}`, async (route) => {
@@ -278,19 +292,82 @@ describe('Project Settings vs Application Settings E2E', () => {
       });
       await page.getByTestId('save-project-settings-btn').click();
       await pwExpect(page.getByTestId('project-settings-error-banner')).toContainText('Simulated save failure');
-      await pwExpect(page.getByTestId('project-description-input')).toHaveValue('Alpha unsaved draft');
+      await pwExpect(descInput).toHaveValue('Alpha unsaved draft');
       await page.unroute(`**/api/projects/${projA.id}`);
 
-      // Cancel -> confirm discard resets edits
+      // Cancel -> confirm discard resets edits & restores focus to Project Settings trigger
       await page.getByTestId('cancel-project-settings-btn').click();
       await pwExpect(page.getByTestId('project-settings-discard-confirm')).toBeVisible();
       await page.getByTestId('project-settings-confirm-discard-btn').click();
       await pwExpect(projModal).toBeHidden();
+      await pwExpect(projBtn).toBeFocused();
 
       // 2. Edit Project Alpha across all tabs, save, and verify isolation from Project Beta
       await projBtn.click();
       await page.getByTestId('project-description-input').fill('Alpha updated mission');
+      // Delayed repository verification invalidated when path/branch edits happen mid-flight
       await page.getByTestId('project-tab-repository').click();
+      await page.getByTestId('project-local-path-input').fill(tmpDir);
+      let releaseVerify!: () => void;
+      const verifyGate = new Promise<void>((r) => {
+        releaseVerify = r;
+      });
+      let markVerifyHandled!: () => void;
+      const verifyHandled = new Promise<void>((r) => {
+        markVerifyHandled = r;
+      });
+      let verifyIntercepted = false;
+      const verifyRouteHandler = async (route: any) => {
+        verifyIntercepted = true;
+        await verifyGate;
+        await route
+          .fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              valid: true,
+              localPathExists: true,
+              isGitRepo: true,
+              branchExists: true,
+              writable: true,
+              details: ['Stale verification result for older branch'],
+            }),
+          })
+          .catch(() => {});
+        markVerifyHandled();
+      };
+      await page.route(`**/api/projects/${projA.id}/repository/verify`, verifyRouteHandler);
+      await page.getByTestId('verify-repo-btn').click();
+      await pwExpect.poll(() => verifyIntercepted).toBe(true);
+      await page.getByTestId('project-target-branch-input').fill('edited-branch-mid-verify');
+      releaseVerify();
+      await verifyHandled;
+      await page.unroute(`**/api/projects/${projA.id}/repository/verify`, verifyRouteHandler);
+      await pwExpect(page.getByTestId('repo-verification-result')).toHaveCount(0);
+
+      // Completed verification is also invalidated when local path changes
+      await page.route(`**/api/projects/${projA.id}/repository/verify`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            valid: true,
+            localPathExists: true,
+            isGitRepo: true,
+            branchExists: true,
+            writable: true,
+            details: ['Verified for current path'],
+          }),
+        });
+      });
+      await page.getByTestId('verify-repo-btn').click();
+      await pwExpect(page.getByTestId('repo-verification-result')).toBeVisible();
+      await page.getByTestId('project-local-path-input').fill(`${tmpDir}-changed`);
+      await pwExpect(page.getByTestId('repo-verification-result')).toHaveCount(0);
+      await page.unroute(`**/api/projects/${projA.id}/repository/verify`);
+
+      // Reset repository edits back to clean values and save Project Alpha
+      await page.getByTestId('project-local-path-input').fill('');
       await page.getByTestId('project-repo-url-input').fill('https://github.com/acme/alpha.git');
       await page.getByTestId('project-target-branch-input').fill('release');
       await page.getByTestId('project-write-mode-select').selectOption('patch_export');
@@ -302,19 +379,126 @@ describe('Project Settings vs Application Settings E2E', () => {
       await page.getByTestId('save-project-settings-btn').click();
       await pwExpect(page.getByTestId('project-settings-success-banner')).toBeVisible();
 
-      // 5. Switching projects while dirty blocks saving stale edits to Project Beta
-      await page.getByTestId('project-tab-general').click();
-      await page.getByTestId('project-description-input').fill('Stale Alpha edit');
-      // Switch active project in sessionStorage + reload? No, trigger switchProject via ProjectSwitcher while modal is open?
-      // Modal overlays screen, so verify via keyboard/DOM or evaluate: simulate external project switch by clicking ProjectSwitcher if accessible,
-      // or close? Wait: let's dispatch click on ProjectSwitcher or check after reload.
-      // Actually let's test discard -> switch to Beta -> verify Beta does NOT have Alpha's settings!
+      // 5a. Legitimate ProjectContext switch while ProjectSettingsModal is DIRTY on Project Alpha
       await page.getByTestId('cancel-project-settings-btn').click();
-      await page.getByTestId('project-settings-confirm-discard-btn').click();
+      await pwExpect(projModal).toBeHidden();
+
+      let releaseSwitchDirty!: () => void;
+      const switchDirtyGate = new Promise<void>((r) => {
+        releaseSwitchDirty = r;
+      });
+      let markSwitchDirtyHandled!: () => void;
+      const switchDirtyHandled = new Promise<void>((r) => {
+        markSwitchDirtyHandled = r;
+      });
+      const switchDirtyHandler = async (route: any) => {
+        if (route.request().method() === 'GET') {
+          await switchDirtyGate;
+          await route.continue().catch(() => {});
+          markSwitchDirtyHandled();
+          return;
+        }
+        await route.continue().catch(() => {});
+      };
+      await page.route(`**/api/projects/${projB.id}`, switchDirtyHandler);
+      await page.getByRole('button', { name: 'Switch Dupond Project' }).click();
+      await page.getByText('Project Beta').first().click();
+      // Open Project Settings immediately while switch to Beta is still pending (still on Alpha)
+      await projBtn.click();
+      await pwExpect(page.getByTestId('project-settings-title')).toContainText('Project Settings — Project Alpha');
+      await page.getByTestId('project-tab-general').click();
+      await page.getByTestId('project-description-input').fill('Alpha dirty draft during switch');
+      // Complete switch to Project Beta while modal is dirty on Alpha
+      releaseSwitchDirty();
+      await switchDirtyHandled;
+      await page.unroute(`**/api/projects/${projB.id}`, switchDirtyHandler);
+
+      await pwExpect(page.getByTestId('project-switch-conflict-banner')).toBeVisible();
+      await pwExpect(page.getByTestId('project-description-input')).toHaveValue('Alpha dirty draft during switch');
+      await pwExpect(page.getByTestId('save-project-settings-btn')).toBeDisabled();
+      await page.getByTestId('project-switch-reload-btn').click();
+      await pwExpect(page.getByTestId('project-settings-title')).toContainText('Project Settings — Project Beta');
+      await pwExpect(page.getByTestId('project-description-input')).toHaveValue('Beta initial mission');
+      await page.getByTestId('cancel-project-settings-btn').click();
+
+      // Switch back to Alpha and test 5b: Legitimate ProjectContext switch while a SAVE is PENDING
+      await page.getByRole('button', { name: 'Switch Dupond Project' }).click();
+      await page.getByText('Project Alpha').first().click();
+      await pwExpect(page.getByRole('button', { name: 'Switch Dupond Project' })).toContainText('Project Alpha');
+
+      let releaseSwitchPendingSave!: () => void;
+      const switchPendingSaveGate = new Promise<void>((r) => {
+        releaseSwitchPendingSave = r;
+      });
+      let markSwitchPendingSaveHandled!: () => void;
+      const switchPendingSaveHandled = new Promise<void>((r) => {
+        markSwitchPendingSaveHandled = r;
+      });
+      let releasePatchAlpha!: () => void;
+      const patchAlphaGate = new Promise<void>((r) => {
+        releasePatchAlpha = r;
+      });
+      let markPatchAlphaHandled!: () => void;
+      const patchAlphaHandled = new Promise<void>((r) => {
+        markPatchAlphaHandled = r;
+      });
+      let patchAlphaInFlight = false;
+      const switchPendingSaveHandler = async (route: any) => {
+        if (route.request().method() === 'GET') {
+          await switchPendingSaveGate;
+          await route.continue().catch(() => {});
+          markSwitchPendingSaveHandled();
+          return;
+        }
+        await route.continue().catch(() => {});
+      };
+      const patchAlphaHandler = async (route: any) => {
+        if (route.request().method() === 'PATCH') {
+          patchAlphaInFlight = true;
+          await patchAlphaGate;
+          await route.continue().catch(() => {});
+          markPatchAlphaHandled();
+          return;
+        }
+        await route.continue().catch(() => {});
+      };
+      await page.route(`**/api/projects/${projB.id}`, switchPendingSaveHandler);
+      await page.route(`**/api/projects/${projA.id}`, patchAlphaHandler);
 
       await page.getByRole('button', { name: 'Switch Dupond Project' }).click();
       await page.getByText('Project Beta').first().click();
+      await projBtn.click();
+      await pwExpect(page.getByTestId('project-settings-title')).toContainText('Project Settings — Project Alpha');
+      await page.getByTestId('project-description-input').fill('Alpha in-flight save');
+      await page.getByTestId('save-project-settings-btn').click();
+      await pwExpect.poll(() => patchAlphaInFlight).toBe(true);
+
+      // Transition active project to Beta while Alpha PATCH is pending, then resolve Alpha PATCH
+      releaseSwitchPendingSave();
+      await switchPendingSaveHandled;
       await pwExpect(page.getByRole('button', { name: 'Switch Dupond Project' })).toContainText('Project Beta');
+      releasePatchAlpha();
+      await patchAlphaHandled;
+      await page.unroute(`**/api/projects/${projB.id}`, switchPendingSaveHandler);
+      await page.unroute(`**/api/projects/${projA.id}`, patchAlphaHandler);
+
+      // Selection must NOT revert back to Alpha, and no misleading success banner should appear for Beta
+      await pwExpect(page.getByRole('button', { name: 'Switch Dupond Project' })).toContainText('Project Beta');
+      await pwExpect(page.getByTestId('project-settings-success-banner')).toHaveCount(0);
+      await pwExpect(page.getByTestId('project-switch-conflict-banner')).toBeVisible();
+      await page.getByTestId('project-switch-reload-btn').click();
+      await pwExpect(page.getByTestId('project-description-input')).toHaveValue('Beta initial mission');
+      await page.getByTestId('cancel-project-settings-btn').click();
+
+      // Verify on backend that Alpha received its save and Beta remained isolated
+      const verifyAlphaRes = await page.request.get(`${serverUrl}/api/projects/${projA.id}`, {
+        headers: { Authorization: `Bearer ${SYNTH_OPERATOR_TOKEN}` },
+      });
+      assert.strictEqual((await verifyAlphaRes.json()).description, 'Alpha in-flight save');
+      const verifyBetaRes = await page.request.get(`${serverUrl}/api/projects/${projB.id}`, {
+        headers: { Authorization: `Bearer ${SYNTH_OPERATOR_TOKEN}` },
+      });
+      assert.strictEqual((await verifyBetaRes.json()).description, 'Beta initial mission');
 
       await projBtn.click();
       await pwExpect(page.getByTestId('project-settings-title')).toContainText('Project Settings — Project Beta');
@@ -333,7 +517,7 @@ describe('Project Settings vs Application Settings E2E', () => {
       await page.getByRole('button', { name: 'Switch Dupond Project' }).click();
       await page.getByText('Project Alpha').first().click();
       await projBtn.click();
-      await pwExpect(page.getByTestId('project-description-input')).toHaveValue('Alpha updated mission');
+      await pwExpect(page.getByTestId('project-description-input')).toHaveValue('Alpha in-flight save');
       await page.getByTestId('project-tab-repository').click();
       await pwExpect(page.getByTestId('project-repo-url-input')).toHaveValue('https://github.com/acme/alpha.git');
       await pwExpect(page.getByTestId('project-target-branch-input')).toHaveValue('release');
@@ -355,12 +539,18 @@ describe('Project Settings vs Application Settings E2E', () => {
         await page.screenshot({ path: path.join(screenshotDir, 'app-settings-desktop.png') });
       }
 
-      // Dirty check on Application Settings key input
-      await page.getByTestId('gemini-api-key-input').fill(SYNTH_GEMINI_KEY);
+      // Dirty check + char-by-char typing focus stability on Application Settings key input
+      const appKeyInput = page.getByTestId('gemini-api-key-input');
+      await pwExpect(appKeyInput).toBeFocused();
+      await appKeyInput.pressSequentially(SYNTH_GEMINI_KEY);
+      await pwExpect(appKeyInput).toBeFocused();
+      await page.keyboard.press('Tab');
+      await pwExpect(page.getByTestId('save-gemini-key-btn')).toBeFocused();
+
       await page.keyboard.press('Escape');
       await pwExpect(page.getByTestId('app-settings-discard-confirm')).toBeVisible();
       await page.getByTestId('app-settings-keep-editing-btn').click();
-      await pwExpect(page.getByTestId('gemini-api-key-input')).toHaveValue(SYNTH_GEMINI_KEY);
+      await pwExpect(appKeyInput).toHaveValue(SYNTH_GEMINI_KEY);
 
       await page.getByTestId('save-gemini-key-btn').click();
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Saved');
@@ -376,13 +566,14 @@ describe('Project Settings vs Application Settings E2E', () => {
       await pwExpect(page.getByTestId('plan-readiness-bar')).toContainText('Ready for decomposition');
       await page.getByRole('button', { name: 'Cancel' }).click();
 
-      // 3. Switch back to Project Beta -> Application Settings still shows Saved + Verified
+      // 3. Switch back to Project Beta -> Application Settings still shows Saved + Verified, and restores focus on close
       await page.getByRole('button', { name: 'Switch Dupond Project' }).click();
       await page.getByText('Project Beta').first().click();
       await appBtn.click();
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Saved');
       await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
       await page.getByTestId('close-app-settings-btn').click();
+      await pwExpect(appBtn).toBeFocused();
 
       // 8. Narrow mobile viewport (375x812): both buttons and modals are usable with no horizontal overflow
       await page.setViewportSize({ width: 375, height: 812 });
