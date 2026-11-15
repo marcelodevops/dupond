@@ -585,6 +585,17 @@ export class ProjectStore {
     return this.txn(() => {
       const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as any;
       if (!row) throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', `Project ${projectId} not found.`);
+      if (patch.repository !== undefined || patch.preferences !== undefined) {
+        const blockers = this.getActiveRunBlockers(projectId);
+        if (blockers.runningRunIds.length > 0 || blockers.claimedTaskIds.length > 0) {
+          throw new ProjectApiError(
+            409,
+            'ACTIVE_RUNS_PRESENT',
+            'Cannot update execution-affecting project settings (repository or preferences) while active runs or claimed tasks are executing.',
+            { ...blockers, activeRunsCount: blockers.runningRunIds.length },
+          );
+        }
+      }
       if (projectId === 'default' && patch.name && patch.name.trim() !== row.name) {
         throw new ProjectApiError(400, 'CANNOT_MODIFY_DEFAULT_IDENTITY', 'The default project fixed identity cannot be modified.');
       }

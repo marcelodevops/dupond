@@ -13,7 +13,8 @@ import {
   Share2, 
   Activity,
   Layers,
-  Settings
+  Settings,
+  Globe
 } from 'lucide-react';
 import { ProjectSwitcher } from './ProjectSwitcher';
 
@@ -31,7 +32,8 @@ interface HeaderProps {
   projectTitle: string;
   cycleCount: number;
   isManualMode?: boolean;
-  onOpenSettings?: () => void;
+  onOpenProjectSettings?: () => void;
+  onOpenApplicationSettings?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -46,7 +48,8 @@ export const Header: React.FC<HeaderProps> = ({
   projectTitle,
   cycleCount,
   isManualMode = false,
-  onOpenSettings,
+  onOpenProjectSettings,
+  onOpenApplicationSettings,
 }) => {
   const tabs = [
     { id: 'kanban', label: 'Kanban Board', icon: Kanban },
@@ -59,11 +62,11 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <header className="sticky top-0 z-40 bg-slate-950/95 backdrop-blur-md border-b border-slate-800 text-slate-100 shadow-xl">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+        <div className="flex flex-wrap items-center justify-between gap-2 py-2 min-h-16">
           {/* Brand & Project Info */}
-          <div className="flex items-center space-x-3">
-            <div className="relative flex items-center justify-center w-12 h-12 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 via-purple-600 to-cyan-500 p-[2px] shadow-lg shadow-indigo-500/20">
+          <div className="flex items-center space-x-3 min-w-0">
+            <div className="relative flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 via-purple-600 to-cyan-500 p-[2px] shadow-lg shadow-indigo-500/20">
               <div className="relative w-full h-full bg-amber-50 rounded-[10px] overflow-hidden">
                 <img
                   src={dupondLogo}
@@ -76,9 +79,9 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
               </span>
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center space-x-2">
-                <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-white via-slate-100 to-indigo-200 bg-clip-text text-transparent">
+                <span className="font-bold text-base sm:text-lg tracking-tight bg-gradient-to-r from-white via-slate-100 to-indigo-200 bg-clip-text text-transparent truncate">
                   Dupond Orchestrator
                 </span>
                 {isManualMode ? (
@@ -91,8 +94,20 @@ export const Header: React.FC<HeaderProps> = ({
                   </span>
                 )}
               </div>
-              <div className="mt-1 flex items-center space-x-2">
+              <div className="mt-1 flex flex-wrap items-center gap-2">
                 <ProjectSwitcher />
+                {onOpenProjectSettings && (
+                  <button
+                    type="button"
+                    data-testid="open-project-settings-btn"
+                    onClick={onOpenProjectSettings}
+                    className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-all focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    title="Project Settings & Verification"
+                  >
+                    <Settings className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span>Project Settings</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -150,15 +165,17 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
 
-            {/* Project Settings Button */}
-            {onOpenSettings && (
+            {/* Application Settings Button */}
+            {onOpenApplicationSettings && (
               <button
-                onClick={onOpenSettings}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-all"
-                title="Project Settings & Verification"
+                type="button"
+                data-testid="open-app-settings-btn"
+                onClick={onOpenApplicationSettings}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-all focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                title="Application Settings (Server-Wide)"
               >
-                <Settings className="w-3.5 h-3.5 text-slate-400" />
-                <span className="hidden sm:inline">Settings</span>
+                <Globe className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>App Settings</span>
               </button>
             )}
 
