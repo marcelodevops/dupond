@@ -68,9 +68,19 @@ async function getFreePort(): Promise<number> {
   });
 }
 
-async function waitForHealthy(baseUrl: string, timeoutMs = 15000): Promise<void> {
+async function waitForHealthy(
+  baseUrl: string,
+  proc: ChildProcess,
+  getLogs: () => string,
+  timeoutMs = 15000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      throw new Error(
+        `App server exited before becoming healthy (code=${proc.exitCode}, signal=${proc.signalCode}):\n${getLogs()}`,
+      );
+    }
     try {
       const res = await fetch(`${baseUrl}/api/health`);
       if (res.ok) return;
@@ -79,7 +89,20 @@ async function waitForHealthy(baseUrl: string, timeoutMs = 15000): Promise<void>
     }
     await new Promise((r) => setTimeout(r, 150));
   }
-  throw new Error(`Timed out waiting for ${baseUrl}/api/health`);
+  throw new Error(`Timed out waiting for ${baseUrl}/api/health\n${getLogs()}`);
+}
+
+async function waitForPortClosed(baseUrl: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`${baseUrl}/api/health`);
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`Previous app server still listening on ${baseUrl} after stop`);
 }
 
 describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
@@ -119,37 +142,57 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       else env[k] = v;
     }
 
-    serverProc = spawn('npx', ['tsx', 'server.ts'], {
+    const tsxBin = path.resolve(
+      process.cwd(),
+      'node_modules',
+      '.bin',
+      process.platform === 'win32' ? 'tsx.cmd' : 'tsx',
+    );
+    const proc = spawn(tsxBin, ['server.ts'], {
       cwd: process.cwd(),
       env,
+      detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    serverProc.stdout?.on('data', (chunk) => {
+    serverProc = proc;
+    proc.stdout?.on('data', (chunk) => {
       serverLogs += chunk.toString('utf-8');
     });
-    serverProc.stderr?.on('data', (chunk) => {
+    proc.stderr?.on('data', (chunk) => {
       serverLogs += chunk.toString('utf-8');
     });
 
-    await waitForHealthy(serverUrl);
+    await waitForHealthy(serverUrl, proc, () => serverLogs);
   }
 
   async function stopAppServer(): Promise<void> {
     if (!serverProc) return;
     const proc = serverProc;
     serverProc = null;
-    await new Promise<void>((resolve) => {
-      proc.once('exit', () => resolve());
-      proc.kill('SIGTERM');
-      setTimeout(() => {
-        try {
-          proc.kill('SIGKILL');
-        } catch {
-          // ignore
+    const killTarget = (sig: NodeJS.Signals) => {
+      try {
+        if (process.platform !== 'win32' && proc.pid) {
+          process.kill(-proc.pid, sig);
+        } else {
+          proc.kill(sig);
         }
+      } catch {
+        // ignore if already exited
+      }
+    };
+    await new Promise<void>((resolve) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        resolve();
+        return;
+      }
+      proc.once('exit', () => resolve());
+      killTarget('SIGTERM');
+      setTimeout(() => {
+        killTarget('SIGKILL');
         resolve();
       }, 3000);
     });
+    await waitForPortClosed(serverUrl);
   }
 
   beforeAll(async () => {
