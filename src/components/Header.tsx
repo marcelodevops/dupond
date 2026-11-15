@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { ProjectSwitcher } from './ProjectSwitcher';
 
-const dupondLogo = new URL('../../resources/dupond-logo.png', import.meta.url).href;
+const dupondLogo = new URL('../../resources/agents/coordinator.png', import.meta.url).href;
 
 interface HeaderProps {
   activeTab: string;
@@ -63,12 +63,12 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center justify-between h-16">
           {/* Brand & Project Info */}
           <div className="flex items-center space-x-3">
-            <div className="relative flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 via-purple-600 to-cyan-500 p-[2px] shadow-lg shadow-indigo-500/20">
-              <div className="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center overflow-hidden">
+            <div className="relative flex items-center justify-center w-12 h-12 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 via-purple-600 to-cyan-500 p-[2px] shadow-lg shadow-indigo-500/20">
+              <div className="relative w-full h-full bg-amber-50 rounded-[10px] overflow-hidden">
                 <img
                   src={dupondLogo}
-                  alt="Dupond logo"
-                  className="w-full h-full object-contain p-0.5 rounded-[8px]"
+                  alt="Dupond, the bowler-hatted detective"
+                  className="absolute -top-[8%] -left-1/4 w-[150%] max-w-none h-auto"
                 />
               </div>
               <span className="absolute -top-1 -right-1 flex h-3 w-3">
