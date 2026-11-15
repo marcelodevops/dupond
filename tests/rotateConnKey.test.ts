@@ -619,4 +619,64 @@ describe('scripts/rotateConnKey.ts safe rotation & recovery', () => {
     assert.strictEqual(rec7.status, 0, rec7.stderr);
     assert.strictEqual(decryptSynthetic(readDbTokens(f7.dbPath)[0].api_token_enc, f7.initialKey), 'synth-partial');
   });
+
+  it('O. refuses missing-metadata recovery whenever .next exists and preserves all candidate keys', () => {
+    // 1. Exact reproduction: SIGKILL after DB COMMIT, remove .state.json, run --recover against DIFFERENT empty DB
+    const dir1 = makeTempDir('rot-o-repro-');
+    const secOrig = 'synth-original-committed-secret';
+    const f1 = setupFixture(dir1, [{ id: 'conn-1', token: secOrig }]);
+    const killed1 = runCliChild(f1.keyPath, f1.dbPath, [], { DUPOND_ROTATE_KILL_STAGE: 'after_db_commit' });
+    assert.strictEqual(killed1.signal, 'SIGKILL');
+
+    fs.unlinkSync(`${f1.keyPath}.state.json`);
+
+    const activeBytesBefore = fs.readFileSync(f1.keyPath);
+    const prevBytesBefore = fs.readFileSync(`${f1.keyPath}.prev`);
+    const nextBytesBefore = fs.readFileSync(`${f1.keyPath}.next`);
+
+    const emptyDir = makeTempDir('rot-o-empty-other-');
+    const emptyFix = setupFixture(emptyDir, []);
+
+    const wrongRecovery = runCliChild(f1.keyPath, emptyFix.dbPath, ['--recover']);
+    assert.notStrictEqual(wrongRecovery.status, 0, 'Wrong-DB recovery with missing .state.json must fail explicitly');
+    assert.match(wrongRecovery.stderr, /Ambiguous recovery state/);
+
+    // Active key and both candidate keys must remain byte-for-byte unchanged
+    assert.deepStrictEqual(fs.readFileSync(f1.keyPath), activeBytesBefore);
+    assert.deepStrictEqual(fs.readFileSync(`${f1.keyPath}.prev`), prevBytesBefore);
+    assert.deepStrictEqual(fs.readFileSync(`${f1.keyPath}.next`), nextBytesBefore);
+
+    // Original DB remains recoverable with the retained .next key
+    const retainedNextKey = Buffer.from(nextBytesBefore.toString('utf-8').trim(), 'hex');
+    assert.strictEqual(decryptSynthetic(readDbTokens(f1.dbPath)[0].api_token_enc, retainedNextKey), secOrig);
+
+    // 2. Missing metadata with the CORRECT committed DB also refuses rather than guessing without state identity
+    const correctDbMissingMeta = runCliChild(f1.keyPath, f1.dbPath, ['--recover']);
+    assert.notStrictEqual(correctDbMissingMeta.status, 0);
+    assert.deepStrictEqual(fs.readFileSync(f1.keyPath), activeBytesBefore);
+    assert.deepStrictEqual(fs.readFileSync(`${f1.keyPath}.prev`), prevBytesBefore);
+    assert.deepStrictEqual(fs.readFileSync(`${f1.keyPath}.next`), nextBytesBefore);
+
+    // 3. Missing metadata during early staging AFTER .next was written -> refused, artifacts preserved
+    const dir3 = makeTempDir('rot-o-early-next-');
+    const f3 = setupFixture(dir3, [{ id: 'conn-1', token: 'synth-early-next' }]);
+    const killed3 = runCliChild(f3.keyPath, f3.dbPath, [], { DUPOND_ROTATE_KILL_STAGE: 'after_stage' });
+    assert.strictEqual(killed3.signal, 'SIGKILL');
+    fs.unlinkSync(`${f3.keyPath}.state.json`);
+    const earlyNextRec = runCliChild(f3.keyPath, f3.dbPath, ['--recover']);
+    assert.notStrictEqual(earlyNextRec.status, 0);
+    assert.ok(fs.existsSync(`${f3.keyPath}.prev`));
+    assert.ok(fs.existsSync(`${f3.keyPath}.next`));
+
+    // 4. Missing metadata with legacy plaintext-only DB when .next exists -> refused, artifacts preserved
+    const dir4 = makeTempDir('rot-o-plain-');
+    const f4 = setupFixture(dir4, [{ id: 'conn-1', token: 'synth-plain-only', legacyPlaintext: true }]);
+    const killed4 = runCliChild(f4.keyPath, f4.dbPath, [], { DUPOND_ROTATE_KILL_STAGE: 'after_db_commit' });
+    assert.strictEqual(killed4.signal, 'SIGKILL');
+    fs.unlinkSync(`${f4.keyPath}.state.json`);
+    const plainRec = runCliChild(f4.keyPath, f4.dbPath, ['--recover']);
+    assert.notStrictEqual(plainRec.status, 0);
+    assert.ok(fs.existsSync(`${f4.keyPath}.prev`));
+    assert.ok(fs.existsSync(`${f4.keyPath}.next`));
+  });
 });
