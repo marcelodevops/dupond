@@ -60,26 +60,36 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     onClose();
   };
 
-  // Focus restoration & Escape handling
+  const handleRequestCloseRef = useRef(handleRequestClose);
+  handleRequestCloseRef.current = handleRequestClose;
+
+  // Initial focus & focus restoration (runs only on open/close transitions)
   useEffect(() => {
     if (!isOpen) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     const focusTimer = setTimeout(() => {
       inputRef.current?.focus();
     }, 0);
+    return () => {
+      clearTimeout(focusTimer);
+      previousFocusRef.current?.focus?.();
+    };
+  }, [isOpen]);
+
+  // Escape key handler (uses ref so dirty/busy changes never steal focus)
+  useEffect(() => {
+    if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        handleRequestClose();
+        handleRequestCloseRef.current();
       }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => {
-      clearTimeout(focusTimer);
       document.removeEventListener('keydown', onKeyDown);
-      previousFocusRef.current?.focus?.();
     };
-  }, [isOpen, handleRequestClose]);
+  }, [isOpen]);
 
   // Reset transient banners & load status on open
   useEffect(() => {

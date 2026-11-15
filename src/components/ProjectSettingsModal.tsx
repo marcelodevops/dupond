@@ -108,6 +108,17 @@ const ProjectSettingsModalBody: React.FC<Omit<ProjectSettingsModalProps, 'isOpen
 
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const mountedRef = useRef(true);
+  const verifyEpochRef = useRef(0);
+  const currentProjectIdRef = useRef<string | null>(currentProject?.id || null);
+  currentProjectIdRef.current = currentProject?.id || null;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const loadFromProject = useCallback((project: Project) => {
     setEditingProjectId(project.id);
@@ -186,25 +197,42 @@ const ProjectSettingsModalBody: React.FC<Omit<ProjectSettingsModalProps, 'isOpen
     onClose();
   };
 
-  // Focus restoration & Escape key
+  const handleRequestCloseRef = useRef(handleRequestClose);
+  handleRequestCloseRef.current = handleRequestClose;
+
+  // Initial focus & focus restoration (runs only on mount/unmount of open modal)
   useEffect(() => {
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     const timer = setTimeout(() => {
       closeBtnRef.current?.focus();
     }, 0);
+    return () => {
+      clearTimeout(timer);
+      previousFocusRef.current?.focus?.();
+    };
+  }, []);
+
+  // Escape key handler (uses ref so typing/dirty/saving never steals focus)
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        handleRequestClose();
+        handleRequestCloseRef.current();
       }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => {
-      clearTimeout(timer);
       document.removeEventListener('keydown', onKeyDown);
-      previousFocusRef.current?.focus?.();
     };
-  }, [handleRequestClose]);
+  }, []);
+
+  // Invalidate verification result & in-flight responses whenever repository fields or project change
+  const repoVerifyKey = `${editingProjectId || ''}::${localPath.trim()}::${defaultBranch.trim() || 'main'}::${repoUrl.trim()}::${localWriteMode}`;
+  useEffect(() => {
+    verifyEpochRef.current += 1;
+    setVerificationResult(null);
+    setIsVerifying(false);
+  }, [repoVerifyKey]);
 
   const targetProject = currentProject;
   const isDefaultProject = (targetProject?.id || 'default') === 'default';
@@ -214,6 +242,8 @@ const ProjectSettingsModalBody: React.FC<Omit<ProjectSettingsModalProps, 'isOpen
 
   const handleVerifyRepo = async () => {
     if (!targetProject || projectSwitchConflict) return;
+    const verifyProjectId = targetProject.id;
+    const epoch = ++verifyEpochRef.current;
     setIsVerifying(true);
     setErrorBanner(null);
     setVerificationResult(null);
@@ -224,9 +254,23 @@ const ProjectSettingsModalBody: React.FC<Omit<ProjectSettingsModalProps, 'isOpen
         defaultBranch: defaultBranch.trim() || 'main',
         localWriteMode,
       };
-      const result = await projectApi.verifyRepository(targetProject.id, candidate);
+      const result = await projectApi.verifyRepository(verifyProjectId, candidate);
+      if (
+        !mountedRef.current ||
+        verifyEpochRef.current !== epoch ||
+        currentProjectIdRef.current !== verifyProjectId
+      ) {
+        return;
+      }
       setVerificationResult(result);
     } catch (err: any) {
+      if (
+        !mountedRef.current ||
+        verifyEpochRef.current !== epoch ||
+        currentProjectIdRef.current !== verifyProjectId
+      ) {
+        return;
+      }
       setVerificationResult({
         valid: false,
         localPathExists: false,
@@ -237,7 +281,9 @@ const ProjectSettingsModalBody: React.FC<Omit<ProjectSettingsModalProps, 'isOpen
         details: [err.message || 'Unknown network or filesystem error'],
       });
     } finally {
-      setIsVerifying(false);
+      if (mountedRef.current && verifyEpochRef.current === epoch) {
+        setIsVerifying(false);
+      }
     }
   };
 
@@ -299,14 +345,20 @@ const ProjectSettingsModalBody: React.FC<Omit<ProjectSettingsModalProps, 'isOpen
         };
       }
 
-      const updated = await updateProject(editingProjectId, patch);
+      const saveProjectId = editingProjectId;
+      const updated = await updateProject(saveProjectId, patch);
+      if (!mountedRef.current) return;
+      if (currentProjectIdRef.current !== saveProjectId) {
+        return;
+      }
       loadFromProject(updated);
       setSuccessBanner(`Project settings saved for "${updated.name}".`);
       if (onSaved) onSaved(updated);
     } catch (err: any) {
+      if (!mountedRef.current) return;
       setErrorBanner(err.message || 'Failed to update project settings.');
     } finally {
-      setIsSaving(false);
+      if (mountedRef.current) setIsSaving(false);
     }
   };
 

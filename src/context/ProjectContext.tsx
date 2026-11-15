@@ -66,12 +66,15 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Stale-response guard: monotonic epoch ensures an older request never populates the workspace
   const switchEpochRef = useRef(0);
   const abortCtrlRef = useRef<AbortController | null>(null);
+  const currentProjectIdRef = useRef<string | null>(null);
+  currentProjectIdRef.current = currentProject?.id || null;
 
   const triggerBoardRefresh = useCallback(() => {
     setBoardRefreshTrigger((prev) => prev + 1);
   }, []);
 
   const refreshProjects = useCallback(async () => {
+    const epochBefore = switchEpochRef.current;
     setIsLoadingProjects(true);
     setProjectError(null);
     try {
@@ -88,28 +91,35 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         try {
           const full = await projectApi.getProject(targetId);
-          setCurrentProject(full);
+          if (switchEpochRef.current === epochBefore && getActiveProjectId() === targetId) {
+            setCurrentProject(full);
+          }
         } catch (err: any) {
+          if (switchEpochRef.current !== epochBefore) return;
           if (list.length > 0 && list[0].id !== targetId) {
             try {
               const fallback = await projectApi.getProject(list[0].id);
-              setActiveProjectId(list[0].id);
-              setCurrentProject(fallback);
+              if (switchEpochRef.current === epochBefore) {
+                setActiveProjectId(list[0].id);
+                setCurrentProject(fallback);
+              }
             } catch {
-              setCurrentProject(null);
+              if (switchEpochRef.current === epochBefore) setCurrentProject(null);
             }
           } else {
             setCurrentProject(null);
             setProjectError(err.message || `Failed to load project ${targetId}`);
           }
         }
-      } else {
+      } else if (switchEpochRef.current === epochBefore) {
         setCurrentProject(null);
       }
     } catch (err: any) {
-      setProjects([]);
-      setCurrentProject(null);
-      setProjectError(err.message || 'Failed to load projects from server.');
+      if (switchEpochRef.current === epochBefore) {
+        setProjects([]);
+        setCurrentProject(null);
+        setProjectError(err.message || 'Failed to load projects from server.');
+      }
     } finally {
       setIsLoadingProjects(false);
     }
@@ -117,7 +127,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // Switch to another project with race-condition protection and stale response abortion
   const switchProject = useCallback(async (targetProjectId: string) => {
-    if (currentProject?.id === targetProjectId) return;
+    if (currentProjectIdRef.current === targetProjectId) return;
 
     // 1. Invalidate previous ongoing switch requests
     switchEpochRef.current += 1;
@@ -183,56 +193,64 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const updateProject = useCallback(async (projectId: string, patch: UpdateProjectRequest): Promise<Project> => {
     const updated = await projectApi.updateProject(projectId, patch);
-    await refreshProjects();
-    if (currentProject?.id === projectId) {
-      setCurrentProject(updated);
-    }
+    setProjects((prev) =>
+      prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)),
+    );
+    setCurrentProject((prev) =>
+      prev && prev.id === updated.id && getActiveProjectId() === updated.id ? updated : prev,
+    );
     return updated;
-  }, [currentProject?.id, refreshProjects]);
+  }, []);
 
   const archiveProject = useCallback(async (projectId: string): Promise<ArchiveProjectResponse> => {
     const res = await projectApi.archiveProject(projectId);
     await refreshProjects();
-    if (currentProject?.id === projectId) {
+    if (currentProjectIdRef.current === projectId && getActiveProjectId() === projectId) {
       try {
         const updated = await projectApi.getProject(projectId);
-        setCurrentProject(updated);
+        setCurrentProject((prev) =>
+          prev && prev.id === projectId && getActiveProjectId() === projectId ? updated : prev,
+        );
       } catch {
         // Project list already updated
       }
     }
     return res;
-  }, [currentProject?.id, refreshProjects]);
+  }, [refreshProjects]);
 
   const resetProject = useCallback(async (projectId: string, req: ResetProjectRequest): Promise<ResetProjectResponse> => {
     const res = await projectApi.resetProject(projectId, req);
     // Force immediate board invalidation and reload
     triggerBoardRefresh();
     await refreshProjects();
-    if (currentProject?.id === projectId) {
+    if (currentProjectIdRef.current === projectId && getActiveProjectId() === projectId) {
       try {
         const updated = await projectApi.getProject(projectId);
-        setCurrentProject(updated);
+        setCurrentProject((prev) =>
+          prev && prev.id === projectId && getActiveProjectId() === projectId ? updated : prev,
+        );
       } catch {
         // Project list already refreshed
       }
     }
     return res;
-  }, [currentProject?.id, refreshProjects, triggerBoardRefresh]);
+  }, [refreshProjects, triggerBoardRefresh]);
 
   const provisionJira = useCallback(async (projectId: string, req: ProvisionJiraRequest): Promise<ProvisionJiraResponse> => {
     const res = await projectApi.provisionJira(projectId, req);
     await refreshProjects();
-    if (currentProject?.id === projectId) {
+    if (currentProjectIdRef.current === projectId && getActiveProjectId() === projectId) {
       try {
         const updated = await projectApi.getProject(projectId);
-        setCurrentProject(updated);
+        setCurrentProject((prev) =>
+          prev && prev.id === projectId && getActiveProjectId() === projectId ? updated : prev,
+        );
       } catch {
         // Project list already refreshed
       }
     }
     return res;
-  }, [currentProject?.id, refreshProjects]);
+  }, [refreshProjects]);
 
   const openResetModal = useCallback((proj?: Project) => {
     setTargetLifecycleProject(proj || currentProject);
