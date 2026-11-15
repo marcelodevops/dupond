@@ -15,6 +15,7 @@ import {
   PlanSourceStatus,
   AdoptPlanResponse,
 } from '../../types/projectContract.js';
+import { withApplicationConnectionKeyLease } from './connectionKeyLock.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const CONN_KEY_FILE = path.resolve(DATA_DIR, '.dupond_conn_key');
@@ -1112,52 +1113,75 @@ export class ProjectStore {
     const email = (input.userEmail || '').trim();
     if (!email) throw new ProjectApiError(400, 'INVALID_REQUEST', 'Jira connection requires userEmail.');
 
-    return this.txn(() => {
-      const now = new Date().toISOString();
-      if (input.existingConnectionId) {
-        const row = this.db
-          .prepare('SELECT id, api_token_enc FROM jira_connections WHERE id = ? AND project_id = ?')
-          .get(input.existingConnectionId, projectId) as any;
-        if (!row) {
-          throw new ProjectApiError(400, 'CONNECTION_NOT_FOUND', `Connection ${input.existingConnectionId} does not belong to project ${projectId}.`);
-        }
-        if (input.apiToken && input.apiToken.trim()) {
+    return withApplicationConnectionKeyLease(
+      connectionKeyPath(),
+      () =>
+        this.txn(() => {
+          const now = new Date().toISOString();
+          if (input.existingConnectionId) {
+            const row = this.db
+              .prepare('SELECT id, api_token_enc FROM jira_connections WHERE id = ? AND project_id = ?')
+              .get(input.existingConnectionId, projectId) as any;
+            if (!row) {
+              throw new ProjectApiError(400, 'CONNECTION_NOT_FOUND', `Connection ${input.existingConnectionId} does not belong to project ${projectId}.`);
+            }
+            if (input.apiToken && input.apiToken.trim()) {
+              this.db
+                .prepare('UPDATE jira_connections SET host_url = ?, user_email = ?, api_token_enc = ?, updated_at = ? WHERE id = ?')
+                .run(host, email, encryptSecret(input.apiToken.trim()), now, row.id);
+            } else {
+              this.db
+                .prepare('UPDATE jira_connections SET host_url = ?, user_email = ?, updated_at = ? WHERE id = ?')
+                .run(host, email, now, row.id);
+            }
+            return row.id;
+          }
+          if (!input.apiToken || !input.apiToken.trim()) {
+            throw new ProjectApiError(400, 'INVALID_REQUEST', 'A new Jira connection requires apiToken.');
+          }
+          const id = `jconn-${crypto.randomUUID()}`;
           this.db
-            .prepare('UPDATE jira_connections SET host_url = ?, user_email = ?, api_token_enc = ?, updated_at = ? WHERE id = ?')
-            .run(host, email, encryptSecret(input.apiToken.trim()), now, row.id);
-        } else {
-          this.db
-            .prepare('UPDATE jira_connections SET host_url = ?, user_email = ?, updated_at = ? WHERE id = ?')
-            .run(host, email, now, row.id);
-        }
-        return row.id;
-      }
-      if (!input.apiToken || !input.apiToken.trim()) {
-        throw new ProjectApiError(400, 'INVALID_REQUEST', 'A new Jira connection requires apiToken.');
-      }
-      const id = `jconn-${crypto.randomUUID()}`;
-      this.db
-        .prepare(
-          'INSERT INTO jira_connections (id, project_id, host_url, user_email, api_token_enc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(id, projectId, host, email, encryptSecret(input.apiToken.trim()), now, now);
-      this.store.recordAudit({
-        projectId,
-        eventType: 'JIRA_CONNECTION_SAVED',
-        actor,
-        details: { connectionId: id, hostUrl: host },
-      });
-      return id;
-    });
+            .prepare(
+              'INSERT INTO jira_connections (id, project_id, host_url, user_email, api_token_enc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            )
+            .run(id, projectId, host, email, encryptSecret(input.apiToken.trim()), now, now);
+          this.store.recordAudit({
+            projectId,
+            eventType: 'JIRA_CONNECTION_SAVED',
+            actor,
+            details: { connectionId: id, hostUrl: host },
+          });
+          return id;
+        }),
+      () => {
+        throw new ProjectApiError(
+          503,
+          'KEY_ROTATION_IN_PROGRESS',
+          'Connection key maintenance/rotation is in progress; retry after maintenance completes.',
+        );
+      },
+    );
   }
 
   /** Server-internal secret read. Never exposed by any HTTP surface. */
   public getJiraConnectionSecret(connectionId: string, projectId: string): { hostUrl: string; userEmail: string; apiToken: string } | null {
-    const row = this.db
-      .prepare('SELECT host_url, user_email, api_token_enc FROM jira_connections WHERE id = ? AND project_id = ?')
-      .get(connectionId, projectId) as any;
-    if (!row) return null;
-    return { hostUrl: row.host_url, userEmail: row.user_email, apiToken: decryptSecret(row.api_token_enc) };
+    return withApplicationConnectionKeyLease(
+      connectionKeyPath(),
+      () => {
+        const row = this.db
+          .prepare('SELECT host_url, user_email, api_token_enc FROM jira_connections WHERE id = ? AND project_id = ?')
+          .get(connectionId, projectId) as any;
+        if (!row) return null;
+        return { hostUrl: row.host_url, userEmail: row.user_email, apiToken: decryptSecret(row.api_token_enc) };
+      },
+      () => {
+        throw new ProjectApiError(
+          503,
+          'KEY_ROTATION_IN_PROGRESS',
+          'Connection key maintenance/rotation is in progress; retry after maintenance completes.',
+        );
+      },
+    );
   }
 
   public markJiraProvisioningState(projectId: string, state: 'linked' | 'provisioned' | 'failed'): void {

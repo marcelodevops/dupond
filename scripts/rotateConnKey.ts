@@ -24,6 +24,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  connectionKeyMaintenancePaths,
+  drainApplicationLeases,
+  isPidAlive,
+} from '../src/server/projects/connectionKeyLock.js';
 
 export type RotationStage = 'staged' | 'db_committed' | 'key_replaced' | 'verified';
 
@@ -45,6 +50,7 @@ export interface RotateOptions {
   recover?: boolean;
   verifyOnly?: boolean;
   keepBackup?: boolean;
+  drainTimeoutMs?: number;
   /** Internal test hook for fault injection */
   onStage?: (stage: string) => void;
   /** Internal logger override */
@@ -158,16 +164,6 @@ function decryptV1(stored: string, key: Buffer): { plaintext: string; wasEncrypt
   return { plaintext, wasEncrypted: true };
 }
 
-function isPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: any) {
-    return err?.code === 'EPERM';
-  }
-}
-
 function acquireLock(lockPath: string, allowStaleReclaim: boolean): void {
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const payload: LockPayload = { pid: process.pid, startedAt: new Date().toISOString() };
@@ -217,9 +213,80 @@ function releaseLock(lockPath: string): void {
   }
 }
 
+function sameResolvedPath(a: string, b: string): boolean {
+  const norm = (p: string): string => {
+    const resolved = path.resolve(p);
+    try {
+      return fs.realpathSync(resolved);
+    } catch {
+      const parent = path.dirname(resolved);
+      try {
+        return path.join(fs.realpathSync(parent), path.basename(resolved));
+      } catch {
+        return resolved;
+      }
+    }
+  };
+  return norm(a) === norm(b);
+}
+
+function parseAndValidateRotationState(
+  raw: string,
+  expectedDbPath: string,
+  expectedKeyPath: string,
+): RotationState {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('Recovery state file is malformed or truncated JSON. Preserving recovery artifacts.');
+  }
+  const validStages = new Set(['staged', 'db_committed', 'key_replaced', 'verified']);
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    parsed.version !== 1 ||
+    !validStages.has(parsed.stage) ||
+    typeof parsed.dbPath !== 'string' ||
+    !parsed.dbPath ||
+    typeof parsed.keyPath !== 'string' ||
+    !parsed.keyPath ||
+    typeof parsed.oldKeyFingerprint !== 'string' ||
+    !/^[0-9a-f]{16}$/.test(parsed.oldKeyFingerprint) ||
+    typeof parsed.newKeyFingerprint !== 'string' ||
+    !/^[0-9a-f]{16}$/.test(parsed.newKeyFingerprint) ||
+    typeof parsed.rowCount !== 'number' ||
+    !Number.isInteger(parsed.rowCount) ||
+    parsed.rowCount < 0 ||
+    typeof parsed.startedAt !== 'string' ||
+    Number.isNaN(Date.parse(parsed.startedAt)) ||
+    typeof parsed.updatedAt !== 'string' ||
+    Number.isNaN(Date.parse(parsed.updatedAt))
+  ) {
+    throw new Error('Recovery state file failed schema/version validation. Preserving recovery artifacts.');
+  }
+  if (!sameResolvedPath(parsed.dbPath, expectedDbPath)) {
+    throw new Error(
+      `Recovery state database path mismatch: state recorded ${parsed.dbPath}, current target is ${expectedDbPath}. Preserving recovery artifacts.`,
+    );
+  }
+  if (!sameResolvedPath(parsed.keyPath, expectedKeyPath)) {
+    throw new Error(
+      `Recovery state key path mismatch: state recorded ${parsed.keyPath}, current target is ${expectedKeyPath}. Preserving recovery artifacts.`,
+    );
+  }
+  return parsed as RotationState;
+}
+
+interface ConnectionRowSnapshot {
+  id: string;
+  api_token_enc: string;
+  updated_at: string;
+}
+
 function openConnectionsDb(dbPath: string): {
   db: DatabaseSync;
-  rows: Array<{ id: string; api_token_enc: string }>;
+  rows: ConnectionRowSnapshot[];
 } {
   if (!fs.existsSync(dbPath)) {
     throw new Error(`Database not found at ${dbPath}; aborting without modifying key material.`);
@@ -233,8 +300,8 @@ function openConnectionsDb(dbPath: string): {
       throw new Error(`Table jira_connections not found in ${dbPath}; aborting without modifying key material.`);
     }
     const rows = db
-      .prepare('SELECT id, api_token_enc FROM jira_connections ORDER BY id ASC')
-      .all() as Array<{ id: string; api_token_enc: string }>;
+      .prepare('SELECT id, api_token_enc, updated_at FROM jira_connections ORDER BY id ASC')
+      .all() as ConnectionRowSnapshot[];
     return { db, rows };
   } catch (err) {
     try {
@@ -300,10 +367,7 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
       ? path.resolve(process.env.DUPOND_DB_PATH)
       : path.join(dataDir, 'dupond.db');
 
-  const lockPath = `${keyPath}.lock`;
-  const nextPath = `${keyPath}.next`;
-  const prevPath = `${keyPath}.prev`;
-  const statePath = `${keyPath}.state.json`;
+  const { lockPath, nextPath, prevPath, statePath } = connectionKeyMaintenancePaths(keyPath);
   const log = options.log ?? ((msg: string) => console.log(msg));
 
   if (options.verifyOnly) {
@@ -340,6 +404,7 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
   };
 
   try {
+    drainApplicationLeases(keyPath, options.drainTimeoutMs ?? 2000);
     const recoveryFiles = [statePath, nextPath, prevPath].filter((p) => fs.existsSync(p));
 
     if (options.recover) {
@@ -349,12 +414,28 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
 
       let state: RotationState | null = null;
       if (fs.existsSync(statePath)) {
-        state = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as RotationState;
+        state = parseAndValidateRotationState(fs.readFileSync(statePath, 'utf-8'), dbPath, keyPath);
       }
 
       const activeKey = fs.existsSync(keyPath) ? readKeyFile(keyPath, 'Active connection key', false) : null;
       const prevKey = fs.existsSync(prevPath) ? readKeyFile(prevPath, 'Previous backup key', false) : null;
       const nextKey = fs.existsSync(nextPath) ? readKeyFile(nextPath, 'Staged next key', false) : null;
+
+      if (state) {
+        if (prevKey && keyFingerprint(prevKey) !== state.oldKeyFingerprint) {
+          throw new Error('Previous backup key fingerprint does not match recovery state. Preserving recovery artifacts.');
+        }
+        if (nextKey && keyFingerprint(nextKey) !== state.newKeyFingerprint) {
+          throw new Error('Staged next key fingerprint does not match recovery state. Preserving recovery artifacts.');
+        }
+        if (
+          activeKey &&
+          keyFingerprint(activeKey) !== state.oldKeyFingerprint &&
+          keyFingerprint(activeKey) !== state.newKeyFingerprint
+        ) {
+          throw new Error('Active key fingerprint matches neither old nor new recovery state key. Preserving recovery artifacts.');
+        }
+      }
 
       if (recoveryFiles.length === 0) {
         if (!activeKey) {
@@ -404,7 +485,7 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
       }
 
       if (encryptedRows.length === 0) {
-        // Zero encrypted rows: finish forward if key already replaced, else roll back to previous key
+        // Zero encrypted rows or legacy plaintext-only DB
         if (state && (state.stage === 'key_replaced' || state.stage === 'verified') && newCandidate) {
           if (!activeKey || keyFingerprint(activeKey) !== keyFingerprint(newCandidate)) {
             atomicWriteFileStrict(keyPath, newCandidate.toString('hex'));
@@ -486,13 +567,26 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
     atomicWriteFileStrict(statePath, JSON.stringify(state, null, 2));
     emitFaultHook('after_stage', options.onStage);
 
-    // Stage 2: Transactional DB update (BEGIN IMMEDIATE ... COMMIT)
+    // Stage 2: Transactional DB update (BEGIN IMMEDIATE ... COMMIT) with exact snapshot validation
     emitFaultHook('before_db_commit', options.onStage);
     db.exec('BEGIN IMMEDIATE');
     try {
-      const currentCountRow = db.prepare('SELECT count(*) as count FROM jira_connections').get() as { count: number };
-      if (currentCountRow.count !== rows.length) {
-        throw new Error(`Concurrent modification detected: expected ${rows.length} rows, found ${currentCountRow.count}.`);
+      const currentRows = db
+        .prepare('SELECT id, api_token_enc, updated_at FROM jira_connections ORDER BY id ASC')
+        .all() as ConnectionRowSnapshot[];
+      if (currentRows.length !== rows.length) {
+        throw new Error(`Concurrent modification detected: expected ${rows.length} row(s), found ${currentRows.length}.`);
+      }
+      for (let i = 0; i < rows.length; i += 1) {
+        if (
+          currentRows[i].id !== rows[i].id ||
+          currentRows[i].api_token_enc !== rows[i].api_token_enc ||
+          currentRows[i].updated_at !== rows[i].updated_at
+        ) {
+          throw new Error(
+            `Concurrent modification detected on row ${rows[i].id}: database state changed after snapshot acquisition.`,
+          );
+        }
       }
       const update = db.prepare('UPDATE jira_connections SET api_token_enc = ?, updated_at = ? WHERE id = ?');
       for (const item of reencrypted) {
