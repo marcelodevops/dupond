@@ -12,20 +12,78 @@ export function connectionKeyPath(): string {
     : CONN_KEY_FILE;
 }
 
+function readAndValidateKeyFile(file: string): Buffer {
+  const raw = fs.readFileSync(file, 'utf-8').trim();
+  if (!/^[0-9a-f]{64}$/i.test(raw)) {
+    throw new Error(`Connection encryption key at ${file} is missing or malformed; refusing to overwrite.`);
+  }
+  return Buffer.from(raw, 'hex');
+}
+
 export function getConnectionKey(): Buffer {
   const file = connectionKeyPath();
-  if (fs.existsSync(file)) {
-    const raw = fs.readFileSync(file, 'utf-8').trim();
-    if (raw) return Buffer.from(raw, 'hex');
-  }
-  const key = crypto.randomBytes(32);
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, key.toString('hex'), { encoding: 'utf-8', mode: 0o600 });
-  } catch {
-    // Unwritable key storage: keep the key in memory only for this process.
+    return readAndValidateKeyFile(file);
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      throw err;
+    }
   }
-  return key;
+
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+
+  const key = crypto.randomBytes(32);
+  const tmpFile = path.join(dir, `.dupond_conn_key.tmp-${process.pid}-${crypto.randomUUID()}`);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(
+      tmpFile,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+      0o600,
+    );
+    fs.writeFileSync(fd, key.toString('hex'), 'utf-8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+
+    try {
+      fs.linkSync(tmpFile, file);
+    } catch (linkErr: any) {
+      if (linkErr?.code === 'EEXIST') {
+        return readAndValidateKeyFile(file);
+      }
+      throw linkErr;
+    }
+
+    try {
+      const dirFd = fs.openSync(dir, fs.constants.O_RDONLY);
+      try {
+        fs.fsyncSync(dirFd);
+      } finally {
+        fs.closeSync(dirFd);
+      }
+    } catch {
+      // Directory fsync is best-effort on platforms that disallow O_RDONLY on dirs.
+    }
+
+    return key;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close error on cleanup
+      }
+    }
+    try {
+      if (fs.existsSync(tmpFile)) {
+        fs.unlinkSync(tmpFile);
+      }
+    } catch {
+      // Ignore temp cleanup error
+    }
+  }
 }
 
 export function encryptSecret(plaintext: string): string {
