@@ -412,17 +412,23 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       const delayedCredGate = new Promise<void>((resolve) => {
         releaseDelayedCred = resolve;
       });
+      let markRouteHandled!: () => void;
+      const routeHandled = new Promise<void>((resolve) => {
+        markRouteHandled = resolve;
+      });
       const delayedRouteHandler = async (route: any) => {
         await delayedCredGate;
-        await route.continue();
+        await route.continue().catch(() => {});
+        markRouteHandled();
       };
       await page.route('**/api/credentials/gemini', delayedRouteHandler);
 
       await page.getByRole('button', { name: /Settings/i }).click();
       await page.getByRole('button', { name: /Readiness/i }).click();
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Loading...');
-      await page.unroute('**/api/credentials/gemini', delayedRouteHandler);
       releaseDelayedCred();
+      await routeHandled;
+      await page.unroute('**/api/credentials/gemini', delayedRouteHandler);
 
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Env Active');
       await pwExpect(page.getByTestId('gemini-env-precedence-notice')).toBeVisible();
