@@ -112,7 +112,7 @@ export interface DeliveryRecord {
   prNumber?: number | null;
   prUrl?: string | null;
   ciStatus: 'pending' | 'success' | 'failure' | 'unknown';
-  approvalStatus: 'approved' | 'pending_approval' | 'rejected';
+  approvalStatus: 'approved' | 'pending_approval' | 'rejected' | 'not_required';
   approvedBy?: string | null;
   // The identity the approval certifies: the contract and candidate revision
   // that were current when the operator approved, plus the evidence row it
