@@ -5,6 +5,7 @@ import {
   Project,
   ProjectRepositoryConfig,
   PlanningReadiness,
+  GeminiCredentialStatus,
   RepositoryVerificationResult,
 } from '../types/projectContract';
 import {
@@ -20,24 +21,30 @@ import {
   Info,
   Save,
   Lock,
+  KeyRound,
+  Trash2,
 } from 'lucide-react';
+
+export type SettingsTab = 'general' | 'repository' | 'readiness';
 
 interface ProjectSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSaved?: (project: Project) => void;
+  initialTab?: SettingsTab;
+  onGeminiCredentialChanged?: () => void;
 }
-
-type SettingsTab = 'general' | 'repository' | 'readiness';
 
 export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   isOpen,
   onClose,
   onSaved,
+  initialTab = 'general',
+  onGeminiCredentialChanged,
 }) => {
   const { currentProject, updateProject } = useProject();
 
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const [isSaving, setIsSaving] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -54,7 +61,23 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   // Verification & Readiness
   const [verificationResult, setVerificationResult] = useState<RepositoryVerificationResult | null>(null);
   const [planningReadiness, setPlanningReadiness] = useState<PlanningReadiness | null>(null);
+  const [geminiStatus, setGeminiStatus] = useState<GeminiCredentialStatus | null>(null);
   const [isLoadingReadiness, setIsLoadingReadiness] = useState(false);
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [isSavingGemini, setIsSavingGemini] = useState(false);
+  const [isDeletingGemini, setIsDeletingGemini] = useState(false);
+  const [isTestingGemini, setIsTestingGemini] = useState(false);
+  const [geminiError, setGeminiError] = useState<string | null>(null);
+  const [geminiSuccess, setGeminiSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(initialTab);
+      setGeminiKeyInput('');
+      setGeminiError(null);
+      setGeminiSuccess(null);
+    }
+  }, [isOpen, initialTab]);
 
   // Initialize from currentProject
   useEffect(() => {
@@ -72,24 +95,30 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
     }
   }, [currentProject, isOpen]);
 
-  // Load planning readiness on open
+  // Load planning readiness and Gemini credential status on open
   useEffect(() => {
     if (!isOpen) return;
     let mounted = true;
     setIsLoadingReadiness(true);
-    projectApi
-      .getPlanningReadiness()
-      .then((res) => {
-        if (mounted) setPlanningReadiness(res);
+    Promise.all([
+      projectApi.getPlanningReadiness(),
+      projectApi.getGeminiCredentialStatus(),
+    ])
+      .then(([readinessRes, credRes]) => {
+        if (mounted) {
+          setPlanningReadiness(readinessRes);
+          setGeminiStatus(credRes);
+        }
       })
       .catch((err) => {
         if (mounted) {
           setPlanningReadiness({
             provider: 'gemini',
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.8-flash',
             ready: false,
             error: err.message || 'Failed to read provider readiness',
           });
+          setGeminiError(err.message || 'Failed to load Gemini credential status.');
         }
       })
       .finally(() => {
@@ -420,6 +449,234 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
 
           {activeTab === 'readiness' && (
             <div className="space-y-4">
+              {/* Gemini Credential Management Card */}
+              <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl space-y-3" data-testid="gemini-credential-section">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="w-4 h-4 text-indigo-400" />
+                    <span className="font-semibold text-white">Gemini API Credential</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {isLoadingReadiness ? (
+                      <RotateCw className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                    ) : (
+                      <>
+                        <span
+                          data-testid="gemini-saved-badge"
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            geminiStatus?.configured
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                              : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                          }`}
+                        >
+                          {geminiStatus?.source === 'environment'
+                            ? 'Env Active'
+                            : geminiStatus?.source === 'saved'
+                              ? 'Saved'
+                              : 'Not Configured'}
+                        </span>
+                        {geminiStatus?.configured && (
+                          <span
+                            data-testid="gemini-verified-badge"
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              geminiStatus.lastTestOutcome === 'passed'
+                                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
+                                : geminiStatus.lastTestOutcome === 'failed'
+                                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                                  : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                            }`}
+                          >
+                            {geminiStatus.lastTestOutcome === 'passed'
+                              ? 'Verified'
+                              : geminiStatus.lastTestOutcome === 'failed'
+                                ? 'Verification Failed'
+                                : 'Unverified'}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Application-wide scope notice */}
+                <p className="text-[11px] text-slate-400">
+                  Saved Gemini credentials are <strong className="text-slate-200">application-scoped</strong> and apply to all projects using this server instance. Keys are stored encrypted on the server and never returned to the browser.
+                </p>
+
+                {/* Environment precedence notice */}
+                {geminiStatus?.environmentControlled && (
+                  <div
+                    data-testid="gemini-env-precedence-notice"
+                    className="p-2.5 rounded-lg bg-indigo-950/40 border border-indigo-800/60 text-indigo-200 text-[11px] flex items-start gap-2"
+                  >
+                    <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+                    <span>
+                      Server environment variable <code>GEMINI_API_KEY</code> currently controls the active credential and takes precedence over any saved key. Saving or removing a key below cannot overwrite or unset the server environment variable.
+                    </span>
+                  </div>
+                )}
+
+                {geminiError && (
+                  <div
+                    data-testid="gemini-error-banner"
+                    className="p-2.5 rounded-lg bg-rose-950/50 border border-rose-800/70 text-rose-200 text-[11px] flex items-start gap-2"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{geminiError}</span>
+                  </div>
+                )}
+
+                {geminiSuccess && (
+                  <div
+                    data-testid="gemini-success-banner"
+                    className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-200 text-[11px] flex items-start gap-2"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                    <span>{geminiSuccess}</span>
+                  </div>
+                )}
+
+                {/* Masked Input & Save/Replace/Remove */}
+                <div className="space-y-2">
+                  <label className="block text-[11px] font-medium text-slate-300" htmlFor="gemini-api-key-input">
+                    {geminiStatus?.hasSavedKey ? 'Replace Saved Gemini API Key' : 'Enter Gemini API Key'}
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      id="gemini-api-key-input"
+                      data-testid="gemini-api-key-input"
+                      type="password"
+                      autoComplete="off"
+                      value={geminiKeyInput}
+                      onChange={(e) => setGeminiKeyInput(e.target.value)}
+                      placeholder="AIza..."
+                      disabled={isSavingGemini || isDeletingGemini || isTestingGemini}
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
+                    />
+                    <button
+                      type="button"
+                      data-testid="save-gemini-key-btn"
+                      disabled={isSavingGemini || isDeletingGemini || isTestingGemini}
+                      onClick={async () => {
+                        setGeminiError(null);
+                        setGeminiSuccess(null);
+                        if (!geminiKeyInput.trim()) {
+                          setGeminiError('Gemini API key cannot be blank.');
+                          return;
+                        }
+                        setIsSavingGemini(true);
+                        try {
+                          const updated = await projectApi.saveGeminiCredential(geminiKeyInput);
+                          setGeminiStatus(updated);
+                          setGeminiKeyInput('');
+                          setGeminiSuccess(
+                            updated.environmentControlled
+                              ? 'Saved application key encrypted on server (server GEMINI_API_KEY still takes precedence).'
+                              : 'Gemini API key saved securely on server. Click Test Connection to verify it.',
+                          );
+                          const refreshed = await projectApi.getPlanningReadiness();
+                          setPlanningReadiness(refreshed);
+                          onGeminiCredentialChanged?.();
+                        } catch (err: any) {
+                          setGeminiError(err?.message || 'Failed to save Gemini API key.');
+                        } finally {
+                          setIsSavingGemini(false);
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    >
+                      {isSavingGemini ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                      <span>{geminiStatus?.hasSavedKey ? 'Replace Key' : 'Save Key'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Test Connection & Remove Saved Key */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      data-testid="test-gemini-key-btn"
+                      disabled={!geminiStatus?.configured || isTestingGemini || isSavingGemini || isDeletingGemini}
+                      onClick={async () => {
+                        setGeminiError(null);
+                        setGeminiSuccess(null);
+                        setIsTestingGemini(true);
+                        try {
+                          const res = await projectApi.testGeminiCredential();
+                          setGeminiStatus(res.status);
+                          const refreshed = await projectApi.getPlanningReadiness();
+                          setPlanningReadiness(refreshed);
+                          if (res.ok) {
+                            setGeminiSuccess(`Connection verified (${res.source} credential, model ${res.model}).`);
+                          } else {
+                            setGeminiError(res.error || 'Connection test failed.');
+                          }
+                          onGeminiCredentialChanged?.();
+                        } catch (err: any) {
+                          setGeminiError(err?.message || 'Connection test failed.');
+                        } finally {
+                          setIsTestingGemini(false);
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
+                    >
+                      {isTestingGemini ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                      <span>{isTestingGemini ? 'Testing...' : 'Test Connection'}</span>
+                    </button>
+
+                    {geminiStatus?.hasSavedKey && (
+                      <button
+                        type="button"
+                        data-testid="delete-gemini-key-btn"
+                        disabled={isDeletingGemini || isSavingGemini || isTestingGemini}
+                        onClick={async () => {
+                          setGeminiError(null);
+                          setGeminiSuccess(null);
+                          setIsDeletingGemini(true);
+                          try {
+                            const updated = await projectApi.deleteGeminiCredential();
+                            setGeminiStatus(updated);
+                            setGeminiKeyInput('');
+                            setGeminiSuccess('Saved Gemini API key removed.');
+                            const refreshed = await projectApi.getPlanningReadiness();
+                            setPlanningReadiness(refreshed);
+                            onGeminiCredentialChanged?.();
+                          } catch (err: any) {
+                            setGeminiError(err?.message || 'Failed to remove saved Gemini API key.');
+                          } finally {
+                            setIsDeletingGemini(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg border border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/40 text-rose-300 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
+                      >
+                        {isDeletingGemini ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                        <span>Remove Saved Key</span>
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-slate-500">
+                    Test sends a minimal Gemini request (may incur API usage).
+                  </span>
+                </div>
+
+                {(geminiStatus?.lastTestedAt || geminiStatus?.lastTestError) && (
+                  <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-800/80 space-y-1">
+                    {geminiStatus.lastTestedAt && (
+                      <div className="flex justify-between">
+                        <span>Last Tested:</span>
+                        <span className="font-mono text-slate-300">{new Date(geminiStatus.lastTestedAt).toLocaleString()}</span>
+                      </div>
+                    )}
+                    {geminiStatus.lastTestError && (
+                      <p className="text-rose-300 text-[11px]" data-testid="gemini-last-test-error">
+                        Last Test Error: {geminiStatus.lastTestError}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -445,7 +702,11 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                   </div>
                   <div className="flex justify-between">
                     <span>Model:</span>
-                    <span className="font-mono text-slate-200">{planningReadiness?.model || 'gemini-2.5-flash'}</span>
+                    <span className="font-mono text-slate-200">{planningReadiness?.model || 'gemini-3.8-flash'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Credential Source:</span>
+                    <span className="font-mono text-slate-200">{planningReadiness?.source || 'none'}</span>
                   </div>
                   {planningReadiness?.error && (
                     <p className="text-rose-300 text-[10px] mt-1 pt-1 border-t border-rose-900/40">

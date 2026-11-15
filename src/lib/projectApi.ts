@@ -25,6 +25,8 @@ import {
   JiraMetadataResponse,
   ProjectApiErrorResponse,
   PlanningReadiness,
+  GeminiCredentialStatus,
+  GeminiTestResult,
   ProjectSourcePlan,
   ParsePlanRequest,
   AdoptPlanRequest,
@@ -304,6 +306,54 @@ export const projectApi = {
     return callProjectApi<PlanningReadiness>(
       '/api/planning/readiness',
       { method: 'GET' },
+      signal
+    );
+  },
+
+  /**
+   * Get application-level Gemini credential status (metadata only; never returns secret)
+   */
+  async getGeminiCredentialStatus(signal?: AbortSignal): Promise<GeminiCredentialStatus> {
+    return callProjectApi<GeminiCredentialStatus>(
+      '/api/credentials/gemini',
+      { method: 'GET' },
+      signal
+    );
+  },
+
+  /**
+   * Save or replace application-level Gemini API key
+   */
+  async saveGeminiCredential(apiKey: string, signal?: AbortSignal): Promise<GeminiCredentialStatus> {
+    return callProjectApi<GeminiCredentialStatus>(
+      '/api/credentials/gemini',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey }),
+      },
+      signal
+    );
+  },
+
+  /**
+   * Remove saved application-level Gemini API key
+   */
+  async deleteGeminiCredential(signal?: AbortSignal): Promise<GeminiCredentialStatus> {
+    return callProjectApi<GeminiCredentialStatus>(
+      '/api/credentials/gemini',
+      { method: 'DELETE' },
+      signal
+    );
+  },
+
+  /**
+   * Test the currently active Gemini credential
+   */
+  async testGeminiCredential(signal?: AbortSignal): Promise<GeminiTestResult & { status: GeminiCredentialStatus }> {
+    return callProjectApi<GeminiTestResult & { status: GeminiCredentialStatus }>(
+      '/api/credentials/gemini/test',
+      { method: 'POST' },
       signal
     );
   },

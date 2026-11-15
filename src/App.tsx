@@ -32,7 +32,7 @@ import { apiFetch, getApiToken, isAuthRequired, onAuthStateChange, setApiToken }
 import { ProjectProvider, useProject } from './context/ProjectContext';
 import { ProjectWizardModal } from './components/ProjectWizardModal';
 import { ProjectLifecycleModal } from './components/ProjectLifecycleModal';
-import { ProjectSettingsModal } from './components/ProjectSettingsModal';
+import { ProjectSettingsModal, type SettingsTab } from './components/ProjectSettingsModal';
 import { getActiveProjectId, PROJECT_HEADER, projectApi } from './lib/projectApi';
 
 function AppWorkspace() {
@@ -228,6 +228,8 @@ function AppWorkspace() {
   const [isIngestModalOpen, setIsIngestModalOpen] = useState<boolean>(false);
   const [isAddTaskModalOpen, setIsAddTaskModalOpen] = useState<boolean>(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('general');
+  const [readinessRefreshKey, setReadinessRefreshKey] = useState<number>(0);
 
   // Toast Notification state
   const [toastMessage, setToastMessage] = useState<{ title: string; desc: string; type: 'info' | 'success' | 'alert' } | null>(null);
@@ -873,6 +875,11 @@ function AppWorkspace() {
         onClose={() => setIsIngestModalOpen(false)}
         onAdoptPlan={handleAdoptPlan}
         agents={agents}
+        readinessRefreshKey={readinessRefreshKey}
+        onOpenGeminiSettings={() => {
+          setSettingsInitialTab('readiness');
+          setIsSettingsModalOpen(true);
+        }}
       />
 
       {/* Task Detail Modal */}
@@ -906,7 +913,13 @@ function AppWorkspace() {
       {/* Project Settings & Repository Verification Modal */}
       <ProjectSettingsModal
         isOpen={isSettingsModalOpen}
-        onClose={() => setIsSettingsModalOpen(false)}
+        initialTab={settingsInitialTab}
+        onGeminiCredentialChanged={() => setReadinessRefreshKey((k) => k + 1)}
+        onClose={() => {
+          setIsSettingsModalOpen(false);
+          setSettingsInitialTab('general');
+          setReadinessRefreshKey((k) => k + 1);
+        }}
       />
 
       {/* Project Lifecycle Management Modal (Reset & Archive) */}
