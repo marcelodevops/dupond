@@ -1,3 +1,8 @@
+> [!WARNING]
+> **Work in progress — experimental software.** Dupond is under active development and is not production-ready. Some workflows are incomplete or unsupported, including autonomous engine execution for non-default projects. Expect bugs and changing behavior.
+>
+> **Green CI means the automated checks passed; it does not guarantee that every user workflow works end to end.** Try Dupond with disposable or dedicated development repositories and synthetic data, supervise execution, and review all changes before merging. Please report unexpected behavior through [GitHub Issues](https://github.com/marcelodevops/dupond/issues).
+
 <p align="center">
   <img src="resources/dupond-banner.png" alt="Dupond — detective with a bowler hat and moustache" width="900">
 </p>
