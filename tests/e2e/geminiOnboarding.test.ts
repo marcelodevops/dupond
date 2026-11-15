@@ -7,6 +7,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { expect as pwExpect } from 'playwright/test';
 import { rotateConnectionKey } from '../../scripts/rotateConnKey.js';
 import { connectionKeyMaintenancePaths } from '../../src/server/projects/connectionKeyLock.js';
 
@@ -243,12 +244,21 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
     const page: Page = await context.newPage();
 
     const apiBodies: string[] = [];
+    const readinessResponses: Array<{ url: string; status: number; body: string }> = [];
     const consoleLogs: string[] = [];
     page.on('console', (msg) => consoleLogs.push(msg.text()));
     page.on('response', async (res) => {
       if (res.url().includes('/api/')) {
         try {
-          apiBodies.push(await res.text());
+          const text = await res.text();
+          apiBodies.push(text);
+          if (res.url().includes('/api/planning/readiness') || res.url().includes('/api/credentials/gemini')) {
+            readinessResponses.push({
+              url: res.url(),
+              status: res.status(),
+              body: redactSecrets(text),
+            });
+          }
         } catch {
           // ignore streaming/empty
         }
@@ -278,7 +288,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await textarea.fill(customPlan);
       await page.getByTestId('configure-gemini-btn').click();
       await page.getByTestId('gemini-credential-section').waitFor({ state: 'visible' });
-      assert.strictEqual(await page.getByTestId('gemini-saved-badge').textContent(), 'Not Configured');
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Not Configured');
 
       // --- Scenario C: Blank rejection & invalid key test failure ---
       await page.getByTestId('gemini-api-key-input').fill('   ');
@@ -288,23 +298,23 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await page.getByTestId('gemini-api-key-input').fill(SYNTH_BAD_KEY);
       await page.getByTestId('save-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
-      assert.strictEqual(await page.getByTestId('gemini-saved-badge').textContent(), 'Saved');
-      assert.strictEqual(await page.getByTestId('gemini-verified-badge').textContent(), 'Unverified');
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Saved');
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Unverified');
 
       await page.getByTestId('test-gemini-key-btn').click();
       await page.getByTestId('gemini-error-banner').waitFor({ state: 'visible' });
-      assert.strictEqual(await page.getByTestId('gemini-verified-badge').textContent(), 'Verification Failed');
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verification Failed');
       assertNoSecretLeak('DOM error banner after invalid key test', await page.locator('body').innerHTML());
 
       // --- Scenario D: Save valid key -> Test Connection -> return & verify plan text preserved ---
       await page.getByTestId('gemini-api-key-input').fill(SYNTH_GOOD_KEY_1);
       await page.getByTestId('save-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
-      assert.strictEqual(await page.getByTestId('gemini-verified-badge').textContent(), 'Unverified');
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Unverified');
 
       await page.getByTestId('test-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
-      assert.strictEqual(await page.getByTestId('gemini-verified-badge').textContent(), 'Verified');
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
 
       // Close settings -> back on Plan Ingestion; plan text preserved; no auto-ingest happened
       await page.getByRole('button', { name: 'Cancel' }).last().click();
@@ -330,14 +340,14 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await page.reload({ waitUntil: 'networkidle' });
       await page.getByRole('button', { name: /Settings/i }).click();
       await page.getByRole('button', { name: /Readiness/i }).click();
-      assert.strictEqual(await page.getByTestId('gemini-saved-badge').textContent(), 'Saved');
-      assert.strictEqual(await page.getByTestId('gemini-verified-badge').textContent(), 'Verified');
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Saved');
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
 
       // --- Scenario G: Replace saved key -> clears verification & invalidates client cache ---
       await page.getByTestId('gemini-api-key-input').fill(SYNTH_GOOD_KEY_2);
       await page.getByTestId('save-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
-      assert.strictEqual(await page.getByTestId('gemini-verified-badge').textContent(), 'Unverified');
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Unverified');
 
       await page.getByTestId('test-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
@@ -387,7 +397,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       // --- Scenario H: Remove saved key returns UI to Not Configured ---
       await page.getByTestId('delete-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
-      assert.strictEqual(await page.getByTestId('gemini-saved-badge').textContent(), 'Not Configured');
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Not Configured');
       await page.getByRole('button', { name: 'Cancel' }).click();
       await page.getByRole('button', { name: /Ingest Plan/i }).click();
       await page.getByTestId('configure-gemini-btn').waitFor({ state: 'visible' });
@@ -396,10 +406,32 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await stopAppServer();
       await startAppServer({ GEMINI_API_KEY: SYNTH_ENV_KEY });
       await page.reload({ waitUntil: 'networkidle' });
+
+      // Test delayed readiness response: UI must show Loading..., NEVER Not Configured, before settling on Env Active
+      let releaseDelayedCred!: () => void;
+      const delayedCredGate = new Promise<void>((resolve) => {
+        releaseDelayedCred = resolve;
+      });
+      const delayedRouteHandler = async (route: any) => {
+        await delayedCredGate;
+        await route.continue();
+      };
+      await page.route('**/api/credentials/gemini', delayedRouteHandler);
+
       await page.getByRole('button', { name: /Settings/i }).click();
       await page.getByRole('button', { name: /Readiness/i }).click();
-      assert.strictEqual(await page.getByTestId('gemini-saved-badge').textContent(), 'Env Active');
-      await page.getByTestId('gemini-env-precedence-notice').waitFor({ state: 'visible' });
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Loading...');
+      await page.unroute('**/api/credentials/gemini', delayedRouteHandler);
+      releaseDelayedCred();
+
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Env Active');
+      await pwExpect(page.getByTestId('gemini-env-precedence-notice')).toBeVisible();
+
+      // Reopen Settings modal and verify Env Active persists cleanly
+      await page.getByRole('button', { name: 'Cancel' }).last().click();
+      await page.getByRole('button', { name: /Settings/i }).click();
+      await page.getByRole('button', { name: /Readiness/i }).click();
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Env Active');
 
       // Saving a key in UI while env key is set does NOT override env key
       await page.getByTestId('gemini-api-key-input').fill(SYNTH_GOOD_KEY_1);
@@ -408,6 +440,21 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await page.getByTestId('test-gemini-key-btn').click();
       await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
       assert.strictEqual(mockState.requests[mockState.requests.length - 1].apiKey, SYNTH_ENV_KEY);
+
+      // Test failed readiness response: UI must show explicit error, NEVER Not Configured
+      await page.getByRole('button', { name: 'Cancel' }).last().click();
+      await page.route('**/api/credentials/gemini', async (route) => {
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'Injected readiness failure', code: 'INTERNAL' }),
+        });
+      });
+      await page.getByRole('button', { name: /Settings/i }).click();
+      await page.getByRole('button', { name: /Readiness/i }).click();
+      await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Status Unavailable');
+      await pwExpect(page.getByTestId('gemini-error-banner')).toBeVisible();
+      await page.unroute('**/api/credentials/gemini');
 
       // --- Scenario L: Security invariants across DOM, storage, API responses, console, server logs ---
       const domHtml = await page.locator('body').innerHTML();
@@ -426,6 +473,7 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
         [
           `Failure: ${err?.stack || err?.message || String(err)}`,
           `URL: ${page.url()}`,
+          `Readiness Responses: ${JSON.stringify(readinessResponses.slice(-5))}`,
           `Console: ${consoleLogs.join('\n')}`,
           `Server Logs: ${serverLogs}`,
         ].join('\n\n'),
