@@ -38,11 +38,30 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   onSaved,
   initialTab = 'general',
 }) => {
+  if (!isOpen) return null;
+  return (
+    <ProjectSettingsModalBody
+      onClose={onClose}
+      onSaved={onSaved}
+      initialTab={initialTab}
+    />
+  );
+};
+
+const ProjectSettingsModalBody: React.FC<Omit<ProjectSettingsModalProps, 'isOpen'>> = ({
+  onClose,
+  onSaved,
+  initialTab = 'general',
+}) => {
   const { currentProject, updateProject } = useProject();
 
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
-  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
-  const [editingProjectName, setEditingProjectName] = useState<string>('');
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(
+    () => currentProject?.id || null,
+  );
+  const [editingProjectName, setEditingProjectName] = useState<string>(
+    () => currentProject?.name || currentProject?.id || '',
+  );
   const [isSaving, setIsSaving] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -50,21 +69,39 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
 
   // Identity Form Fields
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
+  const [name, setName] = useState(() => currentProject?.name || '');
+  const [description, setDescription] = useState(() => currentProject?.description || '');
 
   // Repository Form Fields
-  const [localPath, setLocalPath] = useState('');
-  const [repoUrl, setRepoUrl] = useState('');
-  const [defaultBranch, setDefaultBranch] = useState('main');
-  const [localWriteMode, setLocalWriteMode] = useState<'worktree' | 'direct_write' | 'git_branch' | 'patch_export'>('worktree');
+  const [localPath, setLocalPath] = useState(
+    () => currentProject?.repository?.localPath || currentProject?.repository?.path || '',
+  );
+  const [repoUrl, setRepoUrl] = useState(() => currentProject?.repository?.repoUrl || '');
+  const [defaultBranch, setDefaultBranch] = useState(
+    () => currentProject?.repository?.defaultBranch || 'main',
+  );
+  const [localWriteMode, setLocalWriteMode] = useState<
+    'worktree' | 'direct_write' | 'git_branch' | 'patch_export'
+  >(() => currentProject?.repository?.localWriteMode || 'worktree');
 
   // Project-specific Preferences & Integration Mapping Fields
-  const [defaultProvider, setDefaultProvider] = useState<string>('');
-  const [defaultModel, setDefaultModel] = useState<string>('');
-  const [requireApprovalByDefault, setRequireApprovalByDefault] = useState<boolean>(false);
-  const [jiraProjectKey, setJiraProjectKey] = useState<string>('');
-  const [jiraEpicKey, setJiraEpicKey] = useState<string>('');
+  const initialPrefs: ProjectPreferences =
+    currentProject?.preferences || currentProject?.agentPreferences || {};
+  const [defaultProvider, setDefaultProvider] = useState<string>(
+    () => initialPrefs.defaultProvider || '',
+  );
+  const [defaultModel, setDefaultModel] = useState<string>(
+    () => initialPrefs.defaultModel || '',
+  );
+  const [requireApprovalByDefault, setRequireApprovalByDefault] = useState<boolean>(
+    () => Boolean(initialPrefs.requireApprovalByDefault),
+  );
+  const [jiraProjectKey, setJiraProjectKey] = useState<string>(
+    () => currentProject?.jira?.projectKey || '',
+  );
+  const [jiraEpicKey, setJiraEpicKey] = useState<string>(
+    () => currentProject?.jira?.epicKey || '',
+  );
 
   // Verification Result
   const [verificationResult, setVerificationResult] = useState<RepositoryVerificationResult | null>(null);
@@ -117,20 +154,10 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   );
 
   const projectSwitchConflict =
-    Boolean(isOpen && currentProject && editingProjectId && currentProject.id !== editingProjectId);
-
-  // Sync on open or when currentProject changes cleanly
-  useEffect(() => {
-    if (!isOpen) {
-      setEditingProjectId(null);
-      setShowDiscardConfirm(false);
-      return;
-    }
-    setActiveTab(initialTab);
-  }, [isOpen, initialTab]);
+    Boolean(currentProject && editingProjectId && currentProject.id !== editingProjectId);
 
   useEffect(() => {
-    if (!isOpen || !currentProject) return;
+    if (!currentProject) return;
     if (!editingProjectId) {
       loadFromProject(currentProject);
       return;
@@ -139,7 +166,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
     if (currentProject.id !== editingProjectId && !isDirty) {
       loadFromProject(currentProject);
     }
-  }, [isOpen, currentProject, editingProjectId, isDirty, loadFromProject]);
+  }, [currentProject, editingProjectId, isDirty, loadFromProject]);
 
   const handleRequestClose = useCallback(() => {
     if (isSaving) return;
@@ -161,7 +188,6 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
 
   // Focus restoration & Escape key
   useEffect(() => {
-    if (!isOpen) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     const timer = setTimeout(() => {
       closeBtnRef.current?.focus();
@@ -178,9 +204,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
       document.removeEventListener('keydown', onKeyDown);
       previousFocusRef.current?.focus?.();
     };
-  }, [isOpen, handleRequestClose]);
-
-  if (!isOpen) return null;
+  }, [handleRequestClose]);
 
   const targetProject = currentProject;
   const isDefaultProject = (targetProject?.id || 'default') === 'default';
