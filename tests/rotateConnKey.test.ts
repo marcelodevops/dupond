@@ -502,12 +502,16 @@ describe('scripts/rotateConnKey.ts safe rotation & recovery', () => {
             blockedRead = true;
             assert.throws(
               () =>
-                projectStore.saveJiraConnection(projectId, {
-                  hostUrl: 'https://example.atlassian.net',
-                  userEmail: 'bot@example.test',
-                  apiToken: 'synth-blocked-write',
-                  existingConnectionId: 'conn-1',
-                }),
+                projectStore.saveJiraConnection(
+                  projectId,
+                  {
+                    hostUrl: 'https://example.atlassian.net',
+                    userEmail: 'bot@example.test',
+                    apiToken: 'synth-blocked-write',
+                    existingConnectionId: 'conn-1',
+                  },
+                  'test',
+                ),
               (err: any) => err instanceof ProjectApiError && err.httpStatus === 503 && err.code === 'KEY_ROTATION_IN_PROGRESS',
             );
             blockedWrite = true;

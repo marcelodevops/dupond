@@ -301,7 +301,7 @@ function openConnectionsDb(dbPath: string): {
     }
     const rows = db
       .prepare('SELECT id, api_token_enc, updated_at FROM jira_connections ORDER BY id ASC')
-      .all() as ConnectionRowSnapshot[];
+      .all() as unknown as ConnectionRowSnapshot[];
     return { db, rows };
   } catch (err) {
     try {
@@ -573,7 +573,7 @@ export function rotateConnectionKey(options: RotateOptions = {}): RotateResult {
     try {
       const currentRows = db
         .prepare('SELECT id, api_token_enc, updated_at FROM jira_connections ORDER BY id ASC')
-        .all() as ConnectionRowSnapshot[];
+        .all() as unknown as ConnectionRowSnapshot[];
       if (currentRows.length !== rows.length) {
         throw new Error(`Concurrent modification detected: expected ${rows.length} row(s), found ${currentRows.length}.`);
       }
