@@ -6,11 +6,14 @@ Dupond encrypts server-held Jira API tokens (`jira_connections.api_token_enc`) i
 
 ---
 
-## 1. Maintenance Prerequisites
+## 1. Enforced Maintenance Exclusion & Prerequisites
 
-1. **Stop the Dupond server** before starting rotation.
-   - *What is enforced automatically:* `scripts/rotateConnKey.ts` acquires an exclusive `.lock` file (`O_CREAT | O_EXCL`, mode `0o600`) to block concurrent rotation processes, and uses `BEGIN IMMEDIATE` in SQLite to block concurrent database writes during re-encryption.
-   - *Remaining operational prerequisite:* Because the running server reads `data/.dupond_conn_key` per request without holding a filesystem lock across the DB-commit-to-key-rename window, a live server could observe new ciphertext alongside the old key (or vice versa) during that brief transition. Stop the server for the maintenance window.
+1. **Shared application & rotation exclusion (enforced automatically across processes):**
+   - **How maintenance begins and ends:** `scripts/rotateConnKey.ts` (both normal rotation and `--recover`) acquires `${CONN_KEY_FILE}.lock` via `O_CREAT | O_EXCL` (`0o600`), drains any active application leases in `${CONN_KEY_FILE}.leases/`, executes rotation/recovery, and removes `.lock` only after post-rotation verification succeeds (or on handled abort).
+   - **How in-flight operations drain and new requests are excluded:** `ProjectStore.saveJiraConnection` and `ProjectStore.getJiraConnectionSecret` register an exclusive lease file in `${CONN_KEY_FILE}.leases/` *before* checking for `.lock` or `.state.json`. Once `.lock` is created, rotation waits up to `drainTimeoutMs` (default `2000ms`) for live-PID leases to finish (and reclaims dead-PID leases) before modifying the DB or key file. Any new or overlapping application secret read/write that observes `.lock` or `.state.json` fails closed with `503 KEY_ROTATION_IN_PROGRESS`.
+   - **Exact DB snapshot validation:** Rotation re-checks `(id, api_token_enc, updated_at)` of every `jira_connections` row inside `BEGIN IMMEDIATE` and aborts with `ROLLBACK` if any external SQLite writer modified, inserted, or deleted a row after preflight snapshot acquisition.
+   - **Crashed maintenance:** If rotation crashes (`SIGKILL`), `.lock` and/or `.state.json` remain on disk, keeping application secret operations blocked (`503 KEY_ROTATION_IN_PROGRESS`) until `npx tsx scripts/rotateConnKey.ts --recover` verifies/reconciles DB & key consistency and clears the maintenance artifacts.
+   - **Operational recommendation:** Stopping the Dupond server before rotation is still recommended so callers do not see transient `503` errors during the maintenance window.
 2. **Verify permissions:** `data/.dupond_conn_key` must be owner-only (`0600`). Rotation refuses to run if group or world permission bits are set.
 3. **Take a pre-maintenance backup** (recommended before any production maintenance):
    - Copy `data/dupond.db` (plus `-wal`/`-shm` if present) and `data/.dupond_conn_key` to a secure, `0600`-protected offline backup location.
@@ -65,10 +68,11 @@ Run:
 npx tsx scripts/rotateConnKey.ts --recover
 ```
 
-Recovery probes the database (read-only) against the previous and staged keys:
+Recovery validates the `.state.json` schema (`version === 1`), verifies that the current `dbPath` and `keyPath` match the recorded paths, and verifies that candidate keys match the recorded `oldKeyFingerprint`/`newKeyFingerprint` before touching the active key. It then probes the database (read-only) against `.prev` and `.next`:
+- **Partial staging before `.state.json` creation:** If interrupted before `.state.json` was written, conservative recovery checks whether `.prev` matches the active key and all DB rows decrypt cleanly, and rolls back partial staging artifacts.
 - **DB did not commit** (rows still decrypt with `.prev`): restores `.prev` atomically to `data/.dupond_conn_key` if needed, verifies all rows decrypt, and cleans up staging files.
 - **DB already committed** (rows decrypt with `.next`): atomically replaces `data/.dupond_conn_key` with `.next`, verifies all rows decrypt, and cleans up staging files.
-- **Ambiguous/corrupt state** (neither key decrypts all rows): aborts with a non-zero exit code and preserves all recovery files for manual inspection.
+- **Ambiguous/corrupt/mismatched state** (path mismatch, fingerprint mismatch, malformed state file, or neither key decrypts all rows): aborts with a non-zero exit code and preserves all recovery files for manual inspection.
 
 **When recovery material can safely be removed:** Only after `npx tsx scripts/rotateConnKey.ts --verify` (or `--recover`) exits `0` and confirms the active key decrypts every row in `jira_connections`. Never delete `.prev`, `.next`, or `.state.json` manually prior to verification.
 
