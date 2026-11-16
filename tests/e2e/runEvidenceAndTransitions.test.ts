@@ -144,9 +144,11 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
               epics: [{ id: 'EPIC-NAV', title: 'Quote API', description: 'Quote API', color: '#6366F1' }],
               tasks: [
                 {
+                  id: 't-nav-101',
                   key: 'NAV-101',
                   title: 'Add validated quote-request endpoint',
                   description: 'Implement validated quote-request handler.',
+                  status: 'todo',
                   epicId: 'EPIC-NAV',
                   priority: 'high',
                   estimatedHours: 4,
@@ -155,9 +157,11 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
                   acceptanceCriteria: [{ id: 'NAV-101-AC1', title: 'npm test passes', completed: false, checkCommand: 'npm test' }],
                 },
                 {
+                  id: 't-nav-102',
                   key: 'NAV-102',
                   title: 'Failing task for error inspection',
                   description: 'Task that fails verification.',
+                  status: 'todo',
                   epicId: 'EPIC-NAV',
                   priority: 'medium',
                   estimatedHours: 2,
