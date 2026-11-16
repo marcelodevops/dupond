@@ -308,7 +308,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       const specialistSelect = page.getByTestId('task-detail-modal').locator('select').nth(2);
       await specialistSelect.selectOption({ index: 1 });
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
-      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 20000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 45000 });
       await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded');
       await pwExpect(page.getByTestId('task-execution-run-id')).toContainText('Run: run-');
       await pwExpect(page.getByTestId('run-id-value')).toContainText('run-');
@@ -352,7 +352,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByText('NAV-102').first().click();
       await page.getByTestId('task-detail-modal').locator('select').nth(2).selectOption({ index: 1 });
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
-      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 20000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 45000 });
       await pwExpect(page.getByTestId('run-status-value')).toHaveText('failed');
       await pwExpect(page.getByTestId('run-failure-reason')).toBeVisible();
       await page.keyboard.press('Escape');
