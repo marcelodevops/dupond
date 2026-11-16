@@ -246,6 +246,8 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByTestId('verify-repo-btn').click();
       await page.getByTestId('repo-verification-result').waitFor({ state: 'visible' });
       await page.getByTestId('save-project-settings-btn').click();
+      await pwExpect(page.getByTestId('save-project-settings-btn')).toBeDisabled();
+      await page.keyboard.press('Escape');
       await page.getByTestId('project-settings-modal').waitFor({ state: 'hidden' });
 
       await page.getByTestId('open-app-settings-btn').click();
