@@ -137,57 +137,86 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       req.on('data', (c) => (body += c.toString('utf-8')));
       req.on('end', () => {
         const isPlan = body.includes('suggestedTimelineWeeks') || body.includes('epics');
-        const textPayload = isPlan
-          ? JSON.stringify({
-              summary: 'Synthetic Naviera Plan',
-              suggestedTimelineWeeks: 1,
-              epics: [{ id: 'EPIC-NAV', title: 'Quote API', description: 'Quote API', color: '#6366F1' }],
-              tasks: [
-                {
-                  id: 't-nav-101',
-                  key: 'NAV-101',
-                  title: 'Add validated quote-request endpoint',
-                  description: 'Implement validated quote-request handler.',
-                  status: 'todo',
-                  epicId: 'EPIC-NAV',
-                  assignedAgentId: 'agent-dev',
-                  priority: 'high',
-                  estimatedHours: 4,
-                  dependencies: [],
-                  subtasks: [{ id: 'NAV-101-1', title: 'Validate quote', completed: false, checkCommand: 'npm test' }],
-                  acceptanceCriteria: [{ id: 'NAV-101-AC1', title: 'npm test passes', completed: false, checkCommand: 'npm test' }],
-                },
-                {
-                  id: 't-nav-102',
-                  key: 'NAV-102',
-                  title: 'Failing task for error inspection',
-                  description: 'Task that fails verification.',
-                  status: 'todo',
-                  epicId: 'EPIC-NAV',
-                  assignedAgentId: 'agent-dev',
-                  priority: 'medium',
-                  estimatedHours: 2,
-                  dependencies: [],
-                  subtasks: [{ id: 'NAV-102-1', title: 'Fails check', completed: false, checkCommand: 'npm test' }],
-                  acceptanceCriteria: [{ id: 'NAV-102-AC1', title: 'npm test passes', completed: false, checkCommand: 'npm test' }],
-                },
-              ],
-            })
-          : mockWorkerMode === 'fail'
-            ? JSON.stringify({
-                summary: 'Broken edit',
-                files: [{ path: 'src/quote.mjs', content: 'export const valid = false;\n' }],
-              })
-            : JSON.stringify({
-                summary: 'Implemented quote request validation and persistent store',
-                files: [
-                  { path: 'src/quote.mjs', content: 'export const valid = true;\nexport const quoteEndpointReady = true;\n' },
-                  { path: 'src/addedQuoteStore.mjs', content: 'export const persistedQuotes = [];\n' },
-                ],
-              });
+        if (isPlan) {
+          const textPayload = JSON.stringify({
+            summary: 'Synthetic Naviera Plan',
+            suggestedTimelineWeeks: 1,
+            epics: [{ id: 'EPIC-NAV', title: 'Quote API', description: 'Quote API', color: '#6366F1' }],
+            tasks: [
+              {
+                id: 't-nav-101',
+                key: 'NAV-101',
+                title: 'Add validated quote-request endpoint',
+                description: 'Implement validated quote-request handler.',
+                status: 'todo',
+                epicId: 'EPIC-NAV',
+                assignedAgentId: 'agent-dev',
+                priority: 'high',
+                estimatedHours: 4,
+                dependencies: [],
+                subtasks: [{ id: 'NAV-101-1', title: 'Validate quote', completed: false, checkCommand: 'npm test' }],
+                acceptanceCriteria: [{ id: 'NAV-101-AC1', title: 'npm test passes', completed: false, checkCommand: 'npm test' }],
+              },
+              {
+                id: 't-nav-102',
+                key: 'NAV-102',
+                title: 'Failing task for error inspection',
+                description: 'Task that fails verification.',
+                status: 'todo',
+                epicId: 'EPIC-NAV',
+                assignedAgentId: 'agent-dev',
+                priority: 'medium',
+                estimatedHours: 2,
+                dependencies: [],
+                subtasks: [{ id: 'NAV-102-1', title: 'Fails check', completed: false, checkCommand: 'npm test' }],
+                acceptanceCriteria: [{ id: 'NAV-102-AC1', title: 'npm test passes', completed: false, checkCommand: 'npm test' }],
+              },
+            ],
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: textPayload }], role: 'model' } }] }));
+          return;
+        }
+
+        // Coding worker turn 1: emit write_file tool calls; turn 2 (after functionResponse): emit final text
+        if (!body.includes('functionResponse')) {
+          const parts =
+            mockWorkerMode === 'fail'
+              ? [
+                  {
+                    functionCall: {
+                      name: 'write_file',
+                      args: { path: 'src/quote.mjs', content: 'export const valid = false;\n' },
+                    },
+                  },
+                ]
+              : [
+                  {
+                    functionCall: {
+                      name: 'write_file',
+                      args: {
+                        path: 'src/quote.mjs',
+                        content: 'export const valid = true;\nexport const quoteEndpointReady = true;\n',
+                      },
+                    },
+                  },
+                  {
+                    functionCall: {
+                      name: 'write_file',
+                      args: {
+                        path: 'src/addedQuoteStore.mjs',
+                        content: 'export const persistedQuotes = [];\n',
+                      },
+                    },
+                  },
+                ];
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ candidates: [{ content: { parts, role: 'model' } }] }));
+          return;
+        }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: textPayload }], role: 'model' } }] }));
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'Completed implementation.' }], role: 'model' } }] }));
       });
     });
 
