@@ -115,6 +115,9 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
   let mockGeminiPort: number;
   let mockGeminiServer: http.Server;
   let mockState: MockGeminiState;
+  let mockMode: 'normal' | 'hang' = 'normal';
+  let mockAbortedCount = 0;
+  const openMockResponses = new Set<http.ServerResponse>();
   let serverProc: ChildProcess | null = null;
   let serverLogs = '';
   let browser: Browser;
@@ -203,7 +206,17 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
     fs.writeFileSync(keyPath, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
 
     mockState = { requests: [] };
+    mockMode = 'normal';
+    mockAbortedCount = 0;
     mockGeminiServer = http.createServer((req, res) => {
+      openMockResponses.add(res);
+      res.on('close', () => {
+        openMockResponses.delete(res);
+        if (!res.writableFinished) {
+          mockAbortedCount += 1;
+        }
+      });
+
       let body = '';
       req.on('data', (chunk) => {
         body += chunk.toString('utf-8');
@@ -213,6 +226,10 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
           ? req.headers['x-goog-api-key']
           : undefined;
         mockState.requests.push({ apiKey, path: req.url || '/', body });
+
+        if (mockMode === 'hang') {
+          return;
+        }
 
         if (!apiKey || apiKey === SYNTH_BAD_KEY) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -499,6 +516,60 @@ describe('Gemini credential onboarding browser E2E (scenarios A-L)', () => {
       await pwExpect(page.getByTestId('gemini-saved-badge')).toHaveText('Status Unavailable');
       await pwExpect(page.getByTestId('gemini-error-banner')).toBeVisible();
       await page.unroute('**/api/credentials/gemini');
+
+      // --- Scenario K: Test Connection pending/elapsed/cancel and bounded timeout inconclusive states ---
+      await stopAppServer();
+      await startAppServer({
+        GEMINI_API_KEY: SYNTH_ENV_KEY,
+        DUPOND_GEMINI_TEST_TIMEOUT_MS: '5000',
+      });
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.getByTestId('open-app-settings-btn').click();
+
+      // Establish prior Verified state
+      await page.getByTestId('test-gemini-key-btn').click();
+      await page.getByTestId('gemini-success-banner').waitFor({ state: 'visible' });
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
+
+      // 1. User cancellation during hanging provider shows pending/elapsed/disclaimer, aborts upstream, preserves Verified
+      mockMode = 'hang';
+      const abortedBeforeUiCancel = mockAbortedCount;
+      await page.getByTestId('test-gemini-key-btn').click();
+      await pwExpect(page.getByTestId('gemini-test-pending')).toBeVisible();
+      await pwExpect(page.getByTestId('gemini-test-pending')).toContainText(
+        'cannot guarantee the provider incurs no usage',
+      );
+      await pwExpect(page.getByTestId('cancel-gemini-test-btn')).toBeVisible();
+      await pwExpect(page.getByTestId('gemini-test-elapsed')).not.toHaveText('Elapsed: 0s', {
+        timeout: 4000,
+      });
+      await page.getByTestId('cancel-gemini-test-btn').click();
+
+      await pwExpect(page.getByTestId('gemini-inconclusive-banner')).toBeVisible();
+      await pwExpect(page.getByTestId('gemini-inconclusive-banner')).toContainText('cancelled');
+      await pwExpect(page.getByTestId('gemini-error-banner')).toBeHidden();
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
+      await page.waitForTimeout(100);
+      assert.ok(mockAbortedCount > abortedBeforeUiCancel, 'Expected upstream Gemini request to abort on Cancel');
+
+      // 2. Bounded 5s server deadline expiry shows inconclusive timeout banner without marking credential failed
+      const abortedBeforeUiTimeout = mockAbortedCount;
+      await page.getByTestId('test-gemini-key-btn').click();
+      await pwExpect(page.getByTestId('gemini-test-pending')).toBeVisible();
+      await pwExpect(page.getByTestId('gemini-inconclusive-banner')).toBeVisible({ timeout: 10000 });
+      await pwExpect(page.getByTestId('gemini-inconclusive-banner')).toContainText('timed out');
+      await pwExpect(page.getByTestId('gemini-error-banner')).toBeHidden();
+      await pwExpect(page.getByTestId('gemini-verified-badge')).toHaveText('Verified');
+      await page.waitForTimeout(100);
+      assert.ok(mockAbortedCount > abortedBeforeUiTimeout, 'Expected upstream Gemini request to abort on timeout');
+
+      mockMode = 'normal';
+      for (const r of openMockResponses) {
+        try {
+          r.destroy();
+        } catch {}
+      }
+      await page.getByTestId('close-app-settings-btn').click();
 
       // --- Scenario L: Security invariants across DOM, storage, API responses, console, server logs ---
       const domHtml = await page.locator('body').innerHTML();
