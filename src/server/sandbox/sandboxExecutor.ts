@@ -373,6 +373,18 @@ ${networkRule}
     // sandboxTmp on every run; container env remains isolated via --env flags.
     const spawnEnv = containerName ? process.env : cleanEnv;
 
+    if (options.abortSignal?.aborted) {
+      return {
+        command: options.command,
+        exitCode: -1,
+        stdout: '',
+        stderr: 'Execution aborted before start.',
+        durationMs: Date.now() - startTime,
+        timedOut: false,
+        killed: true,
+      };
+    }
+
     return new Promise<SandboxExecutionResult>((resolve) => {
       let stdout = '';
       let stderr = '';
@@ -394,7 +406,10 @@ ${networkRule}
       const onAbort = () => {
         killed = true;
         if (containerName && (this.hasPodman || this.hasDocker)) {
-          this.stopAndConfirmContainerRemoval(execCmd, containerName);
+          const removed = this.stopAndConfirmContainerRemoval(execCmd, containerName);
+          if (!removed) {
+            setTimeout(() => this.stopAndConfirmContainerRemoval(execCmd, containerName!), 300).unref();
+          }
           if (options.runId) this.activeContainers.delete(options.runId);
         }
         this.killProcessTree(child);
