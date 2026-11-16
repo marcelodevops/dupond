@@ -56,21 +56,29 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
   async function startAppServer(): Promise<void> {
     if (serverProc) await stopAppServer();
     serverLogs = '';
-    serverProc = spawn('npx', ['tsx', 'server.ts'], {
+    const tsxBin = path.resolve(
+      process.cwd(),
+      'node_modules',
+      '.bin',
+      process.platform === 'win32' ? 'tsx.cmd' : 'tsx',
+    );
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      PORT: String(serverPort),
+      DUPOND_BIND_HOST: '127.0.0.1',
+      NODE_ENV: 'production',
+      DUPOND_AUTH_TOKEN: SYNTH_AUTH_TOKEN,
+      DUPOND_DB_PATH: dbPath,
+      DUPOND_STATE_FILE: statePath,
+      DUPOND_CONN_KEY_PATH: keyPath,
+      DUPOND_ALLOW_TEST_GEMINI_ENDPOINT: '1',
+      DUPOND_GEMINI_TEST_BASE_URL: `http://127.0.0.1:${mockGeminiPort}`,
+    };
+    delete env.GEMINI_API_KEY;
+    serverProc = spawn(tsxBin, ['server.ts'], {
       cwd: process.cwd(),
-      detached: true,
-      env: {
-        ...process.env,
-        PORT: String(serverPort),
-        NODE_ENV: 'test',
-        DUPOND_AUTH_TOKEN: SYNTH_AUTH_TOKEN,
-        DUPOND_DB_PATH: dbPath,
-        DUPOND_STATE_FILE: statePath,
-        DUPOND_CONN_KEY_PATH: keyPath,
-        DUPOND_ALLOW_TEST_GEMINI_ENDPOINT: '1',
-        DUPOND_GEMINI_TEST_BASE_URL: `http://127.0.0.1:${mockGeminiPort}`,
-        GEMINI_API_KEY: '',
-      },
+      detached: process.platform !== 'win32',
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     serverProc.stdout?.on('data', (d) => (serverLogs += d.toString()));
