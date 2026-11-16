@@ -534,25 +534,14 @@ app.post('/api/integrations/repository/dispatch', requireApprovalCredential, asy
     if (!projectId) return;
 
     if (action === 'create_pr' || action === 'deliver') {
-      const targetRun = runId
-        ? taskStore.getRunScoped(runId, projectId)
-        : task
-        ? (taskStore.getLatestRunForTask(task.id, projectId) || taskStore.getRunScoped(task.id, projectId))
-        : null;
-
-      if (targetRun) {
-        const deliveryResult = await defaultGitHubDelivery.dispatchDelivery({
-          runId: targetRun.id,
-          isApproved: isApproved === true,
-          approvedBy: isApproved === true ? (approvedBy || 'operator') : undefined,
-          repoUrl: repoConfig?.repoUrl,
-          targetBaseBranch: repoConfig?.defaultBranch || 'main',
-        });
-        // Delivery may have granted Done (or revoked acceptance) in the
-        // authoritative store; project that outcome into the UI state.
-        coordinator.projectAuthoritativeStatuses(projectId);
-        return res.status(deliveryResult.status).json(deliveryResult);
-      }
+      return res.status(410).json({
+        success: false,
+        blocked: true,
+        code: 'LEGACY_DELIVERY_ROUTE_DEPRECATED',
+        error:
+          'Delivery via /api/integrations/repository/dispatch is disabled. Use POST /api/delivery/dispatch with an explicit inspected-candidate binding.',
+        supportedEndpoint: '/api/delivery/dispatch',
+      });
     }
 
     const result = await handleRepositoryDispatch({ action, repoConfig, task, allowOverwrite });

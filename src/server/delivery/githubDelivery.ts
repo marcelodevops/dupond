@@ -29,7 +29,7 @@ export interface DispatchDeliveryOptions {
   targetBaseBranch?: string;
   repoUrl?: string;
   disposableRemoteDir?: string; // For testing delivery against local bare repository
-  candidateBinding?: DeliveryCandidateBinding;
+  candidateBinding: DeliveryCandidateBinding;
 }
 
 export interface DispatchDeliveryResult {
@@ -57,19 +57,22 @@ export class GitHubDeliveryService {
     this.verifier = verifier;
   }
 
-  private validateCandidateBindingIfPresent(
+  private validateCandidateBinding(
     task: TaskRecord,
     options: DispatchDeliveryOptions,
   ): DispatchDeliveryResult | null {
-    if (!options.candidateBinding) return null;
+    const binding = options.candidateBinding;
     const check = this.store.validateDeliveryCandidateBinding({
       projectId: task.projectId || 'default',
       runId: options.runId,
-      expectedVerificationId: options.candidateBinding.verificationId,
-      expectedRevisionSha: options.candidateBinding.revisionSha,
-      expectedRequirementsFingerprint: options.candidateBinding.requirementsFingerprint,
-      expectedVerificationConfigFingerprint: options.candidateBinding.verificationConfigFingerprint,
-      expectedEvidenceBindingVersion: options.candidateBinding.evidenceBindingVersion,
+      expectedVerificationId: typeof binding?.verificationId === 'string' ? binding.verificationId : '',
+      expectedRevisionSha: typeof binding?.revisionSha === 'string' ? binding.revisionSha : '',
+      expectedRequirementsFingerprint:
+        typeof binding?.requirementsFingerprint === 'string' ? binding.requirementsFingerprint : '',
+      expectedVerificationConfigFingerprint:
+        typeof binding?.verificationConfigFingerprint === 'string' ? binding.verificationConfigFingerprint : '',
+      expectedEvidenceBindingVersion:
+        typeof binding?.evidenceBindingVersion === 'string' ? binding.evidenceBindingVersion : '',
     });
     if (!check.ok) {
       return {
@@ -106,7 +109,7 @@ export class GitHubDeliveryService {
       return { success: false, status: 404, error: `Task for run ${options.runId} not found` };
     }
 
-    const entryBindingErr = this.validateCandidateBindingIfPresent(task, options);
+    const entryBindingErr = this.validateCandidateBinding(task, options);
     if (entryBindingErr) return entryBindingErr;
 
     // 0. Repository authority. The identity this delivery is checked against is
@@ -529,7 +532,7 @@ export class GitHubDeliveryService {
       };
     }
 
-    const prePushBindingErr = this.validateCandidateBindingIfPresent(task, options);
+    const prePushBindingErr = this.validateCandidateBinding(task, options);
     if (prePushBindingErr) return prePushBindingErr;
 
     const repoTarget = persistedTargetRepo;
