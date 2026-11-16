@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/marcelodevops/dupond/compare/v0.9.0...v0.10.0) (2026-11-15)
+
+
+### Features
+
+* **settings:** separate Project Settings from Application Settings ([c85581d](https://github.com/marcelodevops/dupond/commit/c85581d653503da723045109d0a8f201a258be37))
+* **settings:** separate Project Settings from Application Settings and enforce active-run guard ([be6180d](https://github.com/marcelodevops/dupond/commit/be6180dbbd441ecb6039381e8c948aa2d0e06319))
+
+
+### Bug Fixes
+
+* **settings:** eliminate stale modal frame on reopen and update Gemini error message ([9d7e58b](https://github.com/marcelodevops/dupond/commit/9d7e58ba0b9aabe95633e66b6b22094c05cf19b6))
+* **settings:** stabilize focus handling, invalidate stale repo verification, and guard ProjectContext updates ([7e9de0b](https://github.com/marcelodevops/dupond/commit/7e9de0bccb1dae7d871a82d86903cb07e254b4b3))
+
 ## [0.9.0](https://github.com/marcelodevops/dupond/compare/v0.8.4...v0.9.0) (2026-11-15)
 
 
