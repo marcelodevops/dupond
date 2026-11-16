@@ -296,12 +296,12 @@ export class CoordinatorEngine {
     };
   }
 
-  public saveStateToDisk(stateToSave?: ServerState): void {
+  public saveStateToDisk(stateToSave?: ServerState, projectId = this.activeProjectId): void {
     try {
       const data = stateToSave || this.state;
       data.lastUpdated = new Date().toISOString();
-      defaultProjectStore.saveProjectState(this.activeProjectId, data);
-      if (this.activeProjectId === 'default') {
+      defaultProjectStore.saveProjectState(projectId, data);
+      if (projectId === 'default') {
         fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2), 'utf-8');
       }
     } catch (err) {
@@ -586,6 +586,8 @@ export class CoordinatorEngine {
     task?: Task;
     verification?: VerificationResult;
     error?: string;
+    reason?: string;
+    evidence?: unknown;
   }> {
     const effectiveProjectId = projectId || this.activeProjectId;
     const projectState = this.getState(effectiveProjectId);
@@ -617,8 +619,16 @@ export class CoordinatorEngine {
         reason: 'Status transition requested via orchestration API',
       });
       if (!outcome.ok) {
+        const freshDbTask = taskStore.getTaskScoped(dbTask.id, effectiveProjectId) || dbTask;
+        const currentProjected: Task = {
+          ...task,
+          status: this.toUiStatus(freshDbTask.status),
+        };
         return {
           success: false,
+          task: currentProjected,
+          reason: outcome.reason,
+          evidence: outcome.evidence,
           error: outcome.detail || `Lifecycle service refused "${targetStatus}" (${outcome.reason})`,
         };
       }
@@ -880,6 +890,8 @@ export class CoordinatorEngine {
 
     const executionProjectId = projectId || task.projectId || this.activeProjectId;
     const executionProjectConfig = this.getState(executionProjectId).integrationConfig;
+    const executionProjectRecord = defaultProjectStore.getProject(executionProjectId);
+    const projectRepo = executionProjectRecord?.repository;
     let storeTask = taskStore.getTaskScoped(task.key, executionProjectId) || taskStore.getTaskScoped(task.id, executionProjectId);
 
     // Pre-existing static artifact files are a legacy deliverable format used by
@@ -937,13 +949,18 @@ ${implementationCode.slice(0, 500)}...
 
     if (!storeTask) {
       const configuredRepo = task.targetRepo ||
+        projectRepo?.repoUrl ||
         executionProjectConfig?.repository?.repoUrl ||
         process.env.DUPOND_TARGET_REPO;
       const configuredRepoPath = task.targetRepoPath ||
+        (projectRepo?.localPath && fs.existsSync(projectRepo.localPath)
+          ? projectRepo.localPath
+          : undefined) ||
         (executionProjectConfig?.repository?.localPath && fs.existsSync(executionProjectConfig.repository.localPath)
           ? executionProjectConfig.repository.localPath
           : undefined);
       const baseCommit = task.baseCommit ||
+        projectRepo?.defaultBranch ||
         executionProjectConfig?.repository?.defaultBranch ||
         'HEAD';
       const allowedPaths = task.allowedPaths && task.allowedPaths.length > 0
@@ -1007,10 +1024,53 @@ ${implementationCode.slice(0, 500)}...
       });
     }
 
+    const effectiveVerificationCommands =
+      storeTask.verificationCommands && storeTask.verificationCommands.length > 0
+        ? storeTask.verificationCommands
+        : task.verificationCommands && task.verificationCommands.length > 0
+          ? task.verificationCommands
+          : (() => {
+              const mapped = (storeTask.acceptanceCriteria || [])
+                .filter((c) => c.checkCommand)
+                .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
+              return mapped.length > 0 ? mapped : ['npm test'];
+            })();
+
+    const effectiveStoreTask = {
+      ...storeTask,
+      targetRepo:
+        storeTask.targetRepo && storeTask.targetRepo !== 'local'
+          ? storeTask.targetRepo
+          : task.targetRepo ||
+            projectRepo?.repoUrl ||
+            executionProjectConfig?.repository?.repoUrl ||
+            storeTask.targetRepo,
+      targetRepoPath:
+        storeTask.targetRepoPath ||
+        task.targetRepoPath ||
+        (projectRepo?.localPath && fs.existsSync(projectRepo.localPath) ? projectRepo.localPath : undefined) ||
+        (executionProjectConfig?.repository?.localPath && fs.existsSync(executionProjectConfig.repository.localPath)
+          ? executionProjectConfig.repository.localPath
+          : undefined),
+      baseCommit:
+        storeTask.baseCommit && storeTask.baseCommit !== 'HEAD'
+          ? storeTask.baseCommit
+          : task.baseCommit ||
+            projectRepo?.defaultBranch ||
+            executionProjectConfig?.repository?.defaultBranch ||
+            storeTask.baseCommit ||
+            'HEAD',
+      verificationCommands: effectiveVerificationCommands,
+      workerConfig:
+        storeTask.workerConfig && storeTask.workerConfig.provider
+          ? storeTask.workerConfig
+          : task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
+    };
+
     // Authoritatively resolve and check the worker configured for this task
     let taskWorker: CodingWorkerAdapter;
     try {
-      taskWorker = resolveCodingWorker(storeTask.workerConfig);
+      taskWorker = resolveCodingWorker(effectiveStoreTask.workerConfig);
     } catch (cfgErr: any) {
       throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
     }
@@ -1022,16 +1082,16 @@ ${implementationCode.slice(0, 500)}...
 
     // Real Coding Worker Execution via isolated worktree and sandbox!
     const resolvedRepo = resolveTargetRepository({
-      targetRepo: task.targetRepo || executionProjectConfig?.repository?.repoUrl,
-      targetRepoPath: task.targetRepoPath || executionProjectConfig?.repository?.localPath,
+      targetRepo: effectiveStoreTask.targetRepo,
+      targetRepoPath: effectiveStoreTask.targetRepoPath,
       integrationConfig: executionProjectConfig,
-      allowOrchestratorRepo: isOrchestratorSelfTarget(task.targetRepo || executionProjectConfig?.repository?.repoUrl),
+      allowOrchestratorRepo: isOrchestratorSelfTarget(effectiveStoreTask.targetRepo),
     });
 
     const workspaceManager = new WorkspaceManager(resolvedRepo.repoPath);
 
     const workerRun = await defaultRepairCoordinator.executeTaskRun({
-      task: storeTask,
+      task: effectiveStoreTask,
       worker: taskWorker,
       workspaceManager,
     });

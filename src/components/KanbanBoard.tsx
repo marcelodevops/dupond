@@ -406,12 +406,14 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             {/* Back arrow */}
                             {getPrevStatus(task.status) && (
                               <button
+                                data-testid={`card-move-prev-${task.key}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const prev = getPrevStatus(task.status);
                                   if (prev) onUpdateTaskStatus(task.id, prev);
                                 }}
-                                title={`Move back to ${getPrevStatus(task.status)}`}
+                                title={`Request authoritative transition back to ${getPrevStatus(task.status)}`}
+                                aria-label={`Move ${task.key} back to ${getPrevStatus(task.status)}`}
                                 className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
                               >
                                 <ArrowLeft className="w-3 h-3" />
@@ -421,12 +423,20 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             {/* Forward arrow */}
                             {getNextStatus(task.status) && (
                               <button
+                                data-testid={`card-move-next-${task.key}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const next = getNextStatus(task.status);
                                   if (next) onUpdateTaskStatus(task.id, next);
                                 }}
-                                title={`Advance to ${getNextStatus(task.status)}`}
+                                title={
+                                  getNextStatus(task.status) === 'done'
+                                    ? 'Request authoritative transition to done (requires verified evidence, recorded delivery, and approval)'
+                                    : getNextStatus(task.status) === 'review'
+                                      ? 'Request authoritative transition to review (requires passing verification evidence)'
+                                      : `Request authoritative transition to ${getNextStatus(task.status)}`
+                                }
+                                aria-label={`Advance ${task.key} to ${getNextStatus(task.status)}`}
                                 className="p-1 rounded hover:bg-indigo-900/50 text-indigo-400 hover:text-indigo-200 transition-colors"
                               >
                                 <ArrowRight className="w-3 h-3" />

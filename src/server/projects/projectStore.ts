@@ -339,6 +339,10 @@ export class ProjectStore {
     }
 
     const now = new Date().toISOString();
+    const projectRecord = this.getProject(input.projectId);
+    const adoptedTargetRepo = projectRecord?.repository?.repoUrl || 'local';
+    const adoptedTargetRepoPath = projectRecord?.repository?.localPath || null;
+    const adoptedBaseCommit = projectRecord?.repository?.defaultBranch || 'HEAD';
     return this.txn(() => {
       // Check for active execution runs before adoption
       const activeRuns = this.db.prepare(`
@@ -378,16 +382,20 @@ export class ProjectStore {
           ...(s.checkCommand ? { checkCommand: s.checkCommand } : {}),
         }));
 
+        const verificationCommands = cleanCriteria
+          .filter((c) => c.checkCommand)
+          .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
+
         this.db.prepare(`
           INSERT INTO tasks (
             id, key, title, description, epic_id, status, priority,
             estimated_hours, spent_hours, worker_config,
-            target_repo, base_commit, allowed_paths, protected_paths,
+            target_repo, target_repo_path, base_commit, allowed_paths, protected_paths,
             verification_commands, acceptance_criteria,
             dependencies, tags, recommended_role,
             project_id, source_plan_id, plan_revision,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', 'local', 'HEAD', '["src/**"]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', ?, ?, ?, '["src/**"]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           scopedTaskId,
           t.key,
@@ -397,6 +405,10 @@ export class ProjectStore {
           initialStatus,
           t.priority || 'medium',
           t.estimatedHours || 4,
+          adoptedTargetRepo,
+          adoptedTargetRepoPath,
+          adoptedBaseCommit,
+          JSON.stringify(verificationCommands),
           JSON.stringify(cleanCriteria),
           JSON.stringify(t.dependencies || []),
           JSON.stringify(t.tags || []),

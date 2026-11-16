@@ -1,28 +1,42 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Task, Agent, Epic, TaskStatus, Priority } from '../types';
-import { apiFetch } from '../lib/api';
+import { projectApi } from '../lib/projectApi';
+import type { TaskRunsEvidenceResponse } from '../types/projectContract';
 import { withPromotedChecklistItem } from '../services/acceptanceMapping';
 import { AgentAvatar } from './AgentAvatar';
-import { 
-  X, 
-  CheckCircle2, 
-  Clock, 
-  User, 
-  Tag, 
-  Layers, 
-  AlertCircle, 
-  Sparkles, 
-  RotateCw, 
-  FileCode, 
-  Link2, 
-  Send,
-  ArrowRight
+import {
+  X,
+  CheckCircle2,
+  Clock,
+  AlertCircle,
+  Sparkles,
+  RotateCw,
+  FileCode,
+  GitBranch,
+  Layers,
+  Terminal,
+  ShieldAlert,
 } from 'lucide-react';
 
 interface TaskDetailModalProps {
   task: Task | null;
+  projectId?: string;
   onClose: () => void;
   onUpdateTask: (updatedTask: Task) => void;
+  onUpdateTaskStatus?: (taskId: string, targetStatus: TaskStatus) => Promise<void>;
+  transitionFeedback?: {
+    taskId: string;
+    targetStatus: TaskStatus;
+    reason?: string;
+    message: string;
+  } | null;
+  lastExecutionInfo?: {
+    runId?: string;
+    status: 'succeeded' | 'blocked' | 'failed';
+    message: string;
+    timestamp: string;
+  } | null;
+  runRefreshKey?: number;
   agents: Agent[];
   epics: Epic[];
   allTasks: Task[];
@@ -30,22 +44,106 @@ interface TaskDetailModalProps {
   isExecutingStep: boolean;
 }
 
-export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
+export const TaskDetailModal: React.FC<TaskDetailModalProps> = (props) => {
+  if (!props.task) return null;
+  const effectiveProjectId = props.projectId || 'default';
+  return (
+    <TaskDetailModalBody
+      key={`${effectiveProjectId}:${props.task.id}`}
+      {...props}
+      projectId={effectiveProjectId}
+      task={props.task}
+    />
+  );
+};
+
+const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'projectId'> & { task: Task; projectId: string }> = ({
   task,
+  projectId,
   onClose,
   onUpdateTask,
+  onUpdateTaskStatus,
+  transitionFeedback,
+  lastExecutionInfo,
+  runRefreshKey = 0,
   agents,
   epics,
   allTasks,
   onExecuteAgentOnTask,
   isExecutingStep,
 }) => {
-  if (!task) return null;
-
-  const [activeTab, setActiveTab] = useState<'details' | 'subtasks' | 'deliverables'>('details');
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
   const [newCriterionTitle, setNewCriterionTitle] = useState('');
   const [newCriterionCommand, setNewCriterionCommand] = useState('');
+  const [isTransitioningStatus, setIsTransitioningStatus] = useState(false);
+
+  const [runEvidence, setRunEvidence] = useState<TaskRunsEvidenceResponse | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
+  const [isLoadingRuns, setIsLoadingRuns] = useState(true);
+  const [runsLoadError, setRunsLoadError] = useState<string | null>(null);
+
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let active = true;
+
+    const loadRuns = async (isInitial: boolean) => {
+      if (isInitial) {
+        setIsLoadingRuns(true);
+        setRunsLoadError(null);
+      }
+      try {
+        const res = await projectApi.getTaskRuns(projectId, task.id, selectedRunId, controller.signal);
+        if (!active || !mountedRef.current || controller.signal.aborted) return;
+        setRunEvidence(res);
+        setRunsLoadError(null);
+
+        if (res && (res.run.status === 'pending' || res.run.status === 'running')) {
+          pollTimer = setTimeout(() => {
+            if (active && mountedRef.current && !controller.signal.aborted) {
+              void loadRuns(false);
+            }
+          }, 2500);
+        }
+      } catch (err: any) {
+        if (!active || !mountedRef.current || controller.signal.aborted || err?.name === 'AbortError') {
+          return;
+        }
+        setRunsLoadError(err?.message || 'Failed to load run and verification evidence.');
+      } finally {
+        if (active && mountedRef.current && !controller.signal.aborted && isInitial) {
+          setIsLoadingRuns(false);
+        }
+      }
+    };
+
+    void loadRuns(true);
+
+    return () => {
+      active = false;
+      controller.abort();
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, [projectId, task.id, selectedRunId, runRefreshKey]);
 
   const assignee = agents.find((a) => a.id === task.assignedAgentId);
   const epic = epics.find((e) => e.id === task.epicId);
@@ -148,41 +246,13 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
     postCriteria(withPromotedChecklistItem(criteria, item));
   };
 
-  const [verificationResult, setVerificationResult] = useState<{
-    passed: boolean;
-    checks: { rule: string; passed: boolean; detail: string }[];
-    logs: string;
-    timestamp?: string;
-  } | null>(null);
-  const [isVerifying, setIsVerifying] = useState(false);
-
   const handleStatusChange = async (newStatus: TaskStatus) => {
-    if (newStatus === 'done') {
-      await handleVerifyAndMarkDone();
-    } else {
-      setVerificationResult(null);
-      onUpdateTask({ ...task, status: newStatus });
-    }
-  };
-
-  const handleVerifyAndMarkDone = async () => {
-    setIsVerifying(true);
-    setVerificationResult(null);
+    if (newStatus === task.status || isTransitioningStatus || !onUpdateTaskStatus) return;
+    setIsTransitioningStatus(true);
     try {
-      const res = await apiFetch('/api/orchestrate/verify-task', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task }),
-      });
-      const data = await res.json();
-      setVerificationResult(data);
-      if (data.passed) {
-        onUpdateTask({ ...task, status: 'done', lastAgentComment: 'Passed all verification quality gates.' });
-      }
-    } catch (err) {
-      console.warn('Verification error:', err);
+      await onUpdateTaskStatus(task.id, newStatus);
     } finally {
-      setIsVerifying(false);
+      if (mountedRef.current) setIsTransitioningStatus(false);
     }
   };
 
@@ -193,8 +263,19 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full shadow-2xl overflow-hidden my-auto flex flex-col max-h-[90vh]">
+    <div
+      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-5 overflow-y-auto"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Task ${task.key} details`}
+        data-testid="task-detail-modal"
+        className="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full shadow-2xl overflow-hidden my-auto flex flex-col max-h-[92vh]"
+      >
         {/* Modal Top Bar */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-slate-800 bg-slate-950/80">
           <div className="flex items-center space-x-2">
@@ -235,19 +316,23 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 bg-slate-950 rounded-xl border border-slate-800">
             {/* Status */}
             <div>
-              <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
+              <label htmlFor="task-detail-status-select" className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
                 Status
               </label>
               <select
+                id="task-detail-status-select"
+                data-testid="task-detail-status-select"
                 value={task.status}
+                disabled={isTransitioningStatus}
                 onChange={(e) => handleStatusChange(e.target.value as TaskStatus)}
-                className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold"
+                className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold disabled:opacity-60"
               >
                 <option value="backlog">Backlog</option>
                 <option value="todo">To Do</option>
                 <option value="in_progress">In Progress</option>
-                <option value="review">Review & QA</option>
-                <option value="done">Done (Requires Quality Gate)</option>
+                <option value="review">Review & QA (Requires Passing Verification)</option>
+                <option value="blocked">Blocked</option>
+                <option value="done">Done (Requires Verified Delivery & Approval)</option>
               </select>
             </div>
 
@@ -351,30 +436,78 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
             </div>
           </div>
 
-          {/* Quality Gates Verification Report Card */}
-          {verificationResult && (
-            <div className={`p-4 rounded-xl border ${verificationResult.passed ? 'bg-emerald-950/40 border-emerald-800/60' : 'bg-rose-950/40 border-rose-800/60'} space-y-2.5 animate-fadeIn`}>
-              <div className="flex items-center justify-between">
-                <span className={`text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 ${verificationResult.passed ? 'text-emerald-300' : 'text-rose-300'}`}>
-                  {verificationResult.passed ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertCircle className="w-4 h-4 text-rose-400" />}
-                  <span>{verificationResult.passed ? 'Quality Gate PASSED: Verified for "Done"' : 'Quality Gate FAILED: "Done" Blocked'}</span>
+          {/* Persistent Authoritative Transition Refusal */}
+          {transitionFeedback && (
+            <div
+              data-testid="task-transition-refusal"
+              className="p-3.5 rounded-xl border bg-rose-950/40 border-rose-800/70 text-rose-200 text-xs space-y-1"
+            >
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="font-bold uppercase tracking-wider flex items-center gap-1.5 text-rose-300">
+                  <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>Transition to {transitionFeedback.targetStatus.toUpperCase()} Blocked</span>
                 </span>
-                <span className="text-[10px] font-mono text-slate-400">{verificationResult.timestamp}</span>
+                {transitionFeedback.reason && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-900/50 border border-rose-700/50 text-rose-200">
+                    {transitionFeedback.reason}
+                  </span>
+                )}
               </div>
+              <p className="leading-relaxed text-rose-100">{transitionFeedback.message}</p>
+              {transitionFeedback.targetStatus === 'done' && (
+                <p className="text-[11px] text-rose-300/90">
+                  Authoritative status remains <span className="font-mono font-semibold">{task.status}</span>. Moving to Done requires recorded delivery and human approval; UI approval/delivery controls are separate later stages.
+                </p>
+              )}
+            </div>
+          )}
 
-              <div className="space-y-1.5">
-                {verificationResult.checks.map((check, i) => (
-                  <div key={i} className="flex items-start space-x-2 text-xs">
-                    <span className={`font-bold mt-0.5 ${check.passed ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {check.passed ? '✓' : '✕'}
-                    </span>
-                    <div>
-                      <span className="font-semibold text-slate-200">{check.rule}: </span>
-                      <span className={check.passed ? 'text-slate-300' : 'text-rose-200'}>{check.detail}</span>
-                    </div>
-                  </div>
-                ))}
+          {/* Persistent Execute Agent Step Outcome */}
+          {lastExecutionInfo && (
+            <div
+              data-testid="task-execution-status-banner"
+              className={`p-3 rounded-xl border text-xs space-y-1 ${
+                lastExecutionInfo.status === 'succeeded'
+                  ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-200'
+                  : 'bg-amber-950/30 border-amber-800/60 text-amber-200'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="font-semibold">
+                  {lastExecutionInfo.status === 'succeeded'
+                    ? 'Last Agent Step Recorded'
+                    : 'Last Agent Step Blocked / Failed'}
+                </span>
+                {lastExecutionInfo.runId && (
+                  <span className="font-mono text-[10px] text-slate-300" data-testid="task-execution-run-id">
+                    Run: {lastExecutionInfo.runId}
+                  </span>
+                )}
               </div>
+              <p className="text-[11px]">{lastExecutionInfo.message}</p>
+            </div>
+          )}
+
+          {/* Honest Review & QA Semantics */}
+          {(task.status === 'review' || runEvidence?.verification) && (
+            <div
+              data-testid="task-review-honest-notice"
+              className="p-3.5 rounded-xl border bg-amber-950/25 border-amber-800/50 text-amber-100 text-xs space-y-1"
+            >
+              <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>Review & QA Status</span>
+              </div>
+              {runEvidence?.verification?.passed ? (
+                <p className="text-[11px] text-slate-200 leading-relaxed">
+                  Automated verification <span className="font-semibold text-emerald-300">passed</span> for candidate revision{' '}
+                  <span className="font-mono">{runEvidence.verification.revisionSha.slice(0, 12)}</span>. Human review/approval and external PR delivery are separate steps that are not yet available in the UI.
+                </p>
+              ) : (
+                <p className="text-[11px] text-slate-200 leading-relaxed">
+                  Task is in Review & QA, but passing verification evidence is not currently recorded for the latest run. Human approval and PR delivery remain separate steps.
+                </p>
+              )}
             </div>
           )}
 
@@ -542,6 +675,305 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                 Add
               </button>
             </form>
+          </div>
+
+          {/* Authoritative Runs & Evidence Section (Read-Only) */}
+          <div className="space-y-3 pt-2 border-t border-slate-800/80" data-testid="task-runs-evidence-section">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-1.5">
+                <GitBranch className="w-4 h-4 text-indigo-400" />
+                <span>Runs &amp; Evidence</span>
+              </h4>
+              {runEvidence?.runs && runEvidence.runs.length > 1 && (
+                <select
+                  aria-label="Select recorded run"
+                  data-testid="run-history-select"
+                  value={runEvidence.run.id}
+                  onChange={(e) => setSelectedRunId(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-lg text-[11px] font-mono text-slate-200 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  {runEvidence.runs.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.id} ({r.status})
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            {isLoadingRuns ? (
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 flex items-center gap-2">
+                <RotateCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                <span>Loading authoritative run history...</span>
+              </div>
+            ) : runsLoadError ? (
+              <div
+                data-testid="task-runs-error"
+                className="p-3 rounded-lg bg-rose-950/40 border border-rose-800/60 text-xs text-rose-200"
+              >
+                {runsLoadError}
+              </div>
+            ) : !runEvidence ? (
+              <div
+                data-testid="task-no-runs-state"
+                className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 text-xs text-slate-400 space-y-1"
+              >
+                <p className="font-semibold text-slate-300">No runs recorded for this task yet.</p>
+                <p className="text-[11px] text-slate-500">
+                  Run ID: Not recorded · Candidate Revision: Not recorded · Verification: Not available
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Run Metadata Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px]">
+                  <div>
+                    <span className="text-slate-500 block">Run ID</span>
+                    <span className="font-mono text-slate-200 break-all" data-testid="run-id-value">
+                      {runEvidence.run.id}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Project / Task</span>
+                    <span className="font-mono text-slate-200 break-all">
+                      {runEvidence.run.projectId} / {runEvidence.run.taskId}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Run Status</span>
+                    <span
+                      data-testid="run-status-value"
+                      className={`inline-block font-semibold uppercase text-[10px] px-1.5 py-0.5 rounded border ${
+                        runEvidence.run.status === 'completed'
+                          ? 'bg-emerald-950/50 border-emerald-800 text-emerald-300'
+                          : runEvidence.run.status === 'failed'
+                            ? 'bg-rose-950/50 border-rose-800 text-rose-300'
+                            : 'bg-amber-950/50 border-amber-800 text-amber-300'
+                      }`}
+                    >
+                      {runEvidence.run.status}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Provider / Model</span>
+                    <span className="font-mono text-slate-200">
+                      {runEvidence.evidence.provider || 'Not recorded'} / {runEvidence.evidence.model || 'Not available'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Attempts</span>
+                    <span className="font-mono text-slate-200">
+                      {runEvidence.attempts.length} (current #{runEvidence.run.currentAttempt})
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Timestamps</span>
+                    <span className="font-mono text-slate-300">
+                      {new Date(runEvidence.run.createdAt).toLocaleString()} → {new Date(runEvidence.run.updatedAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Target Repository</span>
+                    <span className="font-mono text-slate-200 break-all">
+                      {runEvidence.evidence.targetRepo || 'Not recorded'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Target Branch</span>
+                    <span className="font-mono text-slate-200 break-all">
+                      {runEvidence.evidence.targetBranch || 'Not recorded'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Base Commit</span>
+                    <span className="font-mono text-slate-200 break-all">
+                      {runEvidence.evidence.baseCommit || 'Not recorded'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Candidate Revision</span>
+                    <span className="font-mono text-slate-200 break-all" data-testid="run-candidate-revision">
+                      {runEvidence.evidence.candidateRevision || 'Not recorded'}
+                    </span>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <span className="text-slate-500 block">Delivery / PR Reference</span>
+                    <span className="font-mono text-slate-200 break-all" data-testid="run-delivery-ref">
+                      {runEvidence.delivery?.prUrl
+                        ? `${runEvidence.delivery.prUrl} (${runEvidence.delivery.approvalStatus})`
+                        : runEvidence.delivery
+                          ? `Recorded (${runEvidence.delivery.approvalStatus})`
+                          : 'Not recorded'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Failure / Blocker Reason */}
+                {(runEvidence.run.failureReason || runEvidence.verification?.failureReason) && (
+                  <div
+                    data-testid="run-failure-reason"
+                    className="p-3 rounded-xl bg-rose-950/35 border border-rose-800/60 text-xs text-rose-200 space-y-1"
+                  >
+                    <span className="font-semibold text-rose-300 block">Run Failure / Blocker Reason</span>
+                    <p className="whitespace-pre-wrap break-words">
+                      {runEvidence.run.failureReason || runEvidence.verification?.failureReason}
+                    </p>
+                  </div>
+                )}
+
+                {/* Attempts */}
+                <div className="space-y-1.5" data-testid="run-attempts-list">
+                  <h5 className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Attempts ({runEvidence.attempts.length})
+                  </h5>
+                  {runEvidence.attempts.length === 0 ? (
+                    <p className="text-xs text-slate-500 italic">No attempts recorded.</p>
+                  ) : (
+                    runEvidence.attempts.map((attempt) => {
+                      const isVerifiedAttempt =
+                        Boolean(runEvidence.verification?.passed) &&
+                        runEvidence.verification?.runId === runEvidence.run.id &&
+                        runEvidence.verification?.attemptId === attempt.id;
+                      return (
+                        <div
+                          key={attempt.id}
+                          className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="font-mono font-semibold text-slate-200">
+                              Attempt #{attempt.attemptNumber} · {attempt.workerType}
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                                  isVerifiedAttempt
+                                    ? 'bg-cyan-950/50 border-cyan-800 text-cyan-300'
+                                    : 'bg-slate-900 border-slate-700 text-slate-400'
+                                }`}
+                              >
+                                {isVerifiedAttempt ? 'Verified attempt' : 'Unverified attempt evidence'}
+                              </span>
+                              <span
+                                className={`font-semibold uppercase text-[10px] px-1.5 py-0.5 rounded ${
+                                  attempt.status === 'succeeded'
+                                    ? 'bg-emerald-950/50 text-emerald-300'
+                                    : attempt.status === 'failed' || attempt.status === 'timeout'
+                                      ? 'bg-rose-950/50 text-rose-300'
+                                      : 'bg-amber-950/50 text-amber-300'
+                                }`}
+                              >
+                                {attempt.status} ({attempt.durationMs}ms)
+                              </span>
+                            </div>
+                          </div>
+                        {attempt.errorMessage && (
+                          <p className="text-rose-300 whitespace-pre-wrap break-words">{attempt.errorMessage}</p>
+                        )}
+                        {attempt.logs && (
+                          <pre className="bg-slate-900/80 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-300 whitespace-pre-wrap overflow-x-auto max-h-32 overflow-y-auto">
+                            {attempt.logs}
+                          </pre>
+                        )}
+                      </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Verification Outcomes & Checks */}
+                <div className="space-y-1.5" data-testid="run-verification-checks">
+                  <h5 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                    <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Verification Commands &amp; Results</span>
+                  </h5>
+                  {!runEvidence.verification ? (
+                    <p className="text-xs text-slate-500 italic">Verification record: Not available.</p>
+                  ) : (
+                    <div className="space-y-2 p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px]">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className={runEvidence.verification.passed ? 'text-emerald-300 font-semibold' : 'text-rose-300 font-semibold'}>
+                          {runEvidence.verification.passed ? 'Verification Passed' : 'Verification Failed'}
+                        </span>
+                        <span className="font-mono text-[10px] text-slate-400">
+                          {new Date(runEvidence.verification.verifiedAt).toLocaleString()}
+                        </span>
+                      </div>
+                      {runEvidence.verification.checks.map((chk, idx) => (
+                        <div key={idx} className="p-2 rounded bg-slate-900/70 border border-slate-800 space-y-1">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <code className="text-[11px] text-slate-200 break-all">{chk.command}</code>
+                            <span className={`font-mono text-[10px] ${chk.passed ? 'text-emerald-300' : 'text-rose-300'}`}>
+                              exit {chk.exitCode} · {chk.durationMs}ms
+                            </span>
+                          </div>
+                          {chk.stdout && (
+                            <pre className="text-[10px] font-mono text-slate-300 whitespace-pre-wrap overflow-x-auto max-h-28 overflow-y-auto">
+                              {chk.stdout}
+                            </pre>
+                          )}
+                          {chk.stderr && (
+                            <pre className="text-[10px] font-mono text-rose-300 whitespace-pre-wrap overflow-x-auto max-h-28 overflow-y-auto">
+                              {chk.stderr}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Read-Only Candidate Changes & Diff */}
+                <div className="space-y-1.5" data-testid="run-candidate-diff-section">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <h5 className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      Candidate Changes &amp; Diff
+                    </h5>
+                    <span className="font-mono text-[10px] text-slate-500">
+                      Source: {runEvidence.evidence.provenance}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 space-y-2 text-[11px]">
+                    <div>
+                      <span className="text-slate-500 block mb-1">Changed Files</span>
+                      {runEvidence.evidence.changedFiles.length > 0 ? (
+                        <ul className="space-y-0.5 font-mono text-slate-200" data-testid="run-changed-files">
+                          {runEvidence.evidence.changedFiles.map((f) => (
+                            <li key={f} className="break-all">
+                              {f}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-slate-500 italic">Not recorded</span>
+                      )}
+                    </div>
+
+                    {runEvidence.evidence.candidateDiffStatus === 'available' && runEvidence.evidence.candidateDiff !== null ? (
+                      <div className="space-y-1">
+                        {runEvidence.evidence.candidateDiffTruncated && (
+                          <span className="text-[10px] text-amber-300 block">
+                            Diff truncated to safe display size.
+                          </span>
+                        )}
+                        <pre
+                          data-testid="run-candidate-diff"
+                          className="bg-slate-900/90 border border-slate-800 rounded p-2.5 text-[11px] font-mono text-slate-200 whitespace-pre overflow-x-auto max-h-60 overflow-y-auto"
+                        >
+                          {runEvidence.evidence.candidateDiff}
+                        </pre>
+                      </div>
+                    ) : (
+                      <p
+                        data-testid="run-candidate-diff-unavailable"
+                        className="text-xs text-amber-200/90 bg-amber-950/30 border border-amber-800/50 rounded p-2"
+                      >
+                        {runEvidence.evidence.candidateDiffUnavailableReason || 'Candidate diff is not available.'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Deliverables Section */}

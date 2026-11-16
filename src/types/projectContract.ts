@@ -398,3 +398,107 @@ export interface ProjectApiErrorResponse {
   blockers?: string[];
   activeRunsCount?: number;
 }
+
+export interface TaskRunSummary {
+  id: string;
+  projectId: string;
+  taskId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  targetRepo?: string;
+  baseCommit: string;
+  targetBranch: string;
+  worktreePath?: string | null;
+  currentAttempt: number;
+  durationMs: number;
+  failureType?: 'implementation' | 'verification' | 'delivery' | 'ci' | 'timeout' | 'cancelled' | null;
+  failureReason?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RunAttemptSummary {
+  id: string;
+  runId: string;
+  attemptNumber: number;
+  status: 'running' | 'succeeded' | 'failed' | 'timeout';
+  workerType: string;
+  diff?: string | null;
+  diffTruncated?: boolean;
+  filesModified: string[];
+  logs?: string | null;
+  logsTruncated?: boolean;
+  durationMs: number;
+  errorMessage?: string | null;
+  startedAt: string;
+  completedAt?: string | null;
+}
+
+export interface VerificationCheckSummary {
+  command: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  passed: boolean;
+  durationMs: number;
+}
+
+export interface VerificationSummary {
+  id: string;
+  runId: string;
+  attemptId: string;
+  revisionSha: string;
+  passed: boolean;
+  checks: VerificationCheckSummary[];
+  criteriaVerified: string[];
+  failureReason?: string | null;
+  verifiedAt: string;
+  revisionTreeSha?: string | null;
+  requirementsFingerprint?: string | null;
+  verificationConfigFingerprint?: string | null;
+  evidenceBindingVersion?: string | null;
+}
+
+export interface DeliverySummary {
+  id: string;
+  runId: string;
+  provider: 'github' | 'local_git';
+  repoUrl: string;
+  baseCommit: string;
+  deliveredCommit: string;
+  branch: string;
+  prNumber?: number | null;
+  prUrl?: string | null;
+  ciStatus: 'pending' | 'success' | 'failure' | 'unknown';
+  approvalStatus: 'approved' | 'pending_approval' | 'rejected' | 'not_required';
+  approvedBy?: string | null;
+  deliveredAt: string;
+}
+
+export interface CandidateEvidenceSummary {
+  runId: string;
+  taskId: string;
+  projectId: string;
+  candidateRevision: string | null;
+  baseCommit: string | null;
+  targetRepo: string | null;
+  targetBranch: string | null;
+  provider: string | null;
+  model: string | null;
+  changedFiles: string[];
+  candidateDiff: string | null;
+  candidateDiffStatus: 'available' | 'unavailable';
+  candidateDiffTruncated: boolean;
+  candidateDiffUnavailableReason: string | null;
+  provenance: 'persisted_attempt_diff' | 'immutable_git_commit' | 'unavailable';
+}
+
+export interface TaskRunsEvidenceResponse {
+  run: TaskRunSummary;
+  attempts: RunAttemptSummary[];
+  verification: VerificationSummary | null;
+  delivery: DeliverySummary | null;
+  evidence: CandidateEvidenceSummary;
+  runs?: TaskRunSummary[];
+}
