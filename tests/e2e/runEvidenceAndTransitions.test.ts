@@ -49,6 +49,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
   let mockGeminiPort: number;
   let mockGeminiServer: http.Server;
   let mockWorkerMode: 'pass' | 'fail' = 'pass';
+  let lastWorkerPrompt = '';
   let serverProc: ChildProcess | null = null;
   let serverLogs = '';
   let browser: Browser;
@@ -181,6 +182,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
 
         // Coding worker turn 1: emit write_file tool calls; turn 2 (after functionResponse): emit final text
         if (!body.includes('functionResponse')) {
+          lastWorkerPrompt = body;
           const parts =
             mockWorkerMode === 'fail'
               ? [
@@ -402,17 +404,39 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByText('NAV-101').first().click();
       await pwExpect(page.getByTestId('run-candidate-diff')).toBeVisible();
 
-      // J: Request Changes -> To Do -> Re-execute -> Review -> Approve & Deliver PR -> Done
+      // J: Request Changes -> To Do (feedback persists across restart & project switch) -> rejected evidence cannot restore Review -> Re-execute receives feedback -> Approve & Deliver PR -> Done
       await pwExpect(page.getByTestId('request-changes-btn')).toBeVisible();
       await page.getByTestId('review-feedback-input').fill('Please verify helper export');
       await page.getByTestId('request-changes-btn').click();
       await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('todo');
+      await pwExpect(page.getByTestId('task-unresolved-review-feedback')).toContainText('Please verify helper export');
 
+      // Restart server & switch projects to confirm feedback durability and scoping
+      await stopAppServer();
+      await startAppServer();
+      await page.reload({ waitUntil: 'networkidle' });
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /Secondary/i }).click();
+      await pwExpect(switcherBtn).toContainText('Secondary');
+      assert.strictEqual(await page.evaluate(() => document.body.innerText.includes('Please verify helper export')), false);
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /Naviera/i }).click();
+      await page.getByText('NAV-101').first().click();
+      await pwExpect(page.getByTestId('task-unresolved-review-feedback')).toContainText('Please verify helper export');
+
+      // Rejected evidence cannot restore Review without fresh work
+      await page.getByTestId('task-detail-status-select').selectOption('review');
+      await pwExpect(page.getByTestId('task-transition-refusal')).toBeVisible();
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('todo');
+
+      // Re-execute: next worker receives unresolved operator feedback in prompt
+      lastWorkerPrompt = '';
       mockWorkerMode = 'pass';
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
       await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 90000 });
       await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded');
       await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('review');
+      assert.ok(lastWorkerPrompt.includes('Please verify helper export'), 'Next worker prompt must include unresolved operator review feedback');
 
       // Missing approval token -> 403 reveals token input
       await page.getByTestId('approve-deliver-pr-btn').click();

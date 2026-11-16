@@ -454,39 +454,109 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     const metaJson = (await metaUpdateRes.json()) as any;
     assert.strictEqual(metaJson.success, true);
 
-    // 6. POST /api/tasks/:id/review enforces project isolation, approval token, and request_changes
+    // 6. POST /api/tasks/:id/review enforces candidate binding, project isolation, approval token, and revocation
+    const candidateBinding = {
+      runId: okJson.run.id,
+      verificationId: okJson.verification.id,
+      revisionSha: okJson.evidence.candidateRevision,
+      requirementsFingerprint: okJson.verification.requirementsFingerprint,
+      verificationConfigFingerprint: okJson.verification.verificationConfigFingerprint,
+      evidenceBindingVersion: okJson.verification.evidenceBindingVersion,
+    };
+
     const foreignReview = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
       method: 'POST',
       headers: authHeaders(projB.id),
-      body: JSON.stringify({ decision: 'request_changes', comment: 'nope' }),
+      body: JSON.stringify({ decision: 'request_changes', comment: 'nope', ...candidateBinding }),
     });
     assert.strictEqual(foreignReview.status, 403);
 
     const missingApprovalRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
       method: 'POST',
       headers: authHeaders(projA.id),
-      body: JSON.stringify({ decision: 'approve' }),
+      body: JSON.stringify({ decision: 'approve', ...candidateBinding }),
     });
     assert.strictEqual(missingApprovalRes.status, 403);
+
+    // Stale candidate binding (e.g. candidate changed between modal open and submit) -> 409 Conflict without recording approval
+    const staleRevRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
+      method: 'POST',
+      headers: { ...authHeaders(projA.id), 'X-Dupond-Approval-Token': approvalToken },
+      body: JSON.stringify({
+        decision: 'approve',
+        ...candidateBinding,
+        revisionSha: '0000000000000000000000000000000000000000',
+      }),
+    });
+    assert.strictEqual(staleRevRes.status, 409);
+    const staleRevJson = (await staleRevRes.json()) as any;
+    assert.strictEqual(staleRevJson.code, 'STALE_CANDIDATE_REVIEW');
+
+    const staleReqRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
+      method: 'POST',
+      headers: { ...authHeaders(projA.id), 'X-Dupond-Approval-Token': approvalToken },
+      body: JSON.stringify({
+        decision: 'approve',
+        ...candidateBinding,
+        requirementsFingerprint: 'stale-fingerprint',
+      }),
+    });
+    assert.strictEqual(staleReqRes.status, 409);
 
     const approveRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
       method: 'POST',
       headers: { ...authHeaders(projA.id), 'X-Dupond-Approval-Token': approvalToken },
-      body: JSON.stringify({ decision: 'approve', comment: 'Looks good' }),
+      body: JSON.stringify({ decision: 'approve', comment: 'Looks good', ...candidateBinding }),
     });
     assert.strictEqual(approveRes.status, 200);
     const approveJson = (await approveRes.json()) as any;
     assert.strictEqual(approveJson.decision, 'approve');
     assert.strictEqual(approveJson.approval.revisionSha, okJson.evidence.candidateRevision);
 
+    // Request Changes revokes eligibility of the rejected candidate & prior approval while preserving historical evidence
     const requestChangesRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
       method: 'POST',
       headers: authHeaders(projA.id),
-      body: JSON.stringify({ decision: 'request_changes', comment: 'Add edge-case test' }),
+      body: JSON.stringify({ decision: 'request_changes', comment: 'Add edge-case test', ...candidateBinding }),
     });
     assert.strictEqual(requestChangesRes.status, 200);
     const rcJson = (await requestChangesRes.json()) as any;
     assert.strictEqual(rcJson.decision, 'request_changes');
     assert.strictEqual(rcJson.authoritativeStatus, 'todo');
+
+    // Rejected evidence cannot restore Review
+    const retryReviewRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${taskA.id}/transition`, {
+      method: 'POST',
+      headers: authHeaders(projA.id),
+      body: JSON.stringify({ status: 'review' }),
+    });
+    assert.strictEqual(retryReviewRes.status, 422);
+    const retryReviewJson = (await retryReviewRes.json()) as any;
+    assert.strictEqual(retryReviewJson.reason, 'changes-requested');
+
+    // Rejected candidate cannot be delivered
+    const deliverRejectedRes = await fetch(`${baseUrl}/api/delivery/dispatch`, {
+      method: 'POST',
+      headers: { ...authHeaders(projA.id), 'X-Dupond-Approval-Token': approvalToken },
+      body: JSON.stringify({ isApproved: true, ...candidateBinding }),
+    });
+    assert.strictEqual(deliverRejectedRes.status, 409);
+
+    // Historical verification & unresolved feedback survive in store and remain project-scoped
+    const afterRunsRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/runs`, {
+      headers: authHeaders(projA.id),
+    });
+    assert.strictEqual(afterRunsRes.status, 200);
+    const afterRunsJson = (await afterRunsRes.json()) as any;
+    assert.strictEqual(afterRunsJson.verification.passed, true);
+    assert.ok(afterRunsJson.verification.revokedAt);
+    assert.strictEqual(afterRunsJson.unresolvedReviewFeedback.length, 1);
+    assert.strictEqual(afterRunsJson.unresolvedReviewFeedback[0].comment, 'Add edge-case test');
+    assert.strictEqual(afterRunsJson.reviewDecisions.length, 2);
+
+    const freshStore = new TaskStore(dbPath);
+    assert.strictEqual(freshStore.getUnresolvedReviewFeedback(taskA.id, projA.id).length, 1);
+    assert.strictEqual(freshStore.getUnresolvedReviewFeedback(taskA.id, projB.id).length, 0);
+    freshStore.getRawDb().close();
   }, 25000);
 });
