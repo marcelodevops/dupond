@@ -8,6 +8,30 @@ import {
 import type { GeminiCredentialSource, GeminiCredentialStatus, GeminiTestResult } from '../types/projectContract.js';
 
 export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+export const GEMINI_TEST_DEFAULT_TIMEOUT_MS = 60_000;
+export const GEMINI_TEST_MIN_TIMEOUT_MS = 5_000;
+export const GEMINI_TEST_MAX_TIMEOUT_MS = 120_000;
+
+export function resolveGeminiTestTimeoutMs(overrideMs?: number): number {
+  if (typeof overrideMs === 'number' && Number.isFinite(overrideMs) && overrideMs > 0) {
+    return Math.floor(overrideMs);
+  }
+
+  const rawMs = process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS?.trim();
+  const rawSeconds = process.env.DUPOND_GEMINI_TEST_TIMEOUT_SECONDS?.trim();
+
+  let parsedMs: number | null = null;
+  if (rawMs) {
+    const n = Number(rawMs);
+    if (Number.isFinite(n) && n > 0) parsedMs = Math.floor(n);
+  } else if (rawSeconds) {
+    const s = Number(rawSeconds);
+    if (Number.isFinite(s) && s > 0) parsedMs = Math.floor(s * 1000);
+  }
+
+  if (parsedMs === null) return GEMINI_TEST_DEFAULT_TIMEOUT_MS;
+  return Math.min(GEMINI_TEST_MAX_TIMEOUT_MS, Math.max(GEMINI_TEST_MIN_TIMEOUT_MS, parsedMs));
+}
 
 interface ResolvedCredential {
   apiKey: string | null;
@@ -193,16 +217,51 @@ export function getGeminiCredentialStatus(store: AppCredentialStore = defaultApp
   };
 }
 
-export async function testGeminiConnection(options?: { store?: AppCredentialStore }): Promise<GeminiTestResult> {
+function runWithAbortSignal<T>(fn: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Gemini request aborted.'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason instanceof Error ? signal.reason : new Error('Gemini request aborted.'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve()
+      .then(fn)
+      .then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        (err) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(err);
+        },
+      );
+  });
+}
+
+function formatDurationLabel(ms: number): string {
+  if (ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+export async function testGeminiConnection(options?: {
+  store?: AppCredentialStore;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<GeminiTestResult> {
   const store = options?.store ?? defaultAppCredentialStore;
   const seq = ++nextTestSeq;
   const modelToTest = activeModelName();
+  const timeoutMs = resolveGeminiTestTimeoutMs(options?.timeoutMs);
   const snapshot = resolveGeminiCredential(store);
 
   if (!snapshot.apiKey || snapshot.source === 'none' || !snapshot.version || !snapshot.fingerprint) {
     return {
       ok: false,
       outcome: 'failed',
+      reason: 'error',
       source: 'none',
       model: modelToTest,
       testedAt: new Date().toISOString(),
@@ -211,20 +270,55 @@ export async function testGeminiConnection(options?: { store?: AppCredentialStor
   }
 
   const client = testClientOverride || buildClientForKey(snapshot.apiKey, 'aistudio-build');
-  let outcome: GeminiTestOutcome = 'passed';
+  const controller = new AbortController();
+  let abortReason: 'timeout' | 'cancelled' | null = null;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const onExternalAbort = () => {
+    if (!abortReason) abortReason = 'cancelled';
+    controller.abort(new Error('Gemini connection test cancelled by user.'));
+  };
+
+  if (options?.signal?.aborted) {
+    onExternalAbort();
+  } else if (options?.signal) {
+    options.signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  if (!controller.signal.aborted) {
+    timeoutId = setTimeout(() => {
+      if (!abortReason) abortReason = 'timeout';
+      controller.abort(new Error(`Gemini connection test timed out after ${formatDurationLabel(timeoutMs)}`));
+    }, timeoutMs);
+  }
+
+  let testStatus: 'passed' | 'failed' | 'timeout' | 'cancelled' = 'passed';
   let sanitizedError: string | null = null;
 
   try {
-    await callGeminiWithTimeout(
-      client.models.generateContent({
-        model: modelToTest,
-        contents: 'Reply with OK.',
-      }),
-      15000,
+    await runWithAbortSignal(
+      () =>
+        client.models.generateContent({
+          model: modelToTest,
+          contents: 'Reply with OK.',
+          config: {
+            abortSignal: controller.signal,
+          },
+        }),
+      controller.signal,
     );
   } catch (err: any) {
-    outcome = 'failed';
-    sanitizedError = sanitizeGeminiError(err?.message || String(err), snapshot.apiKey);
+    if (abortReason === 'cancelled') {
+      testStatus = 'cancelled';
+    } else if (abortReason === 'timeout') {
+      testStatus = 'timeout';
+    } else {
+      testStatus = 'failed';
+      sanitizedError = sanitizeGeminiError(err?.message || String(err), snapshot.apiKey);
+    }
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    options?.signal?.removeEventListener('abort', onExternalAbort);
   }
 
   const testedAt = new Date().toISOString();
@@ -242,12 +336,81 @@ export async function testGeminiConnection(options?: { store?: AppCredentialStor
       ok: false,
       stale: true,
       outcome: 'stale',
+      reason: 'stale',
+      timeoutMs,
       source: snapshot.source,
       model: modelToTest,
       testedAt,
       error: 'Credential test result was superseded because the active Gemini credential or model changed while the test was in flight.',
     };
   }
+
+  if (testStatus === 'timeout' || testStatus === 'cancelled') {
+    if (snapshot.source === 'saved') {
+      const completionKey = `${snapshot.version}|${modelToTest}`;
+      const prevCompletedSeq = latestCompletedTestSeqByKey.get(completionKey) ?? 0;
+      if (prevCompletedSeq >= seq) {
+        return {
+          ok: false,
+          stale: true,
+          outcome: 'stale',
+          reason: 'stale',
+          timeoutMs,
+          source: snapshot.source,
+          model: modelToTest,
+          testedAt,
+          error: 'Credential test result was superseded by a newer overlapping test.',
+        };
+      }
+    } else if (
+      envTestState &&
+      envTestState.fingerprint === snapshot.fingerprint &&
+      envTestState.model === modelToTest &&
+      envTestState.seq >= seq
+    ) {
+      return {
+        ok: false,
+        stale: true,
+        outcome: 'stale',
+        reason: 'stale',
+        timeoutMs,
+        source: snapshot.source,
+        model: modelToTest,
+        testedAt,
+        error: 'Credential test result was superseded by a newer overlapping test.',
+      };
+    }
+
+    if (testStatus === 'cancelled') {
+      return {
+        ok: false,
+        inconclusive: true,
+        cancelled: true,
+        outcome: 'cancelled',
+        reason: 'cancelled',
+        timeoutMs,
+        source: snapshot.source,
+        model: modelToTest,
+        testedAt,
+        error:
+          'Connection test was cancelled. Previous verification history was preserved, and cancelling cannot guarantee the provider incurred no usage.',
+      };
+    }
+
+    return {
+      ok: false,
+      inconclusive: true,
+      outcome: 'inconclusive',
+      reason: 'timeout',
+      timeoutMs,
+      source: snapshot.source,
+      model: modelToTest,
+      testedAt,
+      error: `Connection test timed out after ${formatDurationLabel(timeoutMs)} before Gemini responded. This does not mean the credential is invalid; previous verification history was preserved.`,
+    };
+  }
+
+  const outcome: GeminiTestOutcome = testStatus === 'passed' ? 'passed' : 'failed';
 
   if (snapshot.source === 'saved') {
     const completionKey = `${snapshot.version}|${modelToTest}`;
@@ -257,6 +420,8 @@ export async function testGeminiConnection(options?: { store?: AppCredentialStor
         ok: false,
         stale: true,
         outcome: 'stale',
+        reason: 'stale',
+        timeoutMs,
         source: snapshot.source,
         model: modelToTest,
         testedAt,
@@ -278,6 +443,8 @@ export async function testGeminiConnection(options?: { store?: AppCredentialStor
         ok: false,
         stale: true,
         outcome: 'stale',
+        reason: 'stale',
+        timeoutMs,
         source: snapshot.source,
         model: modelToTest,
         testedAt,
@@ -296,6 +463,8 @@ export async function testGeminiConnection(options?: { store?: AppCredentialStor
         ok: false,
         stale: true,
         outcome: 'stale',
+        reason: 'stale',
+        timeoutMs,
         source: snapshot.source,
         model: modelToTest,
         testedAt,
@@ -313,10 +482,18 @@ export async function testGeminiConnection(options?: { store?: AppCredentialStor
   }
 
   if (outcome === 'failed') {
+    const isAuthFailure =
+      typeof sanitizedError === 'string' &&
+      /(401|403|api[ _-]?key.*invalid|invalid.*api[ _-]?key|unauthenticated|permission_denied|unauthorized)/i.test(
+        sanitizedError,
+      );
     return {
       ok: false,
       stale: false,
+      inconclusive: false,
       outcome: 'failed',
+      reason: isAuthFailure ? 'auth' : 'error',
+      timeoutMs,
       source: snapshot.source,
       model: modelToTest,
       testedAt,
@@ -327,7 +504,10 @@ export async function testGeminiConnection(options?: { store?: AppCredentialStor
   return {
     ok: true,
     stale: false,
+    inconclusive: false,
     outcome: 'passed',
+    reason: null,
+    timeoutMs,
     source: snapshot.source,
     model: modelToTest,
     testedAt,

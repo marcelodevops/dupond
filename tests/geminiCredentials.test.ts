@@ -11,10 +11,14 @@ import { AppCredentialStore } from '../src/server/projects/appCredentialStore.js
 import { ProjectStore } from '../src/server/projects/projectStore.js';
 import { decryptSecret, getConnectionKey } from '../src/server/projects/secretCrypto.js';
 import {
+  GEMINI_TEST_DEFAULT_TIMEOUT_MS,
+  GEMINI_TEST_MAX_TIMEOUT_MS,
+  GEMINI_TEST_MIN_TIMEOUT_MS,
   getGeminiClient,
   getGeminiCredentialStatus,
   invalidateGeminiClientCache,
   resolveGeminiCredential,
+  resolveGeminiTestTimeoutMs,
   sanitizeGeminiError,
   testGeminiConnection,
 } from '../src/server/gemini.js';
@@ -394,4 +398,180 @@ describe('Gemini credential storage, precedence, cache invalidation, and key rot
       assert.strictEqual(decryptSecret(parsed.enc), `shared-secret-${parsed.pid}`);
     }
   }, 20000);
+
+  it('validates and bounds server-side Test Connection timeout (5s-120s, default 60s)', () => {
+    const origMs = process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS;
+    const origSec = process.env.DUPOND_GEMINI_TEST_TIMEOUT_SECONDS;
+    delete process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS;
+    delete process.env.DUPOND_GEMINI_TEST_TIMEOUT_SECONDS;
+
+    try {
+      assert.strictEqual(GEMINI_TEST_DEFAULT_TIMEOUT_MS, 60_000);
+      assert.strictEqual(GEMINI_TEST_MIN_TIMEOUT_MS, 5_000);
+      assert.strictEqual(GEMINI_TEST_MAX_TIMEOUT_MS, 120_000);
+      assert.strictEqual(resolveGeminiTestTimeoutMs(), 60_000);
+
+      process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS = '1000';
+      assert.strictEqual(resolveGeminiTestTimeoutMs(), 5_000);
+
+      process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS = '250000';
+      assert.strictEqual(resolveGeminiTestTimeoutMs(), 120_000);
+
+      process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS = '45000';
+      assert.strictEqual(resolveGeminiTestTimeoutMs(), 45_000);
+
+      process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS = 'not-a-number';
+      assert.strictEqual(resolveGeminiTestTimeoutMs(), 60_000);
+
+      delete process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS;
+      process.env.DUPOND_GEMINI_TEST_TIMEOUT_SECONDS = '30';
+      assert.strictEqual(resolveGeminiTestTimeoutMs(), 30_000);
+
+      process.env.DUPOND_GEMINI_TEST_TIMEOUT_SECONDS = '2';
+      assert.strictEqual(resolveGeminiTestTimeoutMs(), 5_000);
+    } finally {
+      if (origMs === undefined) delete process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS;
+      else process.env.DUPOND_GEMINI_TEST_TIMEOUT_MS = origMs;
+      if (origSec === undefined) delete process.env.DUPOND_GEMINI_TEST_TIMEOUT_SECONDS;
+      else process.env.DUPOND_GEMINI_TEST_TIMEOUT_SECONDS = origSec;
+    }
+  });
+
+  it('handles slow >15s responses, deadline abort, user cancel, auth failure, and replacement races without retries', async () => {
+    const store = new TaskStore(dbPath);
+    const credStore = new AppCredentialStore(store);
+
+    let mode: 'fast_pass' | 'slow_15s_pass' | 'hang' | 'auth_401' = 'fast_pass';
+    let requestCount = 0;
+    let abortedCount = 0;
+    const openResponses = new Set<http.ServerResponse>();
+
+    const mockServer = http.createServer((req, res) => {
+      requestCount += 1;
+      openResponses.add(res);
+      res.on('close', () => {
+        openResponses.delete(res);
+        if (!res.writableFinished) {
+          abortedCount += 1;
+        }
+      });
+
+      if (mode === 'fast_pass') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'OK' }], role: 'model' } }] }));
+        return;
+      }
+
+      if (mode === 'slow_15s_pass') {
+        const timer = setTimeout(() => {
+          if (!res.writableEnded && !res.destroyed) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'OK' }], role: 'model' } }] }));
+          }
+        }, 15_150);
+        res.on('close', () => clearTimeout(timer));
+        return;
+      }
+
+      if (mode === 'auth_401') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 401, message: 'API key not valid.' } }));
+        return;
+      }
+
+      // mode === 'hang': keep socket open until aborted
+    });
+
+    await new Promise<void>((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
+    const port = (mockServer.address() as { port: number }).port;
+    process.env.DUPOND_ALLOW_TEST_GEMINI_ENDPOINT = '1';
+    process.env.DUPOND_GEMINI_TEST_BASE_URL = `http://127.0.0.1:${port}`;
+
+    try {
+      // 1. Seed a verified key (passed)
+      credStore.saveGeminiKey('AIzaSySlowValidKey1234567890');
+      const initialPass = await testGeminiConnection({ store: credStore });
+      assert.strictEqual(initialPass.ok, true);
+      assert.strictEqual(initialPass.outcome, 'passed');
+      const initialTestedAt = credStore.getGeminiMetadata().lastTestedAt;
+      assert.ok(initialTestedAt);
+
+      // 2. Slow response after >15s succeeds under the 60s default deadline
+      mode = 'slow_15s_pass';
+      const reqBefore15s = requestCount;
+      const slow15sRes = await testGeminiConnection({ store: credStore });
+      assert.strictEqual(slow15sRes.ok, true);
+      assert.strictEqual(slow15sRes.outcome, 'passed');
+      assert.strictEqual(slow15sRes.timeoutMs, 60_000);
+      assert.strictEqual(requestCount - reqBefore15s, 1);
+      const verifiedTestedAt = credStore.getGeminiMetadata().lastTestedAt;
+      assert.ok(verifiedTestedAt);
+
+      // 3. Deadline expiry aborts underlying HTTP request, makes no retry, returns inconclusive, preserves key & history
+      mode = 'hang';
+      const reqBeforeTimeout = requestCount;
+      const abortedBeforeTimeout = abortedCount;
+      const timeoutRes = await testGeminiConnection({ store: credStore, timeoutMs: 250 });
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.strictEqual(timeoutRes.ok, false);
+      assert.strictEqual(timeoutRes.inconclusive, true);
+      assert.strictEqual(timeoutRes.outcome, 'inconclusive');
+      assert.strictEqual(timeoutRes.reason, 'timeout');
+      assert.strictEqual(requestCount - reqBeforeTimeout, 1);
+      assert.strictEqual(abortedCount - abortedBeforeTimeout, 1);
+      assert.strictEqual(credStore.getGeminiKey(), 'AIzaSySlowValidKey1234567890');
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestOutcome, 'passed');
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestedAt, verifiedTestedAt);
+
+      // 4. User cancellation aborts underlying HTTP request without changing saved key or history
+      const ac = new AbortController();
+      const reqBeforeCancel = requestCount;
+      const abortedBeforeCancel = abortedCount;
+      const cancelPromise = testGeminiConnection({ store: credStore, signal: ac.signal, timeoutMs: 10_000 });
+      while (requestCount === reqBeforeCancel) await new Promise((r) => setTimeout(r, 10));
+      ac.abort();
+      const cancelRes = await cancelPromise;
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.strictEqual(cancelRes.ok, false);
+      assert.strictEqual(cancelRes.inconclusive, true);
+      assert.strictEqual(cancelRes.cancelled, true);
+      assert.strictEqual(cancelRes.outcome, 'cancelled');
+      assert.strictEqual(cancelRes.reason, 'cancelled');
+      assert.strictEqual(requestCount - reqBeforeCancel, 1);
+      assert.strictEqual(abortedCount - abortedBeforeCancel, 1);
+      assert.strictEqual(credStore.getGeminiKey(), 'AIzaSySlowValidKey1234567890');
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestOutcome, 'passed');
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestedAt, verifiedTestedAt);
+
+      // 5. Credential replacement while slow test is in flight -> timeout returns stale & does not touch new key
+      const reqBeforeReplace = requestCount;
+      const slowReplacePromise = testGeminiConnection({ store: credStore, timeoutMs: 250 });
+      while (requestCount === reqBeforeReplace) await new Promise((r) => setTimeout(r, 10));
+      credStore.saveGeminiKey('AIzaSyReplacementKey987654321');
+      const slowReplaceRes = await slowReplacePromise;
+      assert.strictEqual(slowReplaceRes.ok, false);
+      assert.strictEqual(slowReplaceRes.stale, true);
+      assert.strictEqual(slowReplaceRes.outcome, 'stale');
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestOutcome, null);
+
+      // 6. Auth rejection remains distinct from timeout/inconclusive
+      mode = 'auth_401';
+      const authRes = await testGeminiConnection({ store: credStore, timeoutMs: 5_000 });
+      assert.strictEqual(authRes.ok, false);
+      assert.strictEqual(authRes.inconclusive, false);
+      assert.strictEqual(authRes.outcome, 'failed');
+      assert.strictEqual(authRes.reason, 'auth');
+      assert.strictEqual(credStore.getGeminiMetadata().lastTestOutcome, 'failed');
+    } finally {
+      for (const res of openResponses) {
+        try {
+          res.destroy();
+        } catch {}
+      }
+      mockServer.close();
+      store.getRawDb().close();
+    }
+  }, 30_000);
 });
