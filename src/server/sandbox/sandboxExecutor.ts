@@ -357,6 +357,8 @@ ${networkRule}
         '--network', options.allowNetwork ? 'bridge' : 'none',
         ...containerMounts,
         '-w', realWorktree,
+        '--env', 'HOME=/tmp',
+        '--env', 'TMPDIR=/tmp',
         '--env', 'NODE_ENV=test',
         '--env', 'CI=true',
         'node:22-bookworm',
@@ -365,6 +367,11 @@ ${networkRule}
     } else {
       throw new DomainError('Restricted execution sandbox unavailable: Host lacks required container runtime (podman or docker) on Linux. Refusing to run untrusted code on host.');
     }
+
+    // Container CLIs (rootless podman/docker) need host HOME/XDG_DATA_HOME to
+    // access pre-pulled image storage instead of re-pulling 1.1 GB into
+    // sandboxTmp on every run; container env remains isolated via --env flags.
+    const spawnEnv = containerName ? process.env : cleanEnv;
 
     return new Promise<SandboxExecutionResult>((resolve) => {
       let stdout = '';
@@ -375,7 +382,7 @@ ${networkRule}
       // Spawn in a separate process group (detached: true) so we can kill the whole tree
       const child: ChildProcess = spawn(execCmd, execArgs, {
         cwd: realWorktree,
-        env: cleanEnv,
+        env: spawnEnv,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
