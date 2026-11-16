@@ -65,14 +65,17 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir });
     const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf-8' }).trim();
 
-    // Create candidate commit
+    // Create candidate commit modifying existing file AND adding a new file
     fs.writeFileSync(path.join(repoDir, 'src', 'app.ts'), 'export const v = 2;\n', 'utf-8');
+    fs.writeFileSync(path.join(repoDir, 'src', 'newFile.ts'), 'export const added = true;\n', 'utf-8');
     execFileSync('git', ['add', '.'], { cwd: repoDir });
     execFileSync('git', ['commit', '-m', 'candidate'], { cwd: repoDir });
     const candidateSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf-8' }).trim();
+    const candidateTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoDir, encoding: 'utf-8' }).trim();
 
-    // Mutate working tree AFTER candidate commit — immutable evidence must NOT include dirty working tree changes
+    // Mutate working tree and add untracked file AFTER candidate commit — immutable evidence must NOT include them
     fs.writeFileSync(path.join(repoDir, 'src', 'app.ts'), 'export const v = 999_MUTABLE;\n', 'utf-8');
+    fs.writeFileSync(path.join(repoDir, 'src', 'dirtyUntracked.ts'), 'export const dirty = true;\n', 'utf-8');
 
     const store = new TaskStore(dbPath);
     const task = store.createTask({
@@ -130,7 +133,7 @@ describe('Authoritative task transitions & read-only run evidence', () => {
       runId: run.id,
       attemptId: attempt.id,
       revisionSha: candidateSha,
-      revisionTreeSha: 'tree123',
+      revisionTreeSha: candidateTreeSha,
       requirementsFingerprint: binding.requirementsFingerprint,
       verificationConfigFingerprint: binding.verificationConfigFingerprint,
       evidenceBindingVersion: binding.evidenceBindingVersion,
@@ -148,11 +151,13 @@ describe('Authoritative task transitions & read-only run evidence', () => {
       criteriaVerified: ['ac-1'],
     });
 
-    // 1. Immutable commit diff used when attempt.diff is absent (ignores dirty 999_MUTABLE!)
+    // 1. Immutable base-to-candidate commit diff includes BOTH modified & added files, ignores dirty/untracked worktree,
+    //    and preserves historical run provider/model even if task.workerConfig is later changed.
     const attempts = store.listAttempts(run.id, 'proj-a');
+    const mutatedTask = { ...task, workerConfig: { provider: 'openai', model: 'gpt-4o' } };
     const built = buildSanitizedRunEvidence({
       run,
-      task,
+      task: mutatedTask,
       attempts,
       verification,
       delivery: null,
@@ -161,8 +166,13 @@ describe('Authoritative task transitions & read-only run evidence', () => {
 
     assert.strictEqual(built.evidence.provenance, 'immutable_git_commit');
     assert.strictEqual(built.evidence.candidateDiffStatus, 'available');
+    assert.deepStrictEqual(built.evidence.changedFiles, ['src/app.ts', 'src/newFile.ts']);
     assert.ok(built.evidence.candidateDiff?.includes('export const v = 2;'));
+    assert.ok(built.evidence.candidateDiff?.includes('export const added = true;'));
     assert.ok(!built.evidence.candidateDiff?.includes('999_MUTABLE'));
+    assert.ok(!built.evidence.candidateDiff?.includes('dirtyUntracked'));
+    assert.strictEqual(built.evidence.provider, 'gemini');
+    assert.strictEqual(built.evidence.model, 'gemini-3.8-flash');
     assert.strictEqual((built.attempts[0] as any).prompt, undefined);
     assert.strictEqual(built.attempts[0].logsTruncated, true);
     assert.ok(!built.attempts[0].logs?.includes('secret_bearer_token_12345'));
@@ -170,32 +180,91 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     assert.strictEqual(built.verification?.checks[0].stdoutTruncated, true);
     assert.ok(!built.verification?.checks[0].stdout.includes('AIzaSyFakeStdoutKey12345'));
 
-    // 2. Large persisted diff is bounded & marked truncated
-    store.updateAttempt(attempt.id, {
-      diff: `--- a/src/app.ts\n+++ b/src/app.ts\n${'+line\n'.repeat(Math.ceil((MAX_DIFF_CHARS + 1000) / 6))}`,
-    });
-    const builtPersisted = buildSanitizedRunEvidence({
+    // 2. Missing workerType on attempt -> provider/model reported as null (never inherited from task.workerConfig)
+    const noWorkerBuilt = buildSanitizedRunEvidence({
       run,
-      task,
-      attempts: store.listAttempts(run.id, 'proj-a'),
+      task: mutatedTask,
+      attempts: [{ ...attempts[0], workerType: '' }],
       verification,
       delivery: null,
       projectRepoLocalPath: repoDir,
     });
-    assert.strictEqual(builtPersisted.evidence.provenance, 'persisted_attempt_diff');
-    assert.strictEqual(builtPersisted.evidence.candidateDiffTruncated, true);
+    assert.strictEqual(noWorkerBuilt.evidence.provider, null);
+    assert.strictEqual(noWorkerBuilt.evidence.model, null);
 
-    // 3. Missing snapshot & missing repo produces explicit unavailable state
+    // 3. Missing verification-bound attempt with another unrelated attempt present -> MUST NOT substitute unrelated attempt
+    const missingBoundAttempt = buildSanitizedRunEvidence({
+      run,
+      task,
+      attempts: [{ ...attempts[0], id: 'unrelated-attempt', diff: '--- a/unrelated.ts\n+++ b/unrelated.ts\n+unrelated\n' }],
+      verification: { ...verification, attemptId: 'missing-verified-attempt' },
+      delivery: null,
+      projectRepoLocalPath: repoDir,
+    });
+    assert.strictEqual(missingBoundAttempt.evidence.candidateDiffStatus, 'unavailable');
+    assert.strictEqual(missingBoundAttempt.evidence.provenance, 'unavailable');
+    assert.strictEqual(missingBoundAttempt.evidence.candidateDiff, null);
+    assert.strictEqual(missingBoundAttempt.evidence.candidateRevision, null);
+    assert.deepStrictEqual(missingBoundAttempt.evidence.changedFiles, []);
+    assert.ok(missingBoundAttempt.evidence.candidateDiffUnavailableReason?.includes('missing-verified-attempt'));
+
+    // 4. Mismatched run/verification and run/attempt bindings -> unavailable with precise reason
+    const mismatchedVerifRun = buildSanitizedRunEvidence({
+      run,
+      task,
+      attempts,
+      verification: { ...verification, runId: 'other-run-id' },
+      delivery: null,
+      projectRepoLocalPath: repoDir,
+    });
+    assert.strictEqual(mismatchedVerifRun.evidence.candidateDiffStatus, 'unavailable');
+    assert.ok(mismatchedVerifRun.evidence.candidateDiffUnavailableReason?.includes('other-run-id'));
+
+    const mismatchedAttemptRun = buildSanitizedRunEvidence({
+      run,
+      task,
+      attempts: [{ ...attempts[0], runId: 'other-run-id' }],
+      verification,
+      delivery: null,
+      projectRepoLocalPath: repoDir,
+    });
+    assert.strictEqual(mismatchedAttemptRun.evidence.candidateDiffStatus, 'unavailable');
+    assert.ok(mismatchedAttemptRun.evidence.candidateDiffUnavailableReason?.includes('other-run-id'));
+
+    // 5. Large immutable commit diff is bounded & marked truncated
+    fs.writeFileSync(
+      path.join(repoDir, 'src', 'large.ts'),
+      `${'// large candidate line for truncation check\n'.repeat(Math.ceil((MAX_DIFF_CHARS + 2048) / 40))}`,
+      'utf-8',
+    );
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'large candidate'], { cwd: repoDir });
+    const largeSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf-8' }).trim();
+    const largeTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoDir, encoding: 'utf-8' }).trim();
+
+    const builtLarge = buildSanitizedRunEvidence({
+      run,
+      task,
+      attempts,
+      verification: { ...verification, revisionSha: largeSha, revisionTreeSha: largeTree },
+      delivery: null,
+      projectRepoLocalPath: repoDir,
+    });
+    assert.strictEqual(builtLarge.evidence.provenance, 'immutable_git_commit');
+    assert.strictEqual(builtLarge.evidence.candidateDiffTruncated, true);
+
+    // 6. Missing Git objects produce honest unavailable state even if attempt.diff was stored pre-commit
     const missingBuilt = buildSanitizedRunEvidence({
       run: { ...run, baseCommit: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' },
       task: { ...task, targetRepoPath: path.join(tmpDir, 'nonexistent-repo') },
-      attempts: [{ ...attempts[0], diff: null }],
+      attempts: [{ ...attempts[0], diff: '--- a/src/app.ts\n+++ b/src/app.ts\n+partial precommit diff\n' }],
       verification: { ...verification, revisionSha: '1234567890abcdef1234567890abcdef12345678' },
       delivery: null,
       projectRepoLocalPath: null,
     });
     assert.strictEqual(missingBuilt.evidence.candidateDiffStatus, 'unavailable');
     assert.strictEqual(missingBuilt.evidence.provenance, 'unavailable');
+    assert.strictEqual(missingBuilt.evidence.candidateDiff, null);
     assert.ok(missingBuilt.evidence.candidateDiffUnavailableReason);
 
     store.getRawDb().close();
@@ -357,6 +426,7 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     const okJson = (await okRuns.json()) as any;
     assert.strictEqual(okJson.run.id, runA.id);
     assert.strictEqual(okJson.runs.length, 1);
-    assert.strictEqual(okJson.evidence.candidateDiffStatus, 'available');
+    assert.strictEqual(okJson.evidence.candidateDiffStatus, 'unavailable');
+    assert.ok(okJson.evidence.candidateDiffUnavailableReason);
   }, 25000);
 });

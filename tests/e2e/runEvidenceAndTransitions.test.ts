@@ -165,8 +165,11 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
                 files: [{ path: 'src/quote.mjs', content: 'export const valid = false;\n' }],
               })
             : JSON.stringify({
-                summary: 'Implemented quote request validation',
-                files: [{ path: 'src/quote.mjs', content: 'export const valid = true;\nexport const quoteEndpointReady = true;\n' }],
+                summary: 'Implemented quote request validation and persistent store',
+                files: [
+                  { path: 'src/quote.mjs', content: 'export const valid = true;\nexport const quoteEndpointReady = true;\n' },
+                  { path: 'src/addedQuoteStore.mjs', content: 'export const persistedQuotes = [];\n' },
+                ],
               });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -258,7 +261,9 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await pwExpect(page.getByTestId('run-verification-checks')).toContainText('Verification Passed');
       await pwExpect(page.getByTestId('run-verification-checks')).toContainText('npm test');
       await pwExpect(page.getByTestId('run-changed-files')).toContainText('src/quote.mjs');
+      await pwExpect(page.getByTestId('run-changed-files')).toContainText('src/addedQuoteStore.mjs');
       await pwExpect(page.getByTestId('run-candidate-diff')).toContainText('quoteEndpointReady');
+      await pwExpect(page.getByTestId('run-candidate-diff')).toContainText('persistedQuotes');
       await pwExpect(page.getByTestId('task-review-honest-notice')).toContainText('separate steps');
 
       const shotDir = process.env.DUPOND_E2E_SCREENSHOT_DIR;
