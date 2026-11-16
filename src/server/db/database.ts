@@ -10,9 +10,11 @@ import {
   VerificationRecord,
   DeliveryRecord,
   AuditEventRecord,
+  ReviewDecisionRecord,
   DDL_SCHEMA,
 } from './schema.js';
 import {
+  assessEvidenceValidity,
   computeEvidenceBinding,
   validateApprovalExpectation,
   type ApprovalAssessment,
@@ -107,6 +109,9 @@ export class TaskStore {
         'ALTER TABLE jira_operations ADD COLUMN remote_id TEXT;',
         "ALTER TABLE projects ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}';",
         "CREATE TABLE IF NOT EXISTS project_source_plans (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, revision INTEGER NOT NULL, source_text TEXT NOT NULL, summary TEXT, status TEXT NOT NULL DEFAULT 'submitted', error_message TEXT, breakdown_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (project_id, revision));",
+        'ALTER TABLE verification_records ADD COLUMN revoked_at TEXT;',
+        'ALTER TABLE verification_records ADD COLUMN revoked_reason TEXT;',
+        "CREATE TABLE IF NOT EXISTS review_decisions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, run_id TEXT NOT NULL, verification_id TEXT NOT NULL, revision_sha TEXT NOT NULL, requirements_fingerprint TEXT NOT NULL, verification_config_fingerprint TEXT NOT NULL, evidence_binding_version TEXT NOT NULL, decision TEXT NOT NULL CHECK (decision IN ('approved', 'changes_requested')), comment TEXT, actor TEXT NOT NULL, resolved_by_run_id TEXT, created_at TEXT NOT NULL);",
       ]) {
         try {
           this.db.exec(ddl);
@@ -121,6 +126,8 @@ export class TaskStore {
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_task_runs_project ON task_runs(project_id);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_source_plans_project ON project_source_plans(project_id);');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_review_decisions_task ON review_decisions(task_id, created_at);');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_review_decisions_run ON review_decisions(run_id, created_at);');
       const now = new Date().toISOString();
       this.db.prepare(`
         INSERT OR IGNORE INTO projects
@@ -1304,7 +1311,291 @@ export class TaskStore {
       requirementsFingerprint: row.requirements_fingerprint ?? null,
       verificationConfigFingerprint: row.verification_config_fingerprint ?? null,
       evidenceBindingVersion: row.evidence_binding_version ?? null,
+      revokedAt: row.revoked_at ?? null,
+      revokedReason: row.revoked_reason ?? null,
     };
+  }
+
+  private mapReviewDecisionRow(row: any): ReviewDecisionRecord {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      runId: row.run_id,
+      verificationId: row.verification_id,
+      revisionSha: row.revision_sha,
+      requirementsFingerprint: row.requirements_fingerprint,
+      verificationConfigFingerprint: row.verification_config_fingerprint,
+      evidenceBindingVersion: row.evidence_binding_version,
+      decision: row.decision,
+      comment: row.comment ?? null,
+      actor: row.actor,
+      resolvedByRunId: row.resolved_by_run_id ?? null,
+      createdAt: row.created_at,
+    };
+  }
+
+  public listReviewDecisionsForRun(runId: string, projectId?: string): ReviewDecisionRecord[] {
+    if (projectId && !this.getRunScoped(runId, projectId)) return [];
+    const rows = this.db
+      .prepare('SELECT * FROM review_decisions WHERE run_id = ? ORDER BY created_at DESC')
+      .all(runId) as any[];
+    return rows.map((r) => this.mapReviewDecisionRow(r));
+  }
+
+  public getUnresolvedReviewFeedback(taskId: string, projectId?: string): ReviewDecisionRecord[] {
+    const task = projectId ? this.getTaskScoped(taskId, projectId) : this.getTask(taskId);
+    if (!task) return [];
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM review_decisions WHERE task_id = ? AND project_id = ? AND decision = 'changes_requested' AND resolved_by_run_id IS NULL ORDER BY created_at ASC",
+      )
+      .all(task.id, task.projectId || 'default') as any[];
+    return rows.map((r) => this.mapReviewDecisionRow(r));
+  }
+
+  public resolveReviewFeedbackForTask(taskId: string, resolvedByRunId: string, projectId?: string): void {
+    const task = projectId ? this.getTaskScoped(taskId, projectId) : this.getTask(taskId);
+    if (!task) return;
+    this.db
+      .prepare(
+        "UPDATE review_decisions SET resolved_by_run_id = ? WHERE task_id = ? AND project_id = ? AND decision = 'changes_requested' AND resolved_by_run_id IS NULL",
+      )
+      .run(resolvedByRunId, task.id, task.projectId || 'default');
+  }
+
+  public submitReviewDecision(params: {
+    projectId: string;
+    taskId: string;
+    decision: 'approved' | 'changes_requested';
+    comment?: string;
+    actor: string;
+    expectedRunId: string;
+    expectedVerificationId: string;
+    expectedRevisionSha: string;
+    expectedRequirementsFingerprint: string;
+    expectedVerificationConfigFingerprint: string;
+    expectedEvidenceBindingVersion: string;
+  }):
+    | { ok: true; record: ReviewDecisionRecord; task: TaskRecord; delivery: DeliveryRecord | null }
+    | { ok: false; status: number; code: string; reason?: string; error: string; authoritativeStatus?: string } {
+    return this.transaction(() => {
+      const dbTask = this.getTaskScoped(params.taskId, params.projectId);
+      if (!dbTask) {
+        return { ok: false, status: 404, code: 'TASK_NOT_FOUND', error: `Task ${params.taskId} not found.` };
+      }
+      if (dbTask.status !== 'review') {
+        return {
+          ok: false,
+          status: 422,
+          code: 'INVALID_TASK_STATUS',
+          error: `Review decision requires task status "review" (current status: "${dbTask.status}").`,
+          authoritativeStatus: dbTask.status,
+        };
+      }
+
+      const latestRun = this.getLatestRunForTask(dbTask.id, params.projectId);
+      const verification = latestRun ? this.getLatestVerification(latestRun.id, params.projectId) : null;
+      const binding = computeEvidenceBinding(dbTask);
+
+      if (
+        !latestRun ||
+        !verification ||
+        latestRun.id !== params.expectedRunId ||
+        verification.id !== params.expectedVerificationId ||
+        verification.revisionSha !== params.expectedRevisionSha ||
+        binding.requirementsFingerprint !== params.expectedRequirementsFingerprint ||
+        binding.verificationConfigFingerprint !== params.expectedVerificationConfigFingerprint ||
+        binding.evidenceBindingVersion !== params.expectedEvidenceBindingVersion
+      ) {
+        return {
+          ok: false,
+          status: 409,
+          code: 'STALE_CANDIDATE_REVIEW',
+          error: 'Candidate revision, verification, or task requirements changed since this review was opened. Reload the latest candidate evidence before deciding.',
+          authoritativeStatus: dbTask.status,
+        };
+      }
+
+      const validity = assessEvidenceValidity(dbTask, verification);
+      if (!validity.valid) {
+        return {
+          ok: false,
+          status: 422,
+          code: 'EVIDENCE_INVALID',
+          reason: validity.reason,
+          error: `Review decision requires current valid evidence: ${validity.detail}`,
+          authoritativeStatus: dbTask.status,
+        };
+      }
+
+      const now = new Date().toISOString();
+      const decisionId = `rev-${crypto.randomUUID()}`;
+      const cleanComment = params.comment && params.comment.trim() ? params.comment.trim() : null;
+
+      this.db
+        .prepare(
+          `INSERT INTO review_decisions (
+            id, project_id, task_id, run_id, verification_id, revision_sha,
+            requirements_fingerprint, verification_config_fingerprint, evidence_binding_version,
+            decision, comment, actor, resolved_by_run_id, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(
+          decisionId,
+          params.projectId,
+          dbTask.id,
+          latestRun.id,
+          verification.id,
+          verification.revisionSha,
+          binding.requirementsFingerprint,
+          binding.verificationConfigFingerprint,
+          binding.evidenceBindingVersion,
+          params.decision,
+          cleanComment,
+          params.actor,
+          now,
+        );
+
+      const record: ReviewDecisionRecord = {
+        id: decisionId,
+        projectId: params.projectId,
+        taskId: dbTask.id,
+        runId: latestRun.id,
+        verificationId: verification.id,
+        revisionSha: verification.revisionSha,
+        requirementsFingerprint: binding.requirementsFingerprint,
+        verificationConfigFingerprint: binding.verificationConfigFingerprint,
+        evidenceBindingVersion: binding.evidenceBindingVersion,
+        decision: params.decision,
+        comment: cleanComment,
+        actor: params.actor,
+        resolvedByRunId: null,
+        createdAt: now,
+      };
+
+      if (params.decision === 'changes_requested') {
+        const reason = cleanComment || 'Changes requested by operator during Review & QA.';
+        // Revoke eligibility of the rejected verification & any prior approval on this run while preserving history
+        this.db
+          .prepare('UPDATE verification_records SET revoked_at = ?, revoked_reason = ? WHERE id = ?')
+          .run(now, reason, verification.id);
+        this.db
+          .prepare("UPDATE delivery_records SET approval_status = 'rejected' WHERE run_id = ? AND approval_status = 'approved'")
+          .run(latestRun.id);
+
+        const cas = this.db
+          .prepare("UPDATE tasks SET status = 'todo', updated_at = ? WHERE id = ? AND project_id = ? AND status = 'review'")
+          .run(now, dbTask.id, params.projectId);
+        if (Number(cas.changes) === 0) {
+          return {
+            ok: false,
+            status: 409,
+            code: 'CONCURRENT_TRANSITION',
+            error: 'Task status changed concurrently while recording review decision.',
+          };
+        }
+
+        this.recordAudit({
+          taskId: dbTask.id,
+          runId: latestRun.id,
+          projectId: params.projectId,
+          eventType: 'REVIEW_CHANGES_REQUESTED',
+          actor: params.actor,
+          details: {
+            reviewDecisionId: decisionId,
+            verificationId: verification.id,
+            revisionSha: verification.revisionSha,
+            comment: reason,
+          },
+        });
+
+        const updatedTask = this.getTaskScoped(dbTask.id, params.projectId)!;
+        return { ok: true, record, task: updatedTask, delivery: this.getDeliveryForRun(latestRun.id, params.projectId) };
+      }
+
+      // decision === 'approved'
+      this.recordAudit({
+        taskId: dbTask.id,
+        runId: latestRun.id,
+        projectId: params.projectId,
+        eventType: 'REVIEW_APPROVED',
+        actor: params.actor,
+        details: {
+          reviewDecisionId: decisionId,
+          verificationId: verification.id,
+          revisionSha: verification.revisionSha,
+          ...binding,
+          comment: cleanComment || undefined,
+        },
+      });
+
+      let delivery = this.getDeliveryForRun(latestRun.id, params.projectId);
+      if (delivery && delivery.approvalStatus !== 'approved') {
+        const approvalRes = this.approveDelivery(delivery.id, params.actor, {
+          ...binding,
+          verificationId: verification.id,
+          revisionSha: verification.revisionSha,
+        });
+        if (approvalRes.approved && approvalRes.delivery) {
+          delivery = approvalRes.delivery;
+        }
+      }
+
+      return { ok: true, record, task: dbTask, delivery };
+    });
+  }
+
+  public validateDeliveryCandidateBinding(params: {
+    projectId: string;
+    runId: string;
+    expectedVerificationId?: string;
+    expectedRevisionSha?: string;
+    expectedRequirementsFingerprint?: string;
+    expectedVerificationConfigFingerprint?: string;
+    expectedEvidenceBindingVersion?: string;
+  }): { ok: true } | { ok: false; status: number; code: string; error: string } {
+    return this.transaction(() => {
+      const run = this.getRunScoped(params.runId, params.projectId);
+      if (!run) {
+        return { ok: false, status: 404, code: 'RUN_NOT_FOUND', error: `Run ${params.runId} not found.` };
+      }
+      const task = this.getTaskScoped(run.taskId, params.projectId);
+      if (!task) {
+        return { ok: false, status: 404, code: 'TASK_NOT_FOUND', error: `Task ${run.taskId} not found.` };
+      }
+      const latestRun = this.getLatestRunForTask(task.id, params.projectId);
+      const verification = this.getLatestVerification(run.id, params.projectId);
+      const binding = computeEvidenceBinding(task);
+
+      if (
+        (latestRun && latestRun.id !== run.id) ||
+        (params.expectedVerificationId && verification?.id !== params.expectedVerificationId) ||
+        (params.expectedRevisionSha && verification?.revisionSha !== params.expectedRevisionSha) ||
+        (params.expectedRequirementsFingerprint && binding.requirementsFingerprint !== params.expectedRequirementsFingerprint) ||
+        (params.expectedVerificationConfigFingerprint && binding.verificationConfigFingerprint !== params.expectedVerificationConfigFingerprint) ||
+        (params.expectedEvidenceBindingVersion && binding.evidenceBindingVersion !== params.expectedEvidenceBindingVersion)
+      ) {
+        return {
+          ok: false,
+          status: 409,
+          code: 'STALE_CANDIDATE_REVIEW',
+          error: 'Candidate revision, verification, or task requirements changed since this view was loaded. Reload the latest candidate evidence before delivering.',
+        };
+      }
+
+      const validity = assessEvidenceValidity(task, verification);
+      if (!validity.valid) {
+        return {
+          ok: false,
+          status: 409,
+          code: validity.reason === 'changes-requested' ? 'CANDIDATE_REJECTED' : 'EVIDENCE_INVALID',
+          error: validity.detail,
+        };
+      }
+
+      return { ok: true };
+    });
   }
 
   private mapDeliveryRow(row: any): DeliveryRecord {

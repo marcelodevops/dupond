@@ -29,6 +29,13 @@ export interface WorkerExecutionContext {
     stderr?: string;
     unmetCriteria?: string[];
   };
+  operatorReviewFeedback?: Array<{
+    id: string;
+    actor: string;
+    comment: string;
+    revisionSha: string;
+    createdAt: string;
+  }>;
   timeoutMs?: number;
   runId?: string;
   abortSignal?: AbortSignal;

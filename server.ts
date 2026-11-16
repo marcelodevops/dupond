@@ -565,10 +565,41 @@ app.post('/api/integrations/repository/dispatch', requireApprovalCredential, asy
 // Endpoint: Explicit Pull Request Delivery Dispatcher
 app.post('/api/delivery/dispatch', requireApprovalCredential, async (req: Request, res: Response) => {
   try {
-    const { runId, isApproved = false, approvedBy, repoUrl, targetBaseBranch } = req.body || {};
+    const {
+      runId,
+      isApproved = false,
+      approvedBy,
+      repoUrl,
+      targetBaseBranch,
+      verificationId,
+      revisionSha,
+      requirementsFingerprint,
+      verificationConfigFingerprint,
+      evidenceBindingVersion,
+    } = req.body || {};
     if (!runId) return res.status(400).json({ error: 'runId is required' });
     const projectId = projectContext(req, res, taskStore.getProjectIdForRun(runId));
     if (!projectId) return;
+
+    const bindingCheck = taskStore.validateDeliveryCandidateBinding({
+      projectId,
+      runId: String(runId),
+      expectedVerificationId: typeof verificationId === 'string' ? verificationId : undefined,
+      expectedRevisionSha: typeof revisionSha === 'string' ? revisionSha : undefined,
+      expectedRequirementsFingerprint: typeof requirementsFingerprint === 'string' ? requirementsFingerprint : undefined,
+      expectedVerificationConfigFingerprint:
+        typeof verificationConfigFingerprint === 'string' ? verificationConfigFingerprint : undefined,
+      expectedEvidenceBindingVersion: typeof evidenceBindingVersion === 'string' ? evidenceBindingVersion : undefined,
+    });
+    if (!bindingCheck.ok) {
+      return res.status(bindingCheck.status).json({
+        success: false,
+        blocked: true,
+        code: bindingCheck.code,
+        error: bindingCheck.error,
+      });
+    }
+
     const result = await defaultGitHubDelivery.dispatchDelivery({
       runId,
       isApproved: isApproved === true,
@@ -598,75 +629,39 @@ app.post('/api/tasks/:id/review', (req: Request, res: Response) => {
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
 
-    const { decision, comment, approvedBy } = (req.body || {}) as {
-      decision?: unknown;
-      comment?: unknown;
-      approvedBy?: unknown;
-    };
+    const {
+      decision,
+      comment,
+      approvedBy,
+      runId,
+      verificationId,
+      revisionSha,
+      requirementsFingerprint,
+      verificationConfigFingerprint,
+      evidenceBindingVersion,
+    } = (req.body || {}) as Record<string, unknown>;
     if (decision !== 'approve' && decision !== 'request_changes') {
       return res.status(400).json({ error: 'decision must be "approve" or "request_changes"' });
+    }
+    if (
+      typeof runId !== 'string' || !runId.trim() ||
+      typeof verificationId !== 'string' || !verificationId.trim() ||
+      typeof revisionSha !== 'string' || !revisionSha.trim() ||
+      typeof requirementsFingerprint !== 'string' || !requirementsFingerprint.trim() ||
+      typeof verificationConfigFingerprint !== 'string' || !verificationConfigFingerprint.trim() ||
+      typeof evidenceBindingVersion !== 'string' || !evidenceBindingVersion.trim()
+    ) {
+      return res.status(400).json({
+        error: 'Candidate binding fields (runId, verificationId, revisionSha, requirementsFingerprint, verificationConfigFingerprint, evidenceBindingVersion) are required.',
+        code: 'CANDIDATE_BINDING_REQUIRED',
+      });
     }
 
     const dbTask = taskStore.getTaskScoped(req.params.id, projectId);
     if (!dbTask) return res.status(404).json({ error: `Task ${req.params.id} not found` });
-    if (dbTask.status !== 'review') {
-      return res.status(422).json({
-        success: false,
-        error: `Review decision requires task status "review" (current status: "${dbTask.status}").`,
-        authoritativeStatus: dbTask.status,
-      });
-    }
 
-    const latestRun = taskStore.getLatestRunForTask(dbTask.id, projectId);
-    const verification = latestRun ? taskStore.getLatestVerification(latestRun.id, projectId) : null;
-    const actor = typeof approvedBy === 'string' && approvedBy.trim() ? approvedBy.trim() : 'operator';
-    const feedback = typeof comment === 'string' && comment.trim() ? comment.trim() : '';
-
-    if (decision === 'request_changes') {
-      const reason = feedback || 'Changes requested by operator during Review & QA.';
-      const transition = defaultLifecycleService.transition({
-        taskId: dbTask.id,
-        to: 'todo',
-        actor,
-        reason,
-      });
-      if (!transition.ok) {
-        return res.status(422).json({
-          success: false,
-          error: transition.detail || 'Could not return task to To Do.',
-          reason: transition.reason,
-          authoritativeStatus: dbTask.status,
-        });
-      }
-      taskStore.recordAudit({
-        taskId: dbTask.id,
-        runId: latestRun?.id,
-        projectId,
-        eventType: 'REVIEW_CHANGES_REQUESTED',
-        actor,
-        details: {
-          comment: reason,
-          revisionSha: verification?.revisionSha || null,
-        },
-      });
-      const projectState = coordinator.getState(projectId);
-      const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
-      if (stateTask) {
-        stateTask.status = 'todo';
-        stateTask.lastAgentComment = `Changes requested (${actor}): ${reason}`;
-        stateTask.lastUpdated = 'Just now';
-        coordinator.saveStateToDisk(projectState, projectId);
-      }
-      return res.json({
-        success: true,
-        decision: 'request_changes',
-        authoritativeStatus: 'todo',
-        task: stateTask || dbTask,
-      });
-    }
-
-    // decision === 'approve'
-    if (dbTask.requireApproval) {
+    // Enforce approval credential before mutating state on approve
+    if (decision === 'approve' && dbTask.requireApproval) {
       if (!getApprovalToken()) {
         return res.status(503).json({
           error: 'Approval credential not configured: set DUPOND_APPROVAL_TOKEN to enable operator approval via the API.',
@@ -682,71 +677,67 @@ app.post('/api/tasks/:id/review', (req: Request, res: Response) => {
       }
     }
 
-    const validity = assessEvidenceValidity(dbTask, verification);
-    if (!validity.valid) {
-      return res.status(422).json({
-        success: false,
-        reason: validity.reason,
-        error: `Review approval requires current passing evidence: ${validity.detail}`,
-        authoritativeStatus: dbTask.status,
-      });
-    }
-    if (!verification) {
-      return res.status(422).json({
-        success: false,
-        reason: 'no-evidence',
-        error: 'Review approval requires a passing verification record.',
-        authoritativeStatus: dbTask.status,
-      });
-    }
+    const actor = typeof approvedBy === 'string' && approvedBy.trim() ? approvedBy.trim() : 'operator';
+    const feedback = typeof comment === 'string' && comment.trim() ? comment.trim() : '';
 
-    const binding = computeEvidenceBinding(dbTask);
-    const approvedAt = new Date().toISOString();
-    taskStore.recordAudit({
-      taskId: dbTask.id,
-      runId: latestRun?.id,
+    const outcome = taskStore.submitReviewDecision({
       projectId,
-      eventType: 'REVIEW_APPROVED',
+      taskId: dbTask.id,
+      decision: decision === 'approve' ? 'approved' : 'changes_requested',
+      comment: feedback || undefined,
       actor,
-      details: {
-        verificationId: verification.id,
-        revisionSha: verification.revisionSha,
-        ...binding,
-        comment: feedback || undefined,
-      },
+      expectedRunId: runId.trim(),
+      expectedVerificationId: verificationId.trim(),
+      expectedRevisionSha: revisionSha.trim(),
+      expectedRequirementsFingerprint: requirementsFingerprint.trim(),
+      expectedVerificationConfigFingerprint: verificationConfigFingerprint.trim(),
+      expectedEvidenceBindingVersion: evidenceBindingVersion.trim(),
     });
 
-    let delivery = latestRun ? taskStore.getDeliveryForRun(latestRun.id, projectId) : null;
-    if (delivery && delivery.approvalStatus !== 'approved') {
-      const approvalRes = taskStore.approveDelivery(delivery.id, actor, {
-        ...binding,
-        verificationId: verification.id,
-        revisionSha: verification.revisionSha,
+    if (!outcome.ok) {
+      return res.status(outcome.status).json({
+        success: false,
+        code: outcome.code,
+        reason: outcome.reason,
+        error: outcome.error,
+        authoritativeStatus: outcome.authoritativeStatus,
       });
-      if (approvalRes.approved && approvalRes.delivery) {
-        delivery = approvalRes.delivery;
-      }
     }
 
     const projectState = coordinator.getState(projectId);
     const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
     if (stateTask) {
-      stateTask.lastAgentComment = `Review approved by ${actor} for revision ${verification.revisionSha.slice(0, 10)}${feedback ? `: ${feedback}` : '.'}`;
+      stateTask.status = outcome.task.status as any;
+      stateTask.lastAgentComment =
+        decision === 'request_changes'
+          ? `Changes requested (${actor}): ${feedback || 'Changes requested by operator.'}`
+          : `Review approved by ${actor} for revision ${outcome.record.revisionSha.slice(0, 10)}${feedback ? `: ${feedback}` : '.'}`;
       stateTask.lastUpdated = 'Just now';
       coordinator.saveStateToDisk(projectState, projectId);
+    }
+
+    if (decision === 'request_changes') {
+      return res.json({
+        success: true,
+        decision: 'request_changes',
+        authoritativeStatus: outcome.task.status,
+        reviewDecision: outcome.record,
+        task: stateTask || outcome.task,
+      });
     }
 
     return res.json({
       success: true,
       decision: 'approve',
-      authoritativeStatus: dbTask.status,
+      authoritativeStatus: outcome.task.status,
+      reviewDecision: outcome.record,
       approval: {
         approvedBy: actor,
-        approvedAt,
-        revisionSha: verification.revisionSha,
-        verificationId: verification.id,
+        approvedAt: outcome.record.createdAt,
+        revisionSha: outcome.record.revisionSha,
+        verificationId: outcome.record.verificationId,
       },
-      delivery,
+      delivery: outcome.delivery,
     });
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Review decision failed') });
@@ -773,6 +764,8 @@ app.get('/api/runs/:id', (req: Request, res: Response) => {
       verification,
       delivery,
       projectRepoLocalPath: project?.repository?.localPath,
+      reviewDecisions: taskStore.listReviewDecisionsForRun(run.id, projectId),
+      unresolvedReviewFeedback: taskStore.getUnresolvedReviewFeedback(run.taskId, projectId),
     });
     return res.json(payload);
   } catch (error: any) {
@@ -824,6 +817,8 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
       verification,
       delivery,
       projectRepoLocalPath: project?.repository?.localPath,
+      reviewDecisions: taskStore.listReviewDecisionsForRun(run.id, projectId),
+      unresolvedReviewFeedback: taskStore.getUnresolvedReviewFeedback(lookupTaskId, projectId),
     });
     return res.json({
       ...payload,

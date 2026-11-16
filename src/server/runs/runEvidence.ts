@@ -3,6 +3,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type {
   DeliveryRecord,
+  ReviewDecisionRecord,
   RunAttemptRecord,
   TaskRecord,
   TaskRunRecord,
@@ -199,14 +200,27 @@ export function buildSanitizedRunEvidence(params: {
   verification: VerificationRecord | null;
   delivery: DeliveryRecord | null;
   projectRepoLocalPath?: string | null;
+  reviewDecisions?: ReviewDecisionRecord[];
+  unresolvedReviewFeedback?: ReviewDecisionRecord[];
 }): {
   run: TaskRunRecord;
   attempts: SanitizedAttemptRecord[];
   verification: SanitizedVerificationRecord | null;
   delivery: DeliveryRecord | null;
+  reviewDecisions: ReviewDecisionRecord[];
+  unresolvedReviewFeedback: ReviewDecisionRecord[];
   evidence: CandidateEvidencePayload;
 } {
-  const { run, task, attempts, verification, delivery, projectRepoLocalPath } = params;
+  const {
+    run,
+    task,
+    attempts,
+    verification,
+    delivery,
+    projectRepoLocalPath,
+    reviewDecisions = [],
+    unresolvedReviewFeedback = [],
+  } = params;
 
   const sanitizedAttempts: SanitizedAttemptRecord[] = attempts.map((attempt) => {
     const { prompt: _omittedPrompt, ...rest } = attempt;
@@ -317,11 +331,18 @@ export function buildSanitizedRunEvidence(params: {
         : 'No verified candidate revision is recorded for this run yet.';
   }
 
+  const sanitizeReviewDecision = (d: ReviewDecisionRecord): ReviewDecisionRecord => ({
+    ...d,
+    comment: d.comment ? sanitizeEvidenceText(d.comment) : null,
+  });
+
   return {
     run: sanitizedRun,
     attempts: sanitizedAttempts,
     verification: sanitizedVerification,
     delivery,
+    reviewDecisions: reviewDecisions.map(sanitizeReviewDecision),
+    unresolvedReviewFeedback: unresolvedReviewFeedback.map(sanitizeReviewDecision),
     evidence: {
       runId: run.id,
       taskId: run.taskId,

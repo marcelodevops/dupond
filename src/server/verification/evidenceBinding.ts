@@ -78,6 +78,7 @@ export function computeEvidenceBinding(params: EvidenceBindingParams): EvidenceB
 export type EvidenceInvalidReason =
   | 'no-evidence'
   | 'failed-verification'
+  | 'changes-requested'
   | 'legacy-evidence'
   | 'verifier-upgraded'
   | 'stale-requirements'
@@ -107,6 +108,13 @@ export function assessEvidenceValidity(
       valid: false,
       reason: 'failed-verification',
       detail: `Latest verification for revision ${verification.revisionSha} did not pass: ${verification.failureReason || 'unknown failure'}`,
+    };
+  }
+  if (verification.revokedAt) {
+    return {
+      valid: false,
+      reason: 'changes-requested',
+      detail: `Candidate revision ${verification.revisionSha.slice(0, 12)} was rejected during review${verification.revokedReason ? `: ${verification.revokedReason}` : ''}. Fresh work and verification are required.`,
     };
   }
   if (

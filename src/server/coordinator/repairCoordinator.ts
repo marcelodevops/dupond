@@ -177,6 +177,15 @@ export class RepairCoordinator {
     let lastFailureType: TaskRunRecord['failureType'] = 'implementation';
 
     const maxAttempts = task.maxAttempts || 3;
+    const unresolvedFeedback = this.store
+      .getUnresolvedReviewFeedback(task.id, task.projectId || 'default')
+      .map((fb) => ({
+        id: fb.id,
+        actor: fb.actor,
+        comment: fb.comment || 'Changes requested by operator.',
+        revisionSha: fb.revisionSha,
+        createdAt: fb.createdAt,
+      }));
 
     try {
       for (let attemptNum = 1; attemptNum <= maxAttempts; attemptNum++) {
@@ -212,6 +221,7 @@ export class RepairCoordinator {
           protectedPaths: task.protectedPaths,
           attemptNumber: attemptNum,
           repairFeedback,
+          operatorReviewFeedback: unresolvedFeedback.length > 0 ? unresolvedFeedback : undefined,
           timeoutMs: (task.timeoutSeconds || 300) * 1000,
           runId,
           abortSignal: abortController.signal,
@@ -323,6 +333,10 @@ export class RepairCoordinator {
           verificationConfigFingerprint: verification.binding?.verificationConfigFingerprint || null,
           evidenceBindingVersion: verification.binding?.evidenceBindingVersion || null,
         });
+
+        if (verification.passed) {
+          this.store.resolveReviewFeedbackForTask(task.id, run.id, task.projectId || 'default');
+        }
 
         // Update attempt record with verified outcomes
         this.store.updateAttempt(attempt.id, {
