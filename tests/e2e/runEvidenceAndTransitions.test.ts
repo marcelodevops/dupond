@@ -410,8 +410,8 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
 
       mockWorkerMode = 'pass';
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
-      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 90000 });
-      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('review');
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('review', { timeout: 90000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded');
 
       // Missing approval token -> 403 reveals token input
       await page.getByTestId('approve-deliver-pr-btn').click();
