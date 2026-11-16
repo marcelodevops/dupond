@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const TASK_KEY_REGEX = /^AEG-\d+$/;
+export const TASK_KEY_REGEX = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
 
 export const TaskStatusSchema = z.enum(['backlog', 'todo', 'in_progress', 'review', 'done']);
 export const PrioritySchema = z.enum(['critical', 'high', 'medium', 'low']);
@@ -17,7 +17,7 @@ export const SubTaskSchema = z.object({
 
 export const TaskSchema = z.object({
   id: z.string().min(1),
-  key: z.string().regex(TASK_KEY_REGEX, 'Task key must match format AEG-<number>'),
+  key: z.string().regex(TASK_KEY_REGEX, 'Task key must match format <PROJECT>-<number>'),
   title: z.string().min(1),
   description: z.string().default(''),
   epicId: z.string().min(1),
