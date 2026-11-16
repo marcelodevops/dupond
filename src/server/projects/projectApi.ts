@@ -383,14 +383,28 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
   });
 
   router.post('/credentials/gemini/test', async (_req: Request, res: Response) => {
+    const ac = new AbortController();
+    const onClose = () => {
+      if (!res.writableFinished) {
+        ac.abort();
+      }
+    };
+    res.on('close', onClose);
     try {
-      const result = await testGeminiConnection();
+      const result = await testGeminiConnection({ signal: ac.signal });
+      if (res.writableEnded || res.destroyed) {
+        return;
+      }
       res.json({
         ...result,
         status: getGeminiCredentialStatus(),
       });
     } catch (err) {
-      fail(res, err);
+      if (!res.writableEnded && !res.destroyed) {
+        fail(res, err);
+      }
+    } finally {
+      res.off('close', onClose);
     }
   });
 
