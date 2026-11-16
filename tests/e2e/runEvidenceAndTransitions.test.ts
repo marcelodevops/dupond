@@ -244,7 +244,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByTestId('project-target-branch-input').fill('main');
       await page.getByTestId('project-repo-url-input').fill(remoteDir);
       await page.getByTestId('verify-repo-btn').click();
-      await page.getByText(/Repository verified/i).waitFor({ state: 'visible' });
+      await page.getByTestId('repo-verification-result').waitFor({ state: 'visible' });
       await page.getByTestId('save-project-settings-btn').click();
 
       await page.getByTestId('open-app-settings-btn').click();
