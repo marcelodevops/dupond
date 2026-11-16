@@ -219,25 +219,31 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.goto(serverUrl, { waitUntil: 'networkidle' });
 
       // A. Create non-default project "Naviera" and a second project "Secondary" for switch-race test
-      await page.getByTestId('project-switcher-btn').click();
-      await page.getByTestId('new-project-btn').click();
-      await page.getByTestId('wizard-project-name').fill('Secondary');
-      await page.getByTestId('wizard-create-btn').click();
-      await pwExpect(page.getByTestId('project-switcher-btn')).toContainText('Secondary');
+      const createSecondary = await page.request.post(`${serverUrl}/api/projects`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
+        data: { name: 'Secondary', description: 'Secondary isolation project' },
+      });
+      assert.strictEqual(createSecondary.status(), 201);
 
-      await page.getByTestId('project-switcher-btn').click();
-      await page.getByTestId('new-project-btn').click();
-      await page.getByTestId('wizard-project-name').fill('Naviera');
-      await page.getByTestId('wizard-create-btn').click();
-      await pwExpect(page.getByTestId('project-switcher-btn')).toContainText('Naviera');
+      const createNaviera = await page.request.post(`${serverUrl}/api/projects`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
+        data: { name: 'Naviera', description: 'Naviera logistics project' },
+      });
+      assert.strictEqual(createNaviera.status(), 201);
+
+      await page.reload({ waitUntil: 'networkidle' });
+      const switcherBtn = page.getByRole('button', { name: 'Switch Dupond Project' });
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /Naviera/i }).click();
+      await pwExpect(switcherBtn).toContainText('Naviera');
 
       // Configure Naviera repo + Gemini key
       await page.getByTestId('open-project-settings-btn').click();
       await page.getByTestId('project-local-path-input').fill(targetRepoDir);
-      await page.getByTestId('project-branch-input').fill('main');
+      await page.getByTestId('project-target-branch-input').fill('main');
       await page.getByTestId('project-repo-url-input').fill(remoteDir);
       await page.getByTestId('verify-repo-btn').click();
-      await page.getByTestId('repo-verify-result').waitFor({ state: 'visible' });
+      await page.getByText(/Repository verified/i).waitFor({ state: 'visible' });
       await page.getByTestId('save-project-settings-btn').click();
 
       await page.getByTestId('open-app-settings-btn').click();
@@ -312,7 +318,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await stopAppServer();
       await startAppServer();
       await page.reload({ waitUntil: 'networkidle' });
-      await pwExpect(page.getByTestId('project-switcher-btn')).toContainText('Naviera');
+      await pwExpect(switcherBtn).toContainText('Naviera');
       await page.getByText('NAV-101').first().click();
       await pwExpect(page.getByTestId('run-id-value')).toContainText('run-');
       await pwExpect(page.getByTestId('run-verification-checks')).toContainText('Verification Passed');
@@ -331,17 +337,17 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByTestId('task-detail-status-select').selectOption('done');
       await page.keyboard.press('Escape');
 
-      await page.getByTestId('project-switcher-btn').click();
+      await switcherBtn.click();
       await page.getByRole('button', { name: /Secondary/i }).click();
-      await pwExpect(page.getByTestId('project-switcher-btn')).toContainText('Secondary');
+      await pwExpect(switcherBtn).toContainText('Secondary');
 
       releaseDelayedTransition();
       await transitionSettled;
       await page.unroute('**/api/orchestrate/tasks/*/transition', delayedHandler);
-      await pwExpect(page.getByTestId('project-switcher-btn')).toContainText('Secondary');
+      await pwExpect(switcherBtn).toContainText('Secondary');
 
       // Switch back to Naviera for mobile viewport check
-      await page.getByTestId('project-switcher-btn').click();
+      await switcherBtn.click();
       await page.getByRole('button', { name: /Naviera/i }).click();
       await page.getByText('NAV-101').first().click();
       await pwExpect(page.getByTestId('run-candidate-diff')).toBeVisible();
