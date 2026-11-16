@@ -502,3 +502,35 @@ export interface TaskRunsEvidenceResponse {
   evidence: CandidateEvidenceSummary;
   runs?: TaskRunSummary[];
 }
+
+export interface ReviewTaskResponse {
+  success: boolean;
+  decision: 'approve' | 'request_changes';
+  authoritativeStatus?: string;
+  approval?: {
+    approvedBy: string;
+    approvedAt: string;
+    revisionSha: string;
+    verificationId: string;
+  };
+  delivery?: DeliverySummary | null;
+  task?: any;
+  error?: string;
+  code?: string;
+}
+
+export interface DeliverRunResponse {
+  success: boolean;
+  status?: number;
+  blocked?: boolean;
+  deliveryRecord?: DeliverySummary;
+  prUrl?: string;
+  branch?: string;
+  deliveredCommit?: string;
+  baseCommit?: string;
+  ciStatus?: string;
+  authoritativeStatus?: string;
+  message?: string;
+  error?: string;
+  code?: string;
+}

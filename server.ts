@@ -32,7 +32,8 @@ import { defaultLifecycleService } from './src/server/lifecycle/lifecycleService
 import { handleRepositoryDispatch } from './src/server/deliveryHandler.js';
 import { taskStore } from './src/server/db/database.js';
 import { defaultGitHubDelivery } from './src/server/delivery/githubDelivery.js';
-import { requireAuth, requireApprovalCredential } from './src/server/auth.js';
+import { requireAuth, requireApprovalCredential, getApprovalToken, validateApprovalToken } from './src/server/auth.js';
+import { assessEvidenceValidity, computeEvidenceBinding } from './src/server/verification/evidenceBinding.js';
 import { hasGeminiKey } from './src/server/gemini.js';
 import { parsePlan } from './src/server/planning/planBreakdown.js';
 import { allocateResources } from './src/server/planning/resourceAllocation.js';
@@ -576,9 +577,179 @@ app.post('/api/delivery/dispatch', requireApprovalCredential, async (req: Reques
       targetBaseBranch,
     });
     coordinator.projectAuthoritativeStatuses(projectId);
-    return res.status(result.status).json(result);
+    const run = taskStore.getRunScoped(runId, projectId);
+    const updatedTask = run ? taskStore.getTaskScoped(run.taskId, projectId) : null;
+    return res.status(result.status).json({
+      ...result,
+      authoritativeStatus: updatedTask?.status,
+    });
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Delivery dispatch failed') });
+  }
+});
+
+// Endpoint: Explicit Operator Review Decision (Approve or Request Changes)
+app.post('/api/tasks/:id/review', (req: Request, res: Response) => {
+  try {
+    const requestedProjectId = parseProjectContextHeader(req) || undefined;
+    const taskProjectId =
+      (requestedProjectId ? taskStore.getTaskScoped(req.params.id, requestedProjectId)?.projectId : undefined) ||
+      taskStore.getProjectIdForTask(req.params.id);
+    const projectId = projectContext(req, res, taskProjectId);
+    if (!projectId) return;
+
+    const { decision, comment, approvedBy } = (req.body || {}) as {
+      decision?: unknown;
+      comment?: unknown;
+      approvedBy?: unknown;
+    };
+    if (decision !== 'approve' && decision !== 'request_changes') {
+      return res.status(400).json({ error: 'decision must be "approve" or "request_changes"' });
+    }
+
+    const dbTask = taskStore.getTaskScoped(req.params.id, projectId);
+    if (!dbTask) return res.status(404).json({ error: `Task ${req.params.id} not found` });
+    if (dbTask.status !== 'review') {
+      return res.status(422).json({
+        success: false,
+        error: `Review decision requires task status "review" (current status: "${dbTask.status}").`,
+        authoritativeStatus: dbTask.status,
+      });
+    }
+
+    const latestRun = taskStore.getLatestRunForTask(dbTask.id, projectId);
+    const verification = latestRun ? taskStore.getLatestVerification(latestRun.id, projectId) : null;
+    const actor = typeof approvedBy === 'string' && approvedBy.trim() ? approvedBy.trim() : 'operator';
+    const feedback = typeof comment === 'string' && comment.trim() ? comment.trim() : '';
+
+    if (decision === 'request_changes') {
+      const reason = feedback || 'Changes requested by operator during Review & QA.';
+      const transition = defaultLifecycleService.transition({
+        taskId: dbTask.id,
+        to: 'todo',
+        actor,
+        reason,
+      });
+      if (!transition.ok) {
+        return res.status(422).json({
+          success: false,
+          error: transition.detail || 'Could not return task to To Do.',
+          reason: transition.reason,
+          authoritativeStatus: dbTask.status,
+        });
+      }
+      taskStore.recordAudit({
+        taskId: dbTask.id,
+        runId: latestRun?.id,
+        projectId,
+        eventType: 'REVIEW_CHANGES_REQUESTED',
+        actor,
+        details: {
+          comment: reason,
+          revisionSha: verification?.revisionSha || null,
+        },
+      });
+      const projectState = coordinator.getState(projectId);
+      const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
+      if (stateTask) {
+        stateTask.status = 'todo';
+        stateTask.lastAgentComment = `Changes requested (${actor}): ${reason}`;
+        stateTask.lastUpdated = 'Just now';
+        coordinator.saveStateToDisk(projectState, projectId);
+      }
+      return res.json({
+        success: true,
+        decision: 'request_changes',
+        authoritativeStatus: 'todo',
+        task: stateTask || dbTask,
+      });
+    }
+
+    // decision === 'approve'
+    if (dbTask.requireApproval) {
+      if (!getApprovalToken()) {
+        return res.status(503).json({
+          error: 'Approval credential not configured: set DUPOND_APPROVAL_TOKEN to enable operator approval via the API.',
+          code: 'APPROVAL_CREDENTIAL_UNCONFIGURED',
+        });
+      }
+      const header = req.header('X-Dupond-Approval-Token') || req.header('Authorization');
+      if (!header || !validateApprovalToken(header)) {
+        return res.status(403).json({
+          error: 'Forbidden: approving a review requires the operator approval credential via X-Dupond-Approval-Token.',
+          code: 'APPROVAL_CREDENTIAL_REQUIRED',
+        });
+      }
+    }
+
+    const validity = assessEvidenceValidity(dbTask, verification);
+    if (!validity.valid) {
+      return res.status(422).json({
+        success: false,
+        reason: validity.reason,
+        error: `Review approval requires current passing evidence: ${validity.detail}`,
+        authoritativeStatus: dbTask.status,
+      });
+    }
+    if (!verification) {
+      return res.status(422).json({
+        success: false,
+        reason: 'no-evidence',
+        error: 'Review approval requires a passing verification record.',
+        authoritativeStatus: dbTask.status,
+      });
+    }
+
+    const binding = computeEvidenceBinding(dbTask);
+    const approvedAt = new Date().toISOString();
+    taskStore.recordAudit({
+      taskId: dbTask.id,
+      runId: latestRun?.id,
+      projectId,
+      eventType: 'REVIEW_APPROVED',
+      actor,
+      details: {
+        verificationId: verification.id,
+        revisionSha: verification.revisionSha,
+        ...binding,
+        comment: feedback || undefined,
+      },
+    });
+
+    let delivery = latestRun ? taskStore.getDeliveryForRun(latestRun.id, projectId) : null;
+    if (delivery && delivery.approvalStatus !== 'approved') {
+      const approvalRes = taskStore.approveDelivery(delivery.id, actor, {
+        ...binding,
+        verificationId: verification.id,
+        revisionSha: verification.revisionSha,
+      });
+      if (approvalRes.approved && approvalRes.delivery) {
+        delivery = approvalRes.delivery;
+      }
+    }
+
+    const projectState = coordinator.getState(projectId);
+    const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
+    if (stateTask) {
+      stateTask.lastAgentComment = `Review approved by ${actor} for revision ${verification.revisionSha.slice(0, 10)}${feedback ? `: ${feedback}` : '.'}`;
+      stateTask.lastUpdated = 'Just now';
+      coordinator.saveStateToDisk(projectState, projectId);
+    }
+
+    return res.json({
+      success: true,
+      decision: 'approve',
+      authoritativeStatus: dbTask.status,
+      approval: {
+        approvedBy: actor,
+        approvedAt,
+        revisionSha: verification.revisionSha,
+        verificationId: verification.id,
+      },
+      delivery,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: toClientMessage(error, 'Review decision failed') });
   }
 });
 

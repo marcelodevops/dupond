@@ -570,6 +570,100 @@ function AppWorkspace() {
     }
   };
 
+  const handleReviewTask = async (
+    taskId: string,
+    decision: 'approve' | 'request_changes',
+    comment?: string,
+    approvalToken?: string
+  ): Promise<{ ok: boolean; error?: string; code?: string }> => {
+    const capturedProjectId = currentProject?.id || getActiveProjectId() || 'default';
+    try {
+      const res = await projectApi.reviewTask(
+        capturedProjectId,
+        taskId,
+        { decision, comment, approvedBy: 'operator' },
+        approvalToken
+      );
+      if (capturedProjectId !== activeProjectIdRef.current) {
+        return { ok: true };
+      }
+      setRunRefreshKey((k) => k + 1);
+      if (decision === 'request_changes' && res.task) {
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: 'todo', lastAgentComment: res.task.lastAgentComment || t.lastAgentComment } : t)));
+        setSelectedTaskForModal((prev) =>
+          prev && prev.id === taskId ? { ...prev, status: 'todo', lastAgentComment: res.task.lastAgentComment || prev.lastAgentComment } : prev
+        );
+        showToast('Changes Requested', 'Task returned to To Do with operator feedback.', 'info');
+      } else {
+        showToast('Review Approved', 'Operator approval recorded against current verification evidence.', 'success');
+      }
+      return { ok: true };
+    } catch (err: any) {
+      const msg = err?.details?.error || err?.message || 'Review decision failed';
+      const code = err?.code || err?.details?.code;
+      if (capturedProjectId === activeProjectIdRef.current) {
+        showToast('Review Action Blocked', msg, 'alert');
+      }
+      return { ok: false, error: msg, code };
+    }
+  };
+
+  const handleDeliverRun = async (
+    taskId: string,
+    runId: string,
+    isApproved: boolean,
+    approvalToken?: string
+  ): Promise<{ ok: boolean; error?: string; code?: string; prUrl?: string }> => {
+    const capturedProjectId = currentProject?.id || getActiveProjectId() || 'default';
+    try {
+      const res = await projectApi.deliverRun(
+        capturedProjectId,
+        {
+          runId,
+          isApproved,
+          approvedBy: isApproved ? 'operator' : undefined,
+          repoUrl: currentProject?.repository?.repoUrl || integrationConfig?.repository?.repoUrl || undefined,
+          targetBaseBranch: currentProject?.repository?.defaultBranch || integrationConfig?.repository?.defaultBranch || undefined,
+        },
+        approvalToken
+      );
+      if (capturedProjectId !== activeProjectIdRef.current) {
+        return { ok: true, prUrl: res.prUrl };
+      }
+      setRunRefreshKey((k) => k + 1);
+      const nextStatus = (res.authoritativeStatus === 'done' ? 'done' : 'review') as TaskStatus;
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId
+            ? {
+                ...t,
+                status: nextStatus,
+                lastAgentComment: res.prUrl ? `Delivered PR: ${res.prUrl}` : res.message || t.lastAgentComment,
+              }
+            : t
+        )
+      );
+      setSelectedTaskForModal((prev) =>
+        prev && prev.id === taskId
+          ? {
+              ...prev,
+              status: nextStatus,
+              lastAgentComment: res.prUrl ? `Delivered PR: ${res.prUrl}` : res.message || prev.lastAgentComment,
+            }
+          : prev
+      );
+      showToast('PR Delivered', res.prUrl ? `Delivered ${res.prUrl}` : 'Delivery recorded.', 'success');
+      return { ok: true, prUrl: res.prUrl };
+    } catch (err: any) {
+      const msg = err?.details?.error || err?.message || 'Delivery failed';
+      const code = err?.code || err?.details?.code;
+      if (capturedProjectId === activeProjectIdRef.current) {
+        showToast('Delivery Blocked', msg, 'alert');
+      }
+      return { ok: false, error: msg, code };
+    }
+  };
+
   const handleUpdateTask = (updatedTask: Task) => {
     const updated = tasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
     setTasks(updated);
@@ -978,6 +1072,8 @@ function AppWorkspace() {
         allTasks={tasks}
         onExecuteAgentOnTask={executeAgentStep}
         isExecutingStep={isProcessingStep}
+        onReviewTask={handleReviewTask}
+        onDeliverRun={handleDeliverRun}
       />
 
       {/* Add Task Modal */}

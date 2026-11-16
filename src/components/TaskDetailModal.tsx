@@ -42,6 +42,18 @@ interface TaskDetailModalProps {
   allTasks: Task[];
   onExecuteAgentOnTask: (task: Task, agent: Agent) => Promise<void>;
   isExecutingStep: boolean;
+  onReviewTask?: (
+    taskId: string,
+    decision: 'approve' | 'request_changes',
+    comment?: string,
+    approvalToken?: string
+  ) => Promise<{ ok: boolean; error?: string; code?: string }>;
+  onDeliverRun?: (
+    taskId: string,
+    runId: string,
+    isApproved: boolean,
+    approvalToken?: string
+  ) => Promise<{ ok: boolean; error?: string; code?: string; prUrl?: string }>;
 }
 
 export const TaskDetailModal: React.FC<TaskDetailModalProps> = (props) => {
@@ -71,11 +83,20 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   allTasks,
   onExecuteAgentOnTask,
   isExecutingStep,
+  onReviewTask,
+  onDeliverRun,
 }) => {
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
   const [newCriterionTitle, setNewCriterionTitle] = useState('');
   const [newCriterionCommand, setNewCriterionCommand] = useState('');
   const [isTransitioningStatus, setIsTransitioningStatus] = useState(false);
+
+  const [reviewComment, setReviewComment] = useState('');
+  const [approvalTokenInput, setApprovalTokenInput] = useState('');
+  const [showApprovalTokenField, setShowApprovalTokenField] = useState(false);
+  const [reviewActionError, setReviewActionError] = useState<string | null>(null);
+  const [isSubmittingReviewOrDelivery, setIsSubmittingReviewOrDelivery] = useState(false);
+  const [localReviewApproved, setLocalReviewApproved] = useState(false);
 
   const [runEvidence, setRunEvidence] = useState<TaskRunsEvidenceResponse | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
@@ -488,25 +509,201 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             </div>
           )}
 
-          {/* Honest Review & QA Semantics */}
-          {(task.status === 'review' || runEvidence?.verification) && (
+          {/* Honest Review & QA Semantics + Operator Review & Delivery Controls */}
+          {(task.status === 'review' || runEvidence?.verification || runEvidence?.delivery) && (
             <div
               data-testid="task-review-honest-notice"
-              className="p-3.5 rounded-xl border bg-amber-950/25 border-amber-800/50 text-amber-100 text-xs space-y-1"
+              className="p-3.5 rounded-xl border bg-amber-950/25 border-amber-800/50 text-amber-100 text-xs space-y-2.5"
             >
               <div className="font-semibold text-amber-300 flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0" />
-                <span>Review & QA Status</span>
+                <span>Review &amp; QA Decision &amp; PR Delivery</span>
               </div>
               {runEvidence?.verification?.passed ? (
                 <p className="text-[11px] text-slate-200 leading-relaxed">
                   Automated verification <span className="font-semibold text-emerald-300">passed</span> for candidate revision{' '}
-                  <span className="font-mono">{runEvidence.verification.revisionSha.slice(0, 12)}</span>. Human review/approval and external PR delivery are separate steps that are not yet available in the UI.
+                  <span className="font-mono">{runEvidence.verification.revisionSha.slice(0, 12)}</span>. Human review/approval and external PR delivery are separate steps.
                 </p>
               ) : (
                 <p className="text-[11px] text-slate-200 leading-relaxed">
-                  Task is in Review & QA, but passing verification evidence is not currently recorded for the latest run. Human approval and PR delivery remain separate steps.
+                  Task is in Review &amp; QA, but passing verification evidence is not currently recorded for the latest run. Human approval and PR delivery remain separate steps.
                 </p>
+              )}
+
+              {runEvidence?.delivery && (
+                <div
+                  data-testid="run-delivery-status"
+                  className="p-2.5 rounded-lg bg-emerald-950/35 border border-emerald-800/60 text-emerald-100 text-[11px] space-y-1"
+                >
+                  <div className="font-semibold text-emerald-300">
+                    Delivery Recorded ({runEvidence.delivery.approvalStatus})
+                  </div>
+                  {runEvidence.delivery.prUrl && (
+                    <div>
+                      PR:{' '}
+                      <a
+                        href={runEvidence.delivery.prUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline font-mono text-emerald-200 break-all"
+                      >
+                        {runEvidence.delivery.prUrl}
+                      </a>
+                    </div>
+                  )}
+                  <div className="font-mono text-[10px] text-slate-300">
+                    Branch: {runEvidence.delivery.branch} • Commit: {runEvidence.delivery.deliveredCommit.slice(0, 12)}
+                  </div>
+                </div>
+              )}
+
+              {task.status === 'review' && runEvidence?.verification?.passed && runEvidence?.run && (onReviewTask || onDeliverRun) && (
+                <div className="space-y-2 pt-1 border-t border-amber-800/40">
+                  <textarea
+                    data-testid="review-feedback-input"
+                    value={reviewComment}
+                    onChange={(e) => setReviewComment(e.target.value)}
+                    rows={2}
+                    placeholder="Optional review note or feedback when requesting changes..."
+                    className="w-full bg-slate-950/90 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+
+                  {showApprovalTokenField ? (
+                    <input
+                      data-testid="review-approval-token-input"
+                      type="password"
+                      value={approvalTokenInput}
+                      onChange={(e) => setApprovalTokenInput(e.target.value)}
+                      placeholder="Operator approval token (X-Dupond-Approval-Token)"
+                      className="w-full bg-slate-950/90 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowApprovalTokenField(true)}
+                      className="text-[10px] text-slate-400 hover:text-slate-200 underline"
+                    >
+                      Provide approval token (if configured)
+                    </button>
+                  )}
+
+                  {reviewActionError && (
+                    <p
+                      data-testid="review-delivery-error"
+                      className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/60 rounded-lg p-2"
+                    >
+                      {reviewActionError}
+                    </p>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {onDeliverRun && (
+                      <button
+                        type="button"
+                        data-testid="approve-deliver-pr-btn"
+                        disabled={isSubmittingReviewOrDelivery}
+                        onClick={async () => {
+                          setReviewActionError(null);
+                          setIsSubmittingReviewOrDelivery(true);
+                          try {
+                            const res = await onDeliverRun(task.id, runEvidence.run.id, true, approvalTokenInput);
+                            if (!res.ok) {
+                              if (res.code === 'APPROVAL_CREDENTIAL_REQUIRED') {
+                                setShowApprovalTokenField(true);
+                              }
+                              setReviewActionError(res.error || 'Delivery failed.');
+                            }
+                          } finally {
+                            if (mountedRef.current) setIsSubmittingReviewOrDelivery(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold disabled:opacity-50"
+                      >
+                        Approve &amp; Deliver PR
+                      </button>
+                    )}
+
+                    {onReviewTask && !localReviewApproved && (
+                      <button
+                        type="button"
+                        data-testid="approve-review-btn"
+                        disabled={isSubmittingReviewOrDelivery}
+                        onClick={async () => {
+                          setReviewActionError(null);
+                          setIsSubmittingReviewOrDelivery(true);
+                          try {
+                            const res = await onReviewTask(task.id, 'approve', reviewComment, approvalTokenInput);
+                            if (!res.ok) {
+                              if (res.code === 'APPROVAL_CREDENTIAL_REQUIRED') {
+                                setShowApprovalTokenField(true);
+                              }
+                              setReviewActionError(res.error || 'Approval failed.');
+                            } else {
+                              setLocalReviewApproved(true);
+                            }
+                          } finally {
+                            if (mountedRef.current) setIsSubmittingReviewOrDelivery(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
+                      >
+                        Approve Review
+                      </button>
+                    )}
+
+                    {localReviewApproved && onDeliverRun && (
+                      <button
+                        type="button"
+                        data-testid="deliver-pr-btn"
+                        disabled={isSubmittingReviewOrDelivery}
+                        onClick={async () => {
+                          setReviewActionError(null);
+                          setIsSubmittingReviewOrDelivery(true);
+                          try {
+                            const res = await onDeliverRun(task.id, runEvidence.run.id, true, approvalTokenInput);
+                            if (!res.ok) {
+                              if (res.code === 'APPROVAL_CREDENTIAL_REQUIRED') {
+                                setShowApprovalTokenField(true);
+                              }
+                              setReviewActionError(res.error || 'Delivery failed.');
+                            }
+                          } finally {
+                            if (mountedRef.current) setIsSubmittingReviewOrDelivery(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold disabled:opacity-50"
+                      >
+                        Push &amp; Create PR
+                      </button>
+                    )}
+
+                    {onReviewTask && (
+                      <button
+                        type="button"
+                        data-testid="request-changes-btn"
+                        disabled={isSubmittingReviewOrDelivery}
+                        onClick={async () => {
+                          setReviewActionError(null);
+                          setIsSubmittingReviewOrDelivery(true);
+                          try {
+                            const res = await onReviewTask(task.id, 'request_changes', reviewComment);
+                            if (!res.ok) {
+                              setReviewActionError(res.error || 'Request changes failed.');
+                            } else {
+                              setLocalReviewApproved(false);
+                              setReviewComment('');
+                            }
+                          } finally {
+                            if (mountedRef.current) setIsSubmittingReviewOrDelivery(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-amber-700/80 hover:bg-amber-600 text-white text-xs font-semibold disabled:opacity-50"
+                      >
+                        Request Changes
+                      </button>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           )}

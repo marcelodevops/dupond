@@ -33,6 +33,8 @@ import {
   AdoptPlanResponse,
   RepositoryVerificationResult,
   TaskRunsEvidenceResponse,
+  ReviewTaskResponse,
+  DeliverRunResponse,
 } from '../types/projectContract';
 
 const ACTIVE_PROJECT_KEY = 'dupond_active_project_id';
@@ -473,5 +475,87 @@ export const projectApi = {
       throw new ProjectApiError(res.status, data || res.statusText || 'Failed to load run evidence');
     }
     return data as TaskRunsEvidenceResponse;
+  },
+
+  async reviewTask(
+    projectId: string,
+    taskId: string,
+    payload: {
+      decision: 'approve' | 'request_changes';
+      comment?: string;
+      approvedBy?: string;
+    },
+    approvalToken?: string
+  ): Promise<ReviewTaskResponse> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      [PROJECT_HEADER]: projectId,
+    };
+    if (approvalToken && approvalToken.trim()) {
+      headers['X-Dupond-Approval-Token'] = approvalToken.trim();
+    }
+    const res = await apiFetch(
+      `/api/tasks/${encodeURIComponent(taskId)}/review`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      }
+    );
+    const text = await res.text();
+    let data: any = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: text };
+      }
+    }
+    if (!res.ok) {
+      const err = new ProjectApiError(res.status, data || res.statusText || 'Review decision failed');
+      (err as any).code = data?.code;
+      throw err;
+    }
+    return data as ReviewTaskResponse;
+  },
+
+  async deliverRun(
+    projectId: string,
+    payload: {
+      runId: string;
+      isApproved: boolean;
+      approvedBy?: string;
+      repoUrl?: string;
+      targetBaseBranch?: string;
+    },
+    approvalToken?: string
+  ): Promise<DeliverRunResponse> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      [PROJECT_HEADER]: projectId,
+    };
+    if (approvalToken && approvalToken.trim()) {
+      headers['X-Dupond-Approval-Token'] = approvalToken.trim();
+    }
+    const res = await apiFetch('/api/delivery/dispatch', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    let data: any = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: text };
+      }
+    }
+    if (!res.ok) {
+      const err = new ProjectApiError(res.status, data || res.statusText || 'Delivery dispatch failed');
+      (err as any).code = data?.code;
+      throw err;
+    }
+    return data as DeliverRunResponse;
   },
 };
