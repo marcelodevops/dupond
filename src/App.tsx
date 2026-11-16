@@ -233,6 +233,24 @@ function AppWorkspace() {
   const [isAppSettingsModalOpen, setIsAppSettingsModalOpen] = useState<boolean>(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('general');
   const [readinessRefreshKey, setReadinessRefreshKey] = useState<number>(0);
+  const [runRefreshKey, setRunRefreshKey] = useState<number>(0);
+  const [transitionFeedback, setTransitionFeedback] = useState<{
+    taskId: string;
+    targetStatus: TaskStatus;
+    reason?: string;
+    message: string;
+  } | null>(null);
+  const [lastExecutedRunByTask, setLastExecutedRunByTask] = useState<
+    Record<string, { runId?: string; status: 'succeeded' | 'blocked' | 'failed'; message: string; timestamp: string }>
+  >({});
+
+  const activeProjectIdRef = useRef<string | undefined>(currentProject?.id || getActiveProjectId());
+  activeProjectIdRef.current = currentProject?.id || getActiveProjectId();
+  const transitionEpochRef = useRef(0);
+
+  useEffect(() => {
+    setTransitionFeedback(null);
+  }, [currentProject?.id]);
 
   // Toast Notification state
   const [toastMessage, setToastMessage] = useState<{ title: string; desc: string; type: 'info' | 'success' | 'alert' } | null>(null);
@@ -286,16 +304,26 @@ function AppWorkspace() {
 
       // Check HTTP status and blocked response: DO NOT treat blocked execution as progress
       if (!response.ok || !result.success || result.blocked) {
-        showToast(
-          'Execution Blocked',
-          result.error || `Task execution blocked: No capable worker or quality gate failed for ${targetTask.key}.`,
-          'alert'
-        );
+        const blockedMsg =
+          result.error || `Task execution blocked: No capable worker or quality gate failed for ${targetTask.key}.`;
+        if (capturedProjectId === activeProjectIdRef.current) {
+          setLastExecutedRunByTask((prev) => ({
+            ...prev,
+            [targetTask.id]: {
+              runId: result.runId,
+              status: 'blocked',
+              message: blockedMsg,
+              timestamp: new Date().toISOString(),
+            },
+          }));
+          setRunRefreshKey((k) => k + 1);
+          showToast('Execution Blocked', blockedMsg, 'alert');
+        }
         return;
       }
 
       // Check if project switched during execution: do NOT mutate active project if switched
-      if (capturedProjectId !== (currentProject?.id || getActiveProjectId())) {
+      if (capturedProjectId !== activeProjectIdRef.current) {
         showToast(
           'Background Run Finished',
           `Task ${targetTask.key} finished in background project ${capturedProjectId || 'workspace'}. Active project remains untouched.`,
@@ -303,6 +331,18 @@ function AppWorkspace() {
         );
         return;
       }
+
+      setLastExecutedRunByTask((prev) => ({
+        ...prev,
+        [targetTask.id]: {
+          runId: result.runId,
+          status: 'succeeded',
+          message: result.actionTaken || `Executed worker step (status: ${String(result.nextStatus || 'review').toUpperCase()})`,
+          timestamp: new Date().toISOString(),
+        },
+      }));
+      setTransitionFeedback((prev) => (prev?.taskId === targetTask.id ? null : prev));
+      setRunRefreshKey((k) => k + 1);
 
       // Update Task status & deliverables only on verified success
       const nextStatus = result.nextStatus || (targetTask.status === 'in_progress' ? 'review' : 'done');
@@ -463,8 +503,9 @@ function AppWorkspace() {
       return;
     }
     const capturedProjectId = currentProject?.id || getActiveProjectId();
+    const epoch = ++transitionEpochRef.current;
     try {
-      const res = await apiFetch(`/api/orchestrate/tasks/${taskId}/transition`, {
+      const res = await apiFetch(`/api/orchestrate/tasks/${encodeURIComponent(taskId)}/transition`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -473,32 +514,59 @@ function AppWorkspace() {
         body: JSON.stringify({ status: newStatus }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+
+      // Ignore stale responses if the user switched projects or initiated a newer transition
+      if (capturedProjectId !== activeProjectIdRef.current || transitionEpochRef.current !== epoch) {
+        return;
+      }
 
       if (!res.ok || !data.success) {
-        const failureDetails = data.verification?.checks
-          ?.filter((c: any) => !c.passed)
-          ?.map((c: any) => c.rule)
-          ?.join(', ') || data.error || 'Quality gates failed';
+        const failureDetails =
+          data.verification?.checks
+            ?.filter((c: any) => !c.passed)
+            ?.map((c: any) => c.rule)
+            ?.join(', ') ||
+          data.error ||
+          'Quality gates failed';
 
+        setTransitionFeedback({
+          taskId,
+          targetStatus: newStatus,
+          reason: data.reason,
+          message: failureDetails,
+        });
         showToast('Quality Gate Blocked', `Cannot move to ${newStatus.toUpperCase()}: ${failureDetails}`, 'alert');
-        // Refresh server state to ensure UI stays accurate
+        // Refresh server state to ensure UI stays accurate without altering authoritative status
         const stateRes = await apiFetch('/api/orchestrate/state', {
           headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
         });
-        if (stateRes.ok && capturedProjectId === (currentProject?.id || getActiveProjectId())) {
+        if (stateRes.ok && capturedProjectId === activeProjectIdRef.current) {
           const fresh = await stateRes.json();
           setTasks(fresh.tasks);
+          setSelectedTaskForModal((prev) =>
+            prev && prev.id === taskId ? fresh.tasks.find((t: Task) => t.id === taskId) || prev : prev
+          );
         }
         return;
       }
 
-      if (capturedProjectId === (currentProject?.id || getActiveProjectId())) {
-        setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
-        showToast('Task Status Updated', `${data.task.key} moved to ${newStatus.toUpperCase()}`, 'success');
-      }
+      setTransitionFeedback((prev) => (prev?.taskId === taskId ? null : prev));
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+      setSelectedTaskForModal((prev) => (prev && prev.id === taskId ? data.task : prev));
+      setRunRefreshKey((k) => k + 1);
+      showToast('Task Status Updated', `${data.task.key} moved to ${newStatus.toUpperCase()}`, 'success');
     } catch (err: any) {
-      showToast('Status Update Error', err.message || 'Failed to update status', 'alert');
+      if (capturedProjectId !== activeProjectIdRef.current || transitionEpochRef.current !== epoch) {
+        return;
+      }
+      const msg = err?.message || 'Failed to update status';
+      setTransitionFeedback({
+        taskId,
+        targetStatus: newStatus,
+        message: msg,
+      });
+      showToast('Status Update Error', msg, 'alert');
     }
   };
 
@@ -889,8 +957,22 @@ function AppWorkspace() {
       {/* Task Detail Modal */}
       <TaskDetailModal
         task={selectedTaskForModal}
-        onClose={() => setSelectedTaskForModal(null)}
+        projectId={currentProject?.id || 'default'}
+        onClose={() => {
+          setSelectedTaskForModal(null);
+          setTransitionFeedback(null);
+        }}
         onUpdateTask={handleUpdateTask}
+        onUpdateTaskStatus={handleUpdateTaskStatus}
+        transitionFeedback={
+          selectedTaskForModal && transitionFeedback?.taskId === selectedTaskForModal.id
+            ? transitionFeedback
+            : null
+        }
+        lastExecutionInfo={
+          selectedTaskForModal ? lastExecutedRunByTask[selectedTaskForModal.id] || null : null
+        }
+        runRefreshKey={runRefreshKey}
         agents={agents}
         epics={epics}
         allTasks={tasks}

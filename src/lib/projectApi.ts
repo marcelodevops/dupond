@@ -32,6 +32,7 @@ import {
   AdoptPlanRequest,
   AdoptPlanResponse,
   RepositoryVerificationResult,
+  TaskRunsEvidenceResponse,
 } from '../types/projectContract';
 
 const ACTIVE_PROJECT_KEY = 'dupond_active_project_id';
@@ -436,5 +437,41 @@ export const projectApi = {
       },
       signal
     );
+  },
+
+  /**
+   * Read authoritative run history and read-only candidate evidence for a task
+   */
+  async getTaskRuns(
+    projectId: string,
+    taskId: string,
+    runId?: string,
+    signal?: AbortSignal
+  ): Promise<TaskRunsEvidenceResponse | null> {
+    const query = runId ? `?runId=${encodeURIComponent(runId)}` : '';
+    const res = await apiFetch(
+      `/api/tasks/${encodeURIComponent(taskId)}/runs${query}`,
+      {
+        method: 'GET',
+        headers: { [PROJECT_HEADER]: projectId },
+        signal,
+      }
+    );
+    if (res.status === 404) {
+      return null;
+    }
+    const text = await res.text();
+    let data: any = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
+    }
+    if (!res.ok) {
+      throw new ProjectApiError(res.status, data || res.statusText || 'Failed to load run evidence');
+    }
+    return data as TaskRunsEvidenceResponse;
   },
 };
