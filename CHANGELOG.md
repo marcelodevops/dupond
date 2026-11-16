@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.0](https://github.com/marcelodevops/dupond/compare/v0.10.0...v0.11.0) (2026-11-16)
+
+
+### Features
+
+* **ui:** show Test Connection pending elapsed timer, Cancel action, and inconclusive banner ([d81599a](https://github.com/marcelodevops/dupond/commit/d81599a3cc21f0744a1e23010deef0d56e39a0ea))
+
+
+### Bug Fixes
+
+* **gemini:** add bounded Test Connection timeout, SDK abort propagation, and inconclusive outcome ([0a5d04a](https://github.com/marcelodevops/dupond/commit/0a5d04aeab23f1375e7679bc1f84d6a99da81667))
+* handle Gemini Test Connection timeouts and cancellation safely ([8b599a3](https://github.com/marcelodevops/dupond/commit/8b599a3ff986290e44ce9041c9c13f25dc0debba))
+
 ## [0.10.0](https://github.com/marcelodevops/dupond/compare/v0.9.0...v0.10.0) (2026-11-15)
 
 
