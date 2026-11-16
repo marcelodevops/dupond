@@ -890,6 +890,8 @@ export class CoordinatorEngine {
 
     const executionProjectId = projectId || task.projectId || this.activeProjectId;
     const executionProjectConfig = this.getState(executionProjectId).integrationConfig;
+    const executionProjectRecord = defaultProjectStore.getProject(executionProjectId);
+    const projectRepo = executionProjectRecord?.repository;
     let storeTask = taskStore.getTaskScoped(task.key, executionProjectId) || taskStore.getTaskScoped(task.id, executionProjectId);
 
     // Pre-existing static artifact files are a legacy deliverable format used by
@@ -947,13 +949,18 @@ ${implementationCode.slice(0, 500)}...
 
     if (!storeTask) {
       const configuredRepo = task.targetRepo ||
+        projectRepo?.repoUrl ||
         executionProjectConfig?.repository?.repoUrl ||
         process.env.DUPOND_TARGET_REPO;
       const configuredRepoPath = task.targetRepoPath ||
+        (projectRepo?.localPath && fs.existsSync(projectRepo.localPath)
+          ? projectRepo.localPath
+          : undefined) ||
         (executionProjectConfig?.repository?.localPath && fs.existsSync(executionProjectConfig.repository.localPath)
           ? executionProjectConfig.repository.localPath
           : undefined);
       const baseCommit = task.baseCommit ||
+        projectRepo?.defaultBranch ||
         executionProjectConfig?.repository?.defaultBranch ||
         'HEAD';
       const allowedPaths = task.allowedPaths && task.allowedPaths.length > 0
@@ -1032,10 +1039,12 @@ ${implementationCode.slice(0, 500)}...
 
     // Real Coding Worker Execution via isolated worktree and sandbox!
     const resolvedRepo = resolveTargetRepository({
-      targetRepo: task.targetRepo || executionProjectConfig?.repository?.repoUrl,
-      targetRepoPath: task.targetRepoPath || executionProjectConfig?.repository?.localPath,
+      targetRepo: task.targetRepo || projectRepo?.repoUrl || executionProjectConfig?.repository?.repoUrl,
+      targetRepoPath: task.targetRepoPath || projectRepo?.localPath || executionProjectConfig?.repository?.localPath,
       integrationConfig: executionProjectConfig,
-      allowOrchestratorRepo: isOrchestratorSelfTarget(task.targetRepo || executionProjectConfig?.repository?.repoUrl),
+      allowOrchestratorRepo: isOrchestratorSelfTarget(
+        task.targetRepo || projectRepo?.repoUrl || executionProjectConfig?.repository?.repoUrl,
+      ),
     });
 
     const workspaceManager = new WorkspaceManager(resolvedRepo.repoPath);
