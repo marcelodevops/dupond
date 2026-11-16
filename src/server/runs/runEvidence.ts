@@ -115,26 +115,20 @@ function resolveTrustedRepoPath(params: {
 }
 
 function parseProviderModel(
-  task: TaskRecord | null,
+  boundAttempt: RunAttemptRecord | undefined,
   attempts: RunAttemptRecord[],
 ): { provider: string | null; model: string | null } {
-  const cfg = task?.workerConfig;
-  if (cfg && (cfg.provider || cfg.model)) {
-    return {
-      provider: cfg.provider || null,
-      model: cfg.model || null,
-    };
-  }
-  const latest = attempts[attempts.length - 1];
-  if (latest?.workerType) {
-    const idx = latest.workerType.indexOf(':');
+  const targetAttempt = boundAttempt ?? attempts[attempts.length - 1];
+  if (targetAttempt?.workerType && targetAttempt.workerType.trim()) {
+    const raw = targetAttempt.workerType.trim();
+    const idx = raw.indexOf(':');
     if (idx > 0) {
       return {
-        provider: latest.workerType.slice(0, idx),
-        model: latest.workerType.slice(idx + 1),
+        provider: raw.slice(0, idx),
+        model: raw.slice(idx + 1) || null,
       };
     }
-    return { provider: latest.workerType, model: null };
+    return { provider: raw, model: null };
   }
   return { provider: null, model: null };
 }
@@ -143,33 +137,58 @@ function readImmutableGitDiff(params: {
   repoPath: string;
   baseCommit: string;
   candidateSha: string;
-}): { diff: string; changedFiles: string[] } | null {
-  const { repoPath, baseCommit, candidateSha } = params;
+  expectedTreeSha?: string | null;
+}): { ok: true; diff: string; changedFiles: string[] } | { ok: false; reason: string } {
+  const { repoPath, baseCommit, candidateSha, expectedTreeSha } = params;
   if (!isSafeGitRef(baseCommit) || !isCommitSha(candidateSha)) {
-    return null;
+    return {
+      ok: false,
+      reason: 'Recorded base commit or candidate revision is not a valid Git reference.',
+    };
   }
   try {
-    // Verify both objects exist in the immutable object store without touching the working tree
+    // Verify both base and candidate commit objects exist in the immutable object store
     execFileSync('git', ['-C', repoPath, 'cat-file', '-e', `${candidateSha}^{commit}`], {
       stdio: 'pipe',
     });
+    execFileSync('git', ['-C', repoPath, 'cat-file', '-e', `${baseCommit}^{commit}`], {
+      stdio: 'pipe',
+    });
+
+    if (expectedTreeSha) {
+      const actualTreeSha = execFileSync(
+        'git',
+        ['-C', repoPath, 'rev-parse', '--verify', `${candidateSha}^{tree}`],
+        { encoding: 'utf-8', stdio: 'pipe' },
+      ).trim();
+      if (actualTreeSha !== expectedTreeSha) {
+        return {
+          ok: false,
+          reason: `Candidate commit ${candidateSha.slice(0, 12)} tree (${actualTreeSha.slice(0, 12)}) does not match verified tree (${expectedTreeSha.slice(0, 12)}).`,
+        };
+      }
+    }
+
     const nameOut = execFileSync(
       'git',
-      ['-C', repoPath, 'diff', '--name-only', '--no-ext-diff', baseCommit, candidateSha],
+      ['-C', repoPath, 'diff', '--name-only', '--no-ext-diff', '--no-textconv', baseCommit, candidateSha],
       { encoding: 'utf-8', stdio: 'pipe', maxBuffer: 2 * 1024 * 1024 },
     );
     const diffOut = execFileSync(
       'git',
-      ['-C', repoPath, 'diff', '--no-ext-diff', baseCommit, candidateSha],
+      ['-C', repoPath, 'diff', '--no-ext-diff', '--no-textconv', baseCommit, candidateSha],
       { encoding: 'utf-8', stdio: 'pipe', maxBuffer: 4 * 1024 * 1024 },
     );
     const changedFiles = nameOut
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
-    return { diff: diffOut, changedFiles };
+    return { ok: true, diff: diffOut, changedFiles };
   } catch {
-    return null;
+    return {
+      ok: false,
+      reason: `Candidate commit ${candidateSha.slice(0, 12)} or base commit could not be reconstructed from immutable Git history.`,
+    };
   }
 }
 
@@ -229,60 +248,73 @@ export function buildSanitizedRunEvidence(params: {
     failureReason: run.failureReason ? sanitizeEvidenceText(run.failureReason) : null,
   };
 
-  const { provider, model } = parseProviderModel(task, attempts);
+  // Explicitly validate run <-> verification <-> attempt bindings.
+  // Never substitute an unrelated attempt when verification.attemptId is missing or mismatched.
+  let bindingError: string | null = null;
+  let boundAttempt: RunAttemptRecord | undefined;
 
-  // Pick the attempt bound to the verification record if present, else the latest attempt
-  const boundAttempt =
-    (verification?.attemptId ? attempts.find((a) => a.id === verification.attemptId) : undefined) ||
-    attempts[attempts.length - 1];
+  if (verification) {
+    if (verification.runId !== run.id) {
+      bindingError = `Verification record ${verification.id} belongs to run ${verification.runId}, not ${run.id}.`;
+    } else if (!verification.attemptId) {
+      bindingError = `Verification record ${verification.id} does not reference an attempt.`;
+    } else {
+      const matched = attempts.find((a) => a.id === verification.attemptId);
+      if (!matched) {
+        bindingError = `Verification record ${verification.id} references attempt ${verification.attemptId}, which is not recorded for run ${run.id}.`;
+      } else if (matched.runId !== run.id) {
+        bindingError = `Verified attempt ${matched.id} belongs to run ${matched.runId}, not ${run.id}.`;
+      } else {
+        boundAttempt = matched;
+      }
+    }
+  }
+
+  const { provider, model } = parseProviderModel(boundAttempt, attempts);
 
   const candidateRevision =
-    (isCommitSha(verification?.revisionSha) ? verification!.revisionSha : null) ||
-    (isCommitSha(delivery?.deliveredCommit) ? delivery!.deliveredCommit : null);
+    !bindingError && isCommitSha(verification?.revisionSha)
+      ? verification!.revisionSha
+      : !verification && isCommitSha(delivery?.deliveredCommit)
+        ? delivery!.deliveredCommit
+        : null;
 
-  let changedFiles: string[] = Array.isArray(boundAttempt?.filesModified)
-    ? [...boundAttempt!.filesModified]
-    : [];
+  let changedFiles: string[] = [];
   let candidateDiff: string | null = null;
   let candidateDiffTruncated = false;
   let provenance: CandidateDiffProvenance = 'unavailable';
   let candidateDiffUnavailableReason: string | null = null;
 
-  if (boundAttempt?.diff && boundAttempt.diff.trim().length > 0) {
-    const bounded = boundText(boundAttempt.diff, MAX_DIFF_CHARS);
-    candidateDiff = bounded.text;
-    candidateDiffTruncated = bounded.truncated;
-    provenance = 'persisted_attempt_diff';
+  if (bindingError) {
+    candidateDiffUnavailableReason = bindingError;
   } else if (candidateRevision) {
     const trustedRepoPath = resolveTrustedRepoPath({ task, projectRepoLocalPath });
     if (trustedRepoPath && isSafeGitRef(run.baseCommit)) {
-      // Also accept pinned verified ref if candidateRevision is valid
       void verifiedRefForRun(run.id);
       const gitResult = readImmutableGitDiff({
         repoPath: trustedRepoPath,
         baseCommit: run.baseCommit,
         candidateSha: candidateRevision,
+        expectedTreeSha: verification?.revisionTreeSha,
       });
-      if (gitResult) {
+      if (gitResult.ok) {
         const bounded = boundText(gitResult.diff, MAX_DIFF_CHARS);
         candidateDiff = bounded.text;
         candidateDiffTruncated = bounded.truncated;
-        if (changedFiles.length === 0) {
-          changedFiles = gitResult.changedFiles;
-        }
+        changedFiles = gitResult.changedFiles;
         provenance = 'immutable_git_commit';
       } else {
-        candidateDiffUnavailableReason = `Candidate commit ${candidateRevision.slice(0, 12)} could not be reconstructed from immutable Git history and no persisted diff was stored.`;
+        candidateDiffUnavailableReason = gitResult.reason;
       }
     } else {
       candidateDiffUnavailableReason =
-        'No persisted diff was recorded for this run and the target repository path is unavailable for immutable commit inspection.';
+        'Target repository path or base commit is unavailable for immutable candidate commit inspection.';
     }
   } else {
     candidateDiffUnavailableReason =
       run.status === 'failed' || run.status === 'cancelled'
-        ? 'No candidate revision was committed because the run did not produce a verified candidate.'
-        : 'No candidate revision or persisted diff is recorded for this run yet.';
+        ? 'No verified candidate revision was committed because the run did not produce a verified candidate.'
+        : 'No verified candidate revision is recorded for this run yet.';
   }
 
   return {

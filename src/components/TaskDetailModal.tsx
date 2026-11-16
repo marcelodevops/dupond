@@ -829,27 +829,43 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                   {runEvidence.attempts.length === 0 ? (
                     <p className="text-xs text-slate-500 italic">No attempts recorded.</p>
                   ) : (
-                    runEvidence.attempts.map((attempt) => (
-                      <div
-                        key={attempt.id}
-                        className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] space-y-1.5"
-                      >
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <span className="font-mono font-semibold text-slate-200">
-                            Attempt #{attempt.attemptNumber} · {attempt.workerType}
-                          </span>
-                          <span
-                            className={`font-semibold uppercase text-[10px] px-1.5 py-0.5 rounded ${
-                              attempt.status === 'succeeded'
-                                ? 'bg-emerald-950/50 text-emerald-300'
-                                : attempt.status === 'failed' || attempt.status === 'timeout'
-                                  ? 'bg-rose-950/50 text-rose-300'
-                                  : 'bg-amber-950/50 text-amber-300'
-                            }`}
-                          >
-                            {attempt.status} ({attempt.durationMs}ms)
-                          </span>
-                        </div>
+                    runEvidence.attempts.map((attempt) => {
+                      const isVerifiedAttempt =
+                        Boolean(runEvidence.verification?.passed) &&
+                        runEvidence.verification?.runId === runEvidence.run.id &&
+                        runEvidence.verification?.attemptId === attempt.id;
+                      return (
+                        <div
+                          key={attempt.id}
+                          className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="font-mono font-semibold text-slate-200">
+                              Attempt #{attempt.attemptNumber} · {attempt.workerType}
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                                  isVerifiedAttempt
+                                    ? 'bg-cyan-950/50 border-cyan-800 text-cyan-300'
+                                    : 'bg-slate-900 border-slate-700 text-slate-400'
+                                }`}
+                              >
+                                {isVerifiedAttempt ? 'Verified attempt' : 'Unverified attempt evidence'}
+                              </span>
+                              <span
+                                className={`font-semibold uppercase text-[10px] px-1.5 py-0.5 rounded ${
+                                  attempt.status === 'succeeded'
+                                    ? 'bg-emerald-950/50 text-emerald-300'
+                                    : attempt.status === 'failed' || attempt.status === 'timeout'
+                                      ? 'bg-rose-950/50 text-rose-300'
+                                      : 'bg-amber-950/50 text-amber-300'
+                                }`}
+                              >
+                                {attempt.status} ({attempt.durationMs}ms)
+                              </span>
+                            </div>
+                          </div>
                         {attempt.errorMessage && (
                           <p className="text-rose-300 whitespace-pre-wrap break-words">{attempt.errorMessage}</p>
                         )}
@@ -859,7 +875,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                           </pre>
                         )}
                       </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
 
