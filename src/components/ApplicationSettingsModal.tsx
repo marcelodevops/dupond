@@ -33,13 +33,31 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
   const [isSavingGemini, setIsSavingGemini] = useState(false);
   const [isDeletingGemini, setIsDeletingGemini] = useState(false);
   const [isTestingGemini, setIsTestingGemini] = useState(false);
+  const [testElapsedSeconds, setTestElapsedSeconds] = useState(0);
   const [geminiError, setGeminiError] = useState<string | null>(null);
+  const [geminiInconclusive, setGeminiInconclusive] = useState<string | null>(null);
   const [geminiSuccess, setGeminiSuccess] = useState<string | null>(null);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const testAbortControllerRef = useRef<AbortController | null>(null);
+  const testTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const testRunIdRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (testTimerRef.current) {
+        clearInterval(testTimerRef.current);
+        testTimerRef.current = null;
+      }
+      testAbortControllerRef.current?.abort();
+    };
+  }, []);
 
   const isDirty = geminiKeyInput.trim().length > 0;
   const isBusy = isSavingGemini || isDeletingGemini || isTestingGemini;
@@ -102,7 +120,9 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     }
     setGeminiKeyInput('');
     setGeminiError(null);
+    setGeminiInconclusive(null);
     setGeminiSuccess(null);
+    setTestElapsedSeconds(0);
     setShowDiscardConfirm(false);
 
     let mounted = true;
@@ -303,6 +323,16 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
               </div>
             )}
 
+            {geminiInconclusive && (
+              <div
+                data-testid="gemini-inconclusive-banner"
+                className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-700/60 text-amber-200 text-[11px] flex items-start gap-2"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                <span>{geminiInconclusive}</span>
+              </div>
+            )}
+
             {geminiSuccess && (
               <div
                 data-testid="gemini-success-banner"
@@ -310,6 +340,26 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
               >
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
                 <span>{geminiSuccess}</span>
+              </div>
+            )}
+
+            {isTestingGemini && (
+              <div
+                data-testid="gemini-test-pending"
+                className="p-2.5 rounded-lg bg-cyan-950/30 border border-cyan-800/60 text-cyan-100 text-[11px] space-y-1"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                    <span>Testing Gemini connection...</span>
+                  </span>
+                  <span data-testid="gemini-test-elapsed" className="font-mono text-cyan-300">
+                    Elapsed: {testElapsedSeconds}s
+                  </span>
+                </div>
+                <p className="text-[10px] text-slate-400">
+                  Cancelling aborts the local request, but cannot guarantee the provider incurs no usage.
+                </p>
               </div>
             )}
 
@@ -336,6 +386,7 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                   disabled={isBusy}
                   onClick={async () => {
                     setGeminiError(null);
+                    setGeminiInconclusive(null);
                     setGeminiSuccess(null);
                     if (!geminiKeyInput.trim()) {
                       setGeminiError('Gemini API key cannot be blank.');
@@ -376,16 +427,40 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                   data-testid="test-gemini-key-btn"
                   disabled={!geminiStatus?.configured || isBusy}
                   onClick={async () => {
+                    const runId = ++testRunIdRef.current;
+                    const controller = new AbortController();
+                    testAbortControllerRef.current = controller;
+                    const startedAt = Date.now();
+
                     setGeminiError(null);
+                    setGeminiInconclusive(null);
                     setGeminiSuccess(null);
+                    setTestElapsedSeconds(0);
                     setIsTestingGemini(true);
+
+                    if (testTimerRef.current) {
+                      clearInterval(testTimerRef.current);
+                    }
+                    testTimerRef.current = setInterval(() => {
+                      if (mountedRef.current && testRunIdRef.current === runId) {
+                        setTestElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+                      }
+                    }, 250);
+
                     try {
-                      const res = await projectApi.testGeminiCredential();
+                      const res = await projectApi.testGeminiCredential(controller.signal);
+                      if (!mountedRef.current || testRunIdRef.current !== runId) return;
                       setGeminiStatus(res.status);
                       const refreshed = await projectApi.getPlanningReadiness();
+                      if (!mountedRef.current || testRunIdRef.current !== runId) return;
                       setPlanningReadiness(refreshed);
                       if (res.stale || res.outcome === 'stale') {
                         setGeminiError(res.error || 'Connection test result was superseded by a newer credential change.');
+                      } else if (res.inconclusive || res.outcome === 'inconclusive' || res.outcome === 'cancelled') {
+                        setGeminiInconclusive(
+                          res.error ||
+                            'Connection test was inconclusive. Previous verification history was preserved.',
+                        );
                       } else if (res.ok) {
                         setGeminiSuccess(`Connection verified (${res.source} credential, model ${res.model}).`);
                       } else {
@@ -393,9 +468,38 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                       }
                       onGeminiCredentialChanged?.();
                     } catch (err: any) {
-                      setGeminiError(err?.message || 'Connection test failed.');
+                      if (!mountedRef.current || testRunIdRef.current !== runId) return;
+                      if (err?.name === 'AbortError' || controller.signal.aborted) {
+                        setGeminiInconclusive(
+                          'Connection test was cancelled. Previous verification history was preserved, and cancelling cannot guarantee the provider incurred no usage.',
+                        );
+                        try {
+                          const [credRes, readinessRes] = await Promise.all([
+                            projectApi.getGeminiCredentialStatus(),
+                            projectApi.getPlanningReadiness(),
+                          ]);
+                          if (mountedRef.current && testRunIdRef.current === runId) {
+                            setGeminiStatus(credRes);
+                            setPlanningReadiness(readinessRes);
+                          }
+                        } catch {
+                          // Preserve current status if background refresh fails after cancel
+                        }
+                        onGeminiCredentialChanged?.();
+                      } else {
+                        setGeminiError(err?.message || 'Connection test failed.');
+                      }
                     } finally {
-                      setIsTestingGemini(false);
+                      if (testTimerRef.current) {
+                        clearInterval(testTimerRef.current);
+                        testTimerRef.current = null;
+                      }
+                      if (testAbortControllerRef.current === controller) {
+                        testAbortControllerRef.current = null;
+                      }
+                      if (mountedRef.current && testRunIdRef.current === runId) {
+                        setIsTestingGemini(false);
+                      }
                     }
                   }}
                   className="px-3 py-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
@@ -404,6 +508,20 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                   <span>{isTestingGemini ? 'Testing...' : 'Test Connection'}</span>
                 </button>
 
+                {isTestingGemini && (
+                  <button
+                    type="button"
+                    data-testid="cancel-gemini-test-btn"
+                    onClick={() => {
+                      testAbortControllerRef.current?.abort();
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-amber-500/50 bg-amber-950/40 hover:bg-amber-900/50 text-amber-200 text-xs font-semibold flex items-center gap-1.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Cancel</span>
+                  </button>
+                )}
+
                 {geminiStatus?.hasSavedKey && (
                   <button
                     type="button"
@@ -411,6 +529,7 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                     disabled={isBusy}
                     onClick={async () => {
                       setGeminiError(null);
+                      setGeminiInconclusive(null);
                       setGeminiSuccess(null);
                       setIsDeletingGemini(true);
                       try {
