@@ -296,12 +296,12 @@ export class CoordinatorEngine {
     };
   }
 
-  public saveStateToDisk(stateToSave?: ServerState): void {
+  public saveStateToDisk(stateToSave?: ServerState, projectId = this.activeProjectId): void {
     try {
       const data = stateToSave || this.state;
       data.lastUpdated = new Date().toISOString();
-      defaultProjectStore.saveProjectState(this.activeProjectId, data);
-      if (this.activeProjectId === 'default') {
+      defaultProjectStore.saveProjectState(projectId, data);
+      if (projectId === 'default') {
         fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2), 'utf-8');
       }
     } catch (err) {
@@ -1024,10 +1024,53 @@ ${implementationCode.slice(0, 500)}...
       });
     }
 
+    const effectiveVerificationCommands =
+      storeTask.verificationCommands && storeTask.verificationCommands.length > 0
+        ? storeTask.verificationCommands
+        : task.verificationCommands && task.verificationCommands.length > 0
+          ? task.verificationCommands
+          : (() => {
+              const mapped = (storeTask.acceptanceCriteria || [])
+                .filter((c) => c.checkCommand)
+                .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
+              return mapped.length > 0 ? mapped : ['npm test'];
+            })();
+
+    const effectiveStoreTask = {
+      ...storeTask,
+      targetRepo:
+        storeTask.targetRepo && storeTask.targetRepo !== 'local'
+          ? storeTask.targetRepo
+          : task.targetRepo ||
+            projectRepo?.repoUrl ||
+            executionProjectConfig?.repository?.repoUrl ||
+            storeTask.targetRepo,
+      targetRepoPath:
+        storeTask.targetRepoPath ||
+        task.targetRepoPath ||
+        (projectRepo?.localPath && fs.existsSync(projectRepo.localPath) ? projectRepo.localPath : undefined) ||
+        (executionProjectConfig?.repository?.localPath && fs.existsSync(executionProjectConfig.repository.localPath)
+          ? executionProjectConfig.repository.localPath
+          : undefined),
+      baseCommit:
+        storeTask.baseCommit && storeTask.baseCommit !== 'HEAD'
+          ? storeTask.baseCommit
+          : task.baseCommit ||
+            projectRepo?.defaultBranch ||
+            executionProjectConfig?.repository?.defaultBranch ||
+            storeTask.baseCommit ||
+            'HEAD',
+      verificationCommands: effectiveVerificationCommands,
+      workerConfig:
+        storeTask.workerConfig && storeTask.workerConfig.provider
+          ? storeTask.workerConfig
+          : task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
+    };
+
     // Authoritatively resolve and check the worker configured for this task
     let taskWorker: CodingWorkerAdapter;
     try {
-      taskWorker = resolveCodingWorker(storeTask.workerConfig);
+      taskWorker = resolveCodingWorker(effectiveStoreTask.workerConfig);
     } catch (cfgErr: any) {
       throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
     }
@@ -1039,18 +1082,16 @@ ${implementationCode.slice(0, 500)}...
 
     // Real Coding Worker Execution via isolated worktree and sandbox!
     const resolvedRepo = resolveTargetRepository({
-      targetRepo: task.targetRepo || projectRepo?.repoUrl || executionProjectConfig?.repository?.repoUrl,
-      targetRepoPath: task.targetRepoPath || projectRepo?.localPath || executionProjectConfig?.repository?.localPath,
+      targetRepo: effectiveStoreTask.targetRepo,
+      targetRepoPath: effectiveStoreTask.targetRepoPath,
       integrationConfig: executionProjectConfig,
-      allowOrchestratorRepo: isOrchestratorSelfTarget(
-        task.targetRepo || projectRepo?.repoUrl || executionProjectConfig?.repository?.repoUrl,
-      ),
+      allowOrchestratorRepo: isOrchestratorSelfTarget(effectiveStoreTask.targetRepo),
     });
 
     const workspaceManager = new WorkspaceManager(resolvedRepo.repoPath);
 
     const workerRun = await defaultRepairCoordinator.executeTaskRun({
-      task: storeTask,
+      task: effectiveStoreTask,
       worker: taskWorker,
       workspaceManager,
     });

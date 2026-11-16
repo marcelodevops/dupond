@@ -371,6 +371,21 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
           }
         }
         const nextStatus = fresh.status;
+        const projectState = coordinator.getState(projectId);
+        const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
+        if (stateTask) {
+          stateTask.status = nextStatus as any;
+          if (workerResult.deliverableContent) {
+            stateTask.deliverables = [...(stateTask.deliverables || []), workerResult.deliverableContent];
+          }
+          if (workerResult.subtasksCompleted?.length) {
+            stateTask.subtasks = (stateTask.subtasks || []).map((st) =>
+              workerResult.subtasksCompleted.includes(st.id) ? { ...st, completed: true } : st,
+            );
+          }
+          stateTask.lastUpdated = 'Just now';
+          coordinator.saveStateToDisk(projectState, projectId);
+        }
         return res.json({
           success: true,
           runId: workerResult.runId,
@@ -432,9 +447,21 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
         },
       });
     } catch (workerErr: any) {
+      const dbTask = taskStore.getTask(task.id || '', projectId) || taskStore.getTask(task.key || '', projectId);
+      const latestRun = dbTask ? taskStore.getLatestRunForTask(dbTask.id, projectId) : null;
+      if (dbTask) {
+        const projectState = coordinator.getState(projectId);
+        const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
+        if (stateTask && stateTask.status !== dbTask.status) {
+          stateTask.status = dbTask.status as any;
+          stateTask.lastUpdated = 'Just now';
+          coordinator.saveStateToDisk(projectState, projectId);
+        }
+      }
       return res.status(400).json({
         success: false,
         blocked: true,
+        runId: latestRun?.id,
         error: workerErr.message || `No capable worker or verified code for ${task.key}`,
       });
     }
