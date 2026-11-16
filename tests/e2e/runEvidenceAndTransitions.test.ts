@@ -154,8 +154,8 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
                 priority: 'high',
                 estimatedHours: 4,
                 dependencies: [],
-                subtasks: [{ id: 'NAV-101-1', title: 'Validate quote', completed: false, checkCommand: 'npm test' }],
-                acceptanceCriteria: [{ id: 'NAV-101-AC1', title: 'npm test passes', completed: false, checkCommand: 'npm test' }],
+                subtasks: [{ id: 'NAV-101-1', title: 'Validate quote', completed: false, checkCommand: 'node --test src/quote.test.mjs' }],
+                acceptanceCriteria: [{ id: 'NAV-101-AC1', title: 'node test passes', completed: false, checkCommand: 'node --test src/quote.test.mjs' }],
               },
               {
                 id: 't-nav-102',
@@ -168,8 +168,8 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
                 priority: 'medium',
                 estimatedHours: 2,
                 dependencies: [],
-                subtasks: [{ id: 'NAV-102-1', title: 'Fails check', completed: false, checkCommand: 'npm test' }],
-                acceptanceCriteria: [{ id: 'NAV-102-AC1', title: 'npm test passes', completed: false, checkCommand: 'npm test' }],
+                subtasks: [{ id: 'NAV-102-1', title: 'Fails check', completed: false, checkCommand: 'node --test src/quote.test.mjs' }],
+                acceptanceCriteria: [{ id: 'NAV-102-AC1', title: 'node test passes', completed: false, checkCommand: 'node --test src/quote.test.mjs' }],
               },
             ],
           });
@@ -186,7 +186,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
                   {
                     functionCall: {
                       name: 'write_file',
-                      args: { path: 'src/quote.mjs', content: 'export const valid = false;\n' },
+                      args: { filePath: 'src/quote.mjs', content: 'export const valid = false;\n' },
                     },
                   },
                 ]
@@ -195,7 +195,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
                     functionCall: {
                       name: 'write_file',
                       args: {
-                        path: 'src/quote.mjs',
+                        filePath: 'src/quote.mjs',
                         content: 'export const valid = true;\nexport const quoteEndpointReady = true;\n',
                       },
                     },
@@ -204,7 +204,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
                     functionCall: {
                       name: 'write_file',
                       args: {
-                        path: 'src/addedQuoteStore.mjs',
+                        filePath: 'src/addedQuoteStore.mjs',
                         content: 'export const persistedQuotes = [];\n',
                       },
                     },
@@ -309,12 +309,13 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await specialistSelect.selectOption({ index: 1 });
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
       await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 20000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded');
       await pwExpect(page.getByTestId('task-execution-run-id')).toContainText('Run: run-');
       await pwExpect(page.getByTestId('run-id-value')).toContainText('run-');
       await pwExpect(page.getByTestId('run-status-value')).toHaveText('completed');
       await pwExpect(page.getByTestId('run-attempts-list')).toContainText('Attempt #1');
       await pwExpect(page.getByTestId('run-verification-checks')).toContainText('Verification Passed');
-      await pwExpect(page.getByTestId('run-verification-checks')).toContainText('npm test');
+      await pwExpect(page.getByTestId('run-verification-checks')).toContainText('node --test src/quote.test.mjs');
       await pwExpect(page.getByTestId('run-changed-files')).toContainText('src/quote.mjs');
       await pwExpect(page.getByTestId('run-changed-files')).toContainText('src/addedQuoteStore.mjs');
       await pwExpect(page.getByTestId('run-candidate-diff')).toContainText('quoteEndpointReady');

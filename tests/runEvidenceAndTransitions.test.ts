@@ -58,7 +58,7 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     const repoDir = path.join(tmpDir, 'repo');
     fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
     fs.writeFileSync(path.join(repoDir, 'src', 'app.ts'), 'export const v = 1;\n', 'utf-8');
-    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir });
+    execFileSync('git', ['init', '--template=', '-b', 'main'], { cwd: repoDir });
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir });
     execFileSync('git', ['add', '.'], { cwd: repoDir });
