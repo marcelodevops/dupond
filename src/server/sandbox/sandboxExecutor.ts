@@ -146,8 +146,8 @@ export class SandboxExecutor {
 
   public stopAndConfirmContainerRemoval(runtime: string, containerName: string): boolean {
     try {
-      // 1. Explicitly stop running container
-      spawnSync(runtime, ['stop', '-t', '1', containerName], { stdio: 'pipe', encoding: 'utf-8' });
+      // 1. Immediately kill running container (SIGKILL avoids waiting on PID 1 grace period)
+      spawnSync(runtime, ['kill', containerName], { stdio: 'pipe', encoding: 'utf-8' });
       // 2. Force-remove container
       spawnSync(runtime, ['rm', '-f', containerName], { stdio: 'pipe', encoding: 'utf-8' });
       // 3. Confirm removal via inspect
@@ -403,16 +403,21 @@ ${networkRule}
         this.activeProcesses.set(options.runId, child);
       }
 
+      let settled = false;
       const onAbort = () => {
         killed = true;
+        this.killProcessTree(child);
         if (containerName && (this.hasPodman || this.hasDocker)) {
-          const removed = this.stopAndConfirmContainerRemoval(execCmd, containerName);
-          if (!removed) {
-            setTimeout(() => this.stopAndConfirmContainerRemoval(execCmd, containerName!), 300).unref();
-          }
+          this.stopAndConfirmContainerRemoval(execCmd, containerName);
+          // If abort fired while podman/docker was still creating the container,
+          // retry cleanup shortly after so conmon cannot keep pipes open.
+          setTimeout(() => {
+            if (!settled) {
+              this.stopAndConfirmContainerRemoval(execCmd, containerName!);
+            }
+          }, 300).unref();
           if (options.runId) this.activeContainers.delete(options.runId);
         }
-        this.killProcessTree(child);
       };
 
       if (options.abortSignal) {
@@ -438,6 +443,7 @@ ${networkRule}
       }, timeoutMs);
 
       child.on('close', (code) => {
+        settled = true;
         clearTimeout(timer);
         if (options.abortSignal) {
           options.abortSignal.removeEventListener('abort', onAbort);
