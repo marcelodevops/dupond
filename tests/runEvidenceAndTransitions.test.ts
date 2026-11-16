@@ -900,6 +900,149 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     assert.strictEqual(execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).trim(), remoteRefsBefore);
     assert.strictEqual(store.getDeliveryForRun(run2.id), null);
 
+    // 4. Both HTTP delivery routes enforce candidate-binding / block legacy bypass and allow valid bound delivery
+    // 4a. Legacy /api/integrations/repository/dispatch rejects deliver and create_pr (missing binding, rejected, superseded)
+    for (const legacyPayload of [
+      { action: 'deliver', task: { id: task.id, key: task.key }, isApproved: true, approvedBy: 'op' },
+      { action: 'create_pr', runId: run1.id, isApproved: true, approvedBy: 'op' },
+      {
+        action: 'deliver',
+        isApproved: true,
+        approvedBy: 'op',
+        ...fullBinding,
+      },
+      {
+        action: 'create_pr',
+        runId: run2.id,
+        isApproved: true,
+        approvedBy: 'op',
+        verificationId: ver2.id,
+        revisionSha: candidateSha,
+        requirementsFingerprint: binding2.requirementsFingerprint,
+        verificationConfigFingerprint: binding2.verificationConfigFingerprint,
+        evidenceBindingVersion: binding2.evidenceBindingVersion,
+      },
+    ]) {
+      const legacyRes = await fetch(`${baseUrl}/api/integrations/repository/dispatch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(legacyPayload),
+      });
+      assert.strictEqual(legacyRes.status, 410, `Expected 410 for legacy dispatch ${JSON.stringify(legacyPayload)}`);
+      const legacyJson = (await legacyRes.json()) as any;
+      assert.strictEqual(legacyJson.success, false);
+      assert.strictEqual(legacyJson.blocked, true);
+      assert.strictEqual(legacyJson.code, 'LEGACY_DELIVERY_ROUTE_DEPRECATED');
+      assert.strictEqual(legacyJson.supportedEndpoint, '/api/delivery/dispatch');
+    }
+    assert.strictEqual(execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).trim(), remoteRefsBefore);
+    assert.strictEqual(store.getDeliveryForRun(run1.id), null);
+    assert.strictEqual(store.getDeliveryForRun(run2.id), null);
+
+    // 4b. /api/delivery/dispatch blocks rejected and superseded candidates via HTTP
+    const httpRejectedRes = await fetch(`${baseUrl}/api/delivery/dispatch`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ isApproved: true, approvedBy: 'op', ...fullBinding }),
+    });
+    assert.strictEqual(httpRejectedRes.status, 409);
+    assert.strictEqual(((await httpRejectedRes.json()) as any).code, 'CANDIDATE_REJECTED');
+
+    const httpSupersededRes = await fetch(`${baseUrl}/api/delivery/dispatch`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        isApproved: true,
+        approvedBy: 'op',
+        runId: run2.id,
+        verificationId: ver2.id,
+        revisionSha: candidateSha,
+        requirementsFingerprint: binding2.requirementsFingerprint,
+        verificationConfigFingerprint: binding2.verificationConfigFingerprint,
+        evidenceBindingVersion: binding2.evidenceBindingVersion,
+      }),
+    });
+    assert.strictEqual(httpSupersededRes.status, 409);
+    assert.strictEqual(((await httpSupersededRes.json()) as any).code, 'STALE_CANDIDATE_REVIEW');
+    assert.strictEqual(execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).trim(), remoteRefsBefore);
+
+    // 4c. Valid explicitly bound delivery via HTTP /api/delivery/dispatch succeeds
+    const validBranch = 'dupond/del-valid';
+    execFileSync('git', ['checkout', '-b', validBranch], { cwd: repoDir, stdio: 'ignore' });
+    const taskValid = store.createTask({
+      id: 'task-deliver-valid',
+      projectId: proj.id,
+      key: 'DEL-VALID',
+      title: 'Valid Bound Delivery Task',
+      description: 'Should deliver with complete candidate binding',
+      status: 'review',
+      priority: 'high',
+      targetRepo: 'owner/repo',
+      targetRepoPath: repoDir,
+      baseCommit: baseSha,
+      allowedPaths: ['**/*'],
+      protectedPaths: ['.env*'],
+      verificationCommands: ['true'],
+      acceptanceCriteria: [{ id: 'ac-valid', title: 'ok', completed: true }],
+      workerConfig: { provider: 'gemini', model: 'gemini-3.8-flash' },
+      maxAttempts: 2,
+      timeoutSeconds: 60,
+      requireApproval: true,
+    });
+    const runValid = store.createRun({
+      taskId: taskValid.id,
+      projectId: proj.id,
+      status: 'completed',
+      targetRepo: 'owner/repo',
+      baseCommit: baseSha,
+      targetBranch: validBranch,
+      worktreePath: repoDir,
+      currentAttempt: 1,
+      durationMs: 50,
+    });
+    const attValid = store.createAttempt({
+      runId: runValid.id,
+      attemptNumber: 1,
+      status: 'succeeded',
+      workerType: 'gemini:gemini-3.8-flash',
+      filesModified: ['feature.ts'],
+      durationMs: 40,
+      startedAt: new Date().toISOString(),
+    });
+    const bindingValid = computeEvidenceBinding(taskValid);
+    const verValid = store.recordVerification({
+      runId: runValid.id,
+      attemptId: attValid.id,
+      revisionSha: candidateSha,
+      revisionTreeSha: execFileSync('git', ['rev-parse', `${candidateSha}^{tree}`], { cwd: repoDir, encoding: 'utf8' }).trim(),
+      passed: true,
+      checks: [{ command: 'true', exitCode: 0, passed: true, durationMs: 5, stdout: '', stderr: '' }],
+      criteriaVerified: ['ac-valid'],
+      requirementsFingerprint: bindingValid.requirementsFingerprint,
+      verificationConfigFingerprint: bindingValid.verificationConfigFingerprint,
+      evidenceBindingVersion: bindingValid.evidenceBindingVersion,
+    });
+
+    const httpValidRes = await fetch(`${baseUrl}/api/delivery/dispatch`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        isApproved: true,
+        approvedBy: 'op-valid',
+        runId: runValid.id,
+        verificationId: verValid.id,
+        revisionSha: candidateSha,
+        requirementsFingerprint: bindingValid.requirementsFingerprint,
+        verificationConfigFingerprint: bindingValid.verificationConfigFingerprint,
+        evidenceBindingVersion: bindingValid.evidenceBindingVersion,
+      }),
+    });
+    assert.strictEqual(httpValidRes.status, 200);
+    const httpValidJson = (await httpValidRes.json()) as any;
+    assert.strictEqual(httpValidJson.success, true);
+    assert.ok(execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).includes(`refs/heads/${validBranch}`));
+    assert.strictEqual(store.getDeliveryForRun(runValid.id)?.approvalStatus, 'approved');
+
     store.getRawDb().close();
   }, 25000);
 });

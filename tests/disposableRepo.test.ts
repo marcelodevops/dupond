@@ -140,12 +140,24 @@ async function main() {
     // ------------------------------------------------------------------------
     // Part 2: Delivery to Separate Repository's Origin
     // ------------------------------------------------------------------------
+    const bindingFor = (runId: string) => {
+      const v = store.getLatestVerification(runId)!;
+      return {
+        verificationId: v.id,
+        revisionSha: v.revisionSha,
+        requirementsFingerprint: v.requirementsFingerprint || '',
+        verificationConfigFingerprint: v.verificationConfigFingerprint || '',
+        evidenceBindingVersion: v.evidenceBindingVersion || '',
+      };
+    };
+
     const deliveryResult = await deliveryService.dispatchDelivery({
       runId: run.id,
       isApproved: true,
       approvedBy: 'qa-lead',
       repoUrl: 'disposable-org/disposable-repo',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(run.id),
     });
 
     assert.strictEqual(deliveryResult.success, true, 'Delivery must succeed');
@@ -247,6 +259,7 @@ async function main() {
       approvedBy: 'qa-lead',
       repoUrl: 'disposable-org/disposable-repo',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(run2.id),
     });
 
     assert.strictEqual(initialDriftDelivery.success, false, 'Delivery must block when integration changes the approved revision');
@@ -263,6 +276,7 @@ async function main() {
       approvedBy: 'qa-lead-reapproved',
       repoUrl: 'disposable-org/disposable-repo',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(run2.id),
     });
 
     assert.strictEqual(driftDelivery.success, true, 'Delivery with re-approved combined result must succeed');
@@ -333,6 +347,7 @@ async function main() {
       approvedBy: 'qa-lead',
       repoUrl: 'disposable-org/disposable-repo',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(run3.id),
     });
 
     assert.strictEqual(conflictDelivery.success, false, 'Delivery must fail when base branch conflicts');

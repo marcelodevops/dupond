@@ -76,20 +76,27 @@ async function main() {
   });
 
   try {
-    // Test 1: Delivery blocked without passing quality gates
+    // Test 1: Delivery blocked without passing quality gates / candidate binding
     const unverifiedResult = await deliveryService.dispatchDelivery({
       runId: run.id,
       isApproved: true,
       disposableRemoteDir: disposableRemote,
+      candidateBinding: {
+        verificationId: '',
+        revisionSha: '',
+        requirementsFingerprint: '',
+        verificationConfigFingerprint: '',
+        evidenceBindingVersion: '',
+      },
     });
     assert.strictEqual(unverifiedResult.success, false);
     assert.strictEqual(unverifiedResult.status, 400);
-    assert.ok(unverifiedResult.error?.includes('has not passed authoritative quality gates'));
-    console.log('✔ [PASS] Delivery blocked fail-closed when quality gates are unverified');
+    assert.strictEqual(unverifiedResult.code, 'CANDIDATE_BINDING_REQUIRED');
+    console.log('✔ [PASS] Delivery blocked fail-closed when quality gates / candidate binding are unverified');
 
     // Record passing verification bound to the task's current spec
     const binding = computeEvidenceBinding(task);
-    store.recordVerification({
+    const ver = store.recordVerification({
       runId: run.id,
       attemptId: attempt.id,
       revisionSha: deliveredCommit,
@@ -101,12 +108,20 @@ async function main() {
       verificationConfigFingerprint: binding.verificationConfigFingerprint,
       evidenceBindingVersion: binding.evidenceBindingVersion,
     });
+    const candidateBinding = {
+      verificationId: ver.id,
+      revisionSha: ver.revisionSha,
+      requirementsFingerprint: binding.requirementsFingerprint,
+      verificationConfigFingerprint: binding.verificationConfigFingerprint,
+      evidenceBindingVersion: binding.evidenceBindingVersion,
+    };
 
     // Test 2: Delivery blocked by approval policy when isApproved is false
     const unapprovedResult = await deliveryService.dispatchDelivery({
       runId: run.id,
       isApproved: false,
       disposableRemoteDir: disposableRemote,
+      candidateBinding,
     });
     assert.strictEqual(unapprovedResult.success, false);
     assert.strictEqual(unapprovedResult.status, 403);
@@ -117,6 +132,7 @@ async function main() {
     const omittedApprovalResult = await deliveryService.dispatchDelivery({
       runId: run.id,
       disposableRemoteDir: disposableRemote,
+      candidateBinding,
     });
     assert.strictEqual(omittedApprovalResult.success, false);
     assert.strictEqual(omittedApprovalResult.status, 403);
@@ -127,6 +143,7 @@ async function main() {
       isApproved: true,
       // approvedBy omitted
       disposableRemoteDir: disposableRemote,
+      candidateBinding,
     });
     assert.strictEqual(missingApproverResult.success, false);
     assert.strictEqual(missingApproverResult.status, 403);
@@ -140,6 +157,7 @@ async function main() {
       approvedBy: 'lead-devops-operator',
       disposableRemoteDir: disposableRemote,
       repoUrl: 'marcelodevops/dupond',
+      candidateBinding,
     });
 
     assert.strictEqual(deliveryResult.success, true);
@@ -158,6 +176,7 @@ async function main() {
       isApproved: true,
       approvedBy: 'lead-devops-operator',
       disposableRemoteDir: disposableRemote,
+      candidateBinding,
     });
 
     assert.strictEqual(repeatedDeliveryResult.success, true);
