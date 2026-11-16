@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.12.0](https://github.com/marcelodevops/dupond/compare/v0.11.0...v0.12.0) (2026-11-16)
+
+
+### Features
+
+* add review decision and PR delivery workflow in API and TaskDetailModal ([93b4876](https://github.com/marcelodevops/dupond/commit/93b48763338cf113657e371a4da6704a2b9d2fa8))
+* bind UI review/delivery actions to inspected candidate and show unresolved feedback ([cbb92a4](https://github.com/marcelodevops/dupond/commit/cbb92a44249cba7882a004c96542e028248c9339))
+* review approval, PR delivery controls, and secondary-project state sync ([e5366b8](https://github.com/marcelodevops/dupond/commit/e5366b8f760a15c98b6568d8e56f75a0e53cb898))
+* **runs:** add sanitized read-only run evidence and structured transition refusals ([cacd980](https://github.com/marcelodevops/dupond/commit/cacd9804f8a0ccd467811129d80ad0e8ad387855))
+* **ui:** unify authoritative task transitions and surface Runs & Evidence inspection ([430f6da](https://github.com/marcelodevops/dupond/commit/430f6da5b6e0b3f2d4a6b8c8e7fad37ac5803c65))
+* unify authoritative task transitions and add read-only run evidence inspection ([4be1fb2](https://github.com/marcelodevops/dupond/commit/4be1fb23c308f521f2bb0d962e4d2a07ea105673))
+
+
+### Bug Fixes
+
+* allow project task keys and align adopted criteria in state sync ([0dadf02](https://github.com/marcelodevops/dupond/commit/0dadf0297e36570f9c5d70bbbdd0c4264c6e9990))
+* **coordinator:** resolve project repository settings from ProjectStore during worker step ([5a48ee7](https://github.com/marcelodevops/dupond/commit/5a48ee782e52951056c8242d6ec857120e9ffb23))
+* guard container startup cancellation and retry cleanup ([7fdcdd5](https://github.com/marcelodevops/dupond/commit/7fdcdd559219931036e39114da9623f714b8fb64))
+* hydrate project repository on adopted tasks and persist non-default project step state ([e2f242a](https://github.com/marcelodevops/dupond/commit/e2f242ac1868a147f342699bdd318018cfe8d77d))
+* kill container immediately on abort and retry startup cleanup ([1fb97aa](https://github.com/marcelodevops/dupond/commit/1fb97aa3c1630d57aeaf51a9e9431425414c84de))
+* persist review decisions, revoke rejected candidates, and bind review to exact candidate ([0f92501](https://github.com/marcelodevops/dupond/commit/0f925016e140099ca7be76978eb86202562710e8))
+* preserve host env for container CLI so podman reuses pre-pulled image ([01237b4](https://github.com/marcelodevops/dupond/commit/01237b44c983b76b44018cce154b0cef0fcce48f))
+* require candidate binding in delivery service and block legacy dispatch ([68ff923](https://github.com/marcelodevops/dupond/commit/68ff923c7a49bf0556df159ae5282b62efab5e0a))
+* require complete candidate binding and revalidate before delivery push ([f2693b2](https://github.com/marcelodevops/dupond/commit/f2693b2931b9103c481ca1250a012a966331ff8a))
+* **runs:** bind candidate evidence strictly to verified immutable commits and attempt metadata ([e40f4d8](https://github.com/marcelodevops/dupond/commit/e40f4d8766953e619040872017c4b275c9ba3445))
+
 ## [0.11.0](https://github.com/marcelodevops/dupond/compare/v0.10.0...v0.11.0) (2026-11-16)
 
 
