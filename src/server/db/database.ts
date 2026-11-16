@@ -1549,16 +1549,56 @@ export class TaskStore {
   public validateDeliveryCandidateBinding(params: {
     projectId: string;
     runId: string;
-    expectedVerificationId?: string;
-    expectedRevisionSha?: string;
-    expectedRequirementsFingerprint?: string;
-    expectedVerificationConfigFingerprint?: string;
-    expectedEvidenceBindingVersion?: string;
+    expectedVerificationId: string;
+    expectedRevisionSha: string;
+    expectedRequirementsFingerprint: string;
+    expectedVerificationConfigFingerprint: string;
+    expectedEvidenceBindingVersion: string;
   }): { ok: true } | { ok: false; status: number; code: string; error: string } {
+    const runId = typeof params.runId === 'string' ? params.runId.trim() : '';
+    const expectedVerificationId =
+      typeof params.expectedVerificationId === 'string' ? params.expectedVerificationId.trim() : '';
+    const expectedRevisionSha =
+      typeof params.expectedRevisionSha === 'string' ? params.expectedRevisionSha.trim() : '';
+    const expectedRequirementsFingerprint =
+      typeof params.expectedRequirementsFingerprint === 'string' ? params.expectedRequirementsFingerprint.trim() : '';
+    const expectedVerificationConfigFingerprint =
+      typeof params.expectedVerificationConfigFingerprint === 'string'
+        ? params.expectedVerificationConfigFingerprint.trim()
+        : '';
+    const expectedEvidenceBindingVersion =
+      typeof params.expectedEvidenceBindingVersion === 'string' ? params.expectedEvidenceBindingVersion.trim() : '';
+
+    if (
+      !runId ||
+      !expectedVerificationId ||
+      !expectedRevisionSha ||
+      !expectedRequirementsFingerprint ||
+      !expectedVerificationConfigFingerprint ||
+      !expectedEvidenceBindingVersion
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'CANDIDATE_BINDING_REQUIRED',
+        error:
+          'Complete inspected candidate binding is required (runId, verificationId, revisionSha, requirementsFingerprint, verificationConfigFingerprint, evidenceBindingVersion).',
+      };
+    }
+
+    if (!/^[0-9a-f]{7,64}$/i.test(expectedRevisionSha)) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'MALFORMED_CANDIDATE_BINDING',
+        error: 'Malformed revisionSha in candidate binding.',
+      };
+    }
+
     return this.transaction(() => {
-      const run = this.getRunScoped(params.runId, params.projectId);
+      const run = this.getRunScoped(runId, params.projectId);
       if (!run) {
-        return { ok: false, status: 404, code: 'RUN_NOT_FOUND', error: `Run ${params.runId} not found.` };
+        return { ok: false, status: 404, code: 'RUN_NOT_FOUND', error: `Run ${runId} not found.` };
       }
       const task = this.getTaskScoped(run.taskId, params.projectId);
       if (!task) {
@@ -1569,18 +1609,21 @@ export class TaskStore {
       const binding = computeEvidenceBinding(task);
 
       if (
-        (latestRun && latestRun.id !== run.id) ||
-        (params.expectedVerificationId && verification?.id !== params.expectedVerificationId) ||
-        (params.expectedRevisionSha && verification?.revisionSha !== params.expectedRevisionSha) ||
-        (params.expectedRequirementsFingerprint && binding.requirementsFingerprint !== params.expectedRequirementsFingerprint) ||
-        (params.expectedVerificationConfigFingerprint && binding.verificationConfigFingerprint !== params.expectedVerificationConfigFingerprint) ||
-        (params.expectedEvidenceBindingVersion && binding.evidenceBindingVersion !== params.expectedEvidenceBindingVersion)
+        !latestRun ||
+        latestRun.id !== run.id ||
+        !verification ||
+        verification.id !== expectedVerificationId ||
+        verification.revisionSha !== expectedRevisionSha ||
+        binding.requirementsFingerprint !== expectedRequirementsFingerprint ||
+        binding.verificationConfigFingerprint !== expectedVerificationConfigFingerprint ||
+        binding.evidenceBindingVersion !== expectedEvidenceBindingVersion
       ) {
         return {
           ok: false,
           status: 409,
           code: 'STALE_CANDIDATE_REVIEW',
-          error: 'Candidate revision, verification, or task requirements changed since this view was loaded. Reload the latest candidate evidence before delivering.',
+          error:
+            'Candidate revision, verification, or task requirements changed since this view was loaded. Reload the latest candidate evidence before delivering.',
         };
       }
 

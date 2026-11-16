@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
 import { TaskStore, taskStore as defaultTaskStore } from '../db/database.js';
-import { DeliveryRecord } from '../db/schema.js';
+import { DeliveryRecord, TaskRecord } from '../db/schema.js';
 import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verification/authoritativeVerifier.js';
 import {
   ApprovalExpectation,
@@ -14,6 +14,14 @@ import { LifecycleService } from '../lifecycle/lifecycleService.js';
 import { isSafeGitRef } from '../utils/gitRefs.js';
 import { normalizeRepoSlug, isLocalRemoteOrigin, areRepoSlugsCompatible } from '../workspace/targetRepositoryResolver.js';
 
+export interface DeliveryCandidateBinding {
+  verificationId: string;
+  revisionSha: string;
+  requirementsFingerprint: string;
+  verificationConfigFingerprint: string;
+  evidenceBindingVersion: string;
+}
+
 export interface DispatchDeliveryOptions {
   runId: string;
   approvedBy?: string;
@@ -21,6 +29,7 @@ export interface DispatchDeliveryOptions {
   targetBaseBranch?: string;
   repoUrl?: string;
   disposableRemoteDir?: string; // For testing delivery against local bare repository
+  candidateBinding?: DeliveryCandidateBinding;
 }
 
 export interface DispatchDeliveryResult {
@@ -28,6 +37,7 @@ export interface DispatchDeliveryResult {
   status: number;
   blocked?: boolean;
   approvalRequired?: boolean;
+  code?: string;
   deliveryRecord?: DeliveryRecord;
   prUrl?: string;
   branch?: string;
@@ -45,6 +55,32 @@ export class GitHubDeliveryService {
   constructor(store: TaskStore = defaultTaskStore, verifier: AuthoritativeVerifier = defaultAuthoritativeVerifier) {
     this.store = store;
     this.verifier = verifier;
+  }
+
+  private validateCandidateBindingIfPresent(
+    task: TaskRecord,
+    options: DispatchDeliveryOptions,
+  ): DispatchDeliveryResult | null {
+    if (!options.candidateBinding) return null;
+    const check = this.store.validateDeliveryCandidateBinding({
+      projectId: task.projectId || 'default',
+      runId: options.runId,
+      expectedVerificationId: options.candidateBinding.verificationId,
+      expectedRevisionSha: options.candidateBinding.revisionSha,
+      expectedRequirementsFingerprint: options.candidateBinding.requirementsFingerprint,
+      expectedVerificationConfigFingerprint: options.candidateBinding.verificationConfigFingerprint,
+      expectedEvidenceBindingVersion: options.candidateBinding.evidenceBindingVersion,
+    });
+    if (!check.ok) {
+      return {
+        success: false,
+        status: check.status,
+        blocked: true,
+        code: check.code,
+        error: check.error,
+      };
+    }
+    return null;
   }
 
   public async dispatchDelivery(options: DispatchDeliveryOptions): Promise<DispatchDeliveryResult> {
@@ -69,6 +105,9 @@ export class GitHubDeliveryService {
     if (!task) {
       return { success: false, status: 404, error: `Task for run ${options.runId} not found` };
     }
+
+    const entryBindingErr = this.validateCandidateBindingIfPresent(task, options);
+    if (entryBindingErr) return entryBindingErr;
 
     // 0. Repository authority. The identity this delivery is checked against is
     // the one persisted for the run, not whatever the request claims. A caller
@@ -489,6 +528,9 @@ export class GitHubDeliveryService {
         error: `Delivery blocked: Pushed commit (${deliveredCommit}) must have passing authoritative verification evidence for its exact revision.`,
       };
     }
+
+    const prePushBindingErr = this.validateCandidateBindingIfPresent(task, options);
+    if (prePushBindingErr) return prePushBindingErr;
 
     const repoTarget = persistedTargetRepo;
 

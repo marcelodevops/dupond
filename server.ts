@@ -581,15 +581,21 @@ app.post('/api/delivery/dispatch', requireApprovalCredential, async (req: Reques
     const projectId = projectContext(req, res, taskStore.getProjectIdForRun(runId));
     if (!projectId) return;
 
+    const expectedVerificationId = typeof verificationId === 'string' ? verificationId : '';
+    const expectedRevisionSha = typeof revisionSha === 'string' ? revisionSha : '';
+    const expectedRequirementsFingerprint = typeof requirementsFingerprint === 'string' ? requirementsFingerprint : '';
+    const expectedVerificationConfigFingerprint =
+      typeof verificationConfigFingerprint === 'string' ? verificationConfigFingerprint : '';
+    const expectedEvidenceBindingVersion = typeof evidenceBindingVersion === 'string' ? evidenceBindingVersion : '';
+
     const bindingCheck = taskStore.validateDeliveryCandidateBinding({
       projectId,
       runId: String(runId),
-      expectedVerificationId: typeof verificationId === 'string' ? verificationId : undefined,
-      expectedRevisionSha: typeof revisionSha === 'string' ? revisionSha : undefined,
-      expectedRequirementsFingerprint: typeof requirementsFingerprint === 'string' ? requirementsFingerprint : undefined,
-      expectedVerificationConfigFingerprint:
-        typeof verificationConfigFingerprint === 'string' ? verificationConfigFingerprint : undefined,
-      expectedEvidenceBindingVersion: typeof evidenceBindingVersion === 'string' ? evidenceBindingVersion : undefined,
+      expectedVerificationId,
+      expectedRevisionSha,
+      expectedRequirementsFingerprint,
+      expectedVerificationConfigFingerprint,
+      expectedEvidenceBindingVersion,
     });
     if (!bindingCheck.ok) {
       return res.status(bindingCheck.status).json({
@@ -606,6 +612,13 @@ app.post('/api/delivery/dispatch', requireApprovalCredential, async (req: Reques
       approvedBy: isApproved === true ? (approvedBy || 'operator') : undefined,
       repoUrl,
       targetBaseBranch,
+      candidateBinding: {
+        verificationId: expectedVerificationId.trim(),
+        revisionSha: expectedRevisionSha.trim(),
+        requirementsFingerprint: expectedRequirementsFingerprint.trim(),
+        verificationConfigFingerprint: expectedVerificationConfigFingerprint.trim(),
+        evidenceBindingVersion: expectedEvidenceBindingVersion.trim(),
+      },
     });
     coordinator.projectAuthoritativeStatuses(projectId);
     const run = taskStore.getRunScoped(runId, projectId);
