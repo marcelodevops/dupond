@@ -357,6 +357,7 @@ describe('Authoritative task transitions & read-only run evidence', () => {
 
     const port = await getFreePort();
     const authToken = 'test-auth-token-run-ev';
+    const approvalToken = 'test-approval-token-run-ev';
     serverProc = spawn('npx', ['tsx', 'server.ts'], {
       cwd: process.cwd(),
       detached: true,
@@ -365,6 +366,7 @@ describe('Authoritative task transitions & read-only run evidence', () => {
         PORT: String(port),
         NODE_ENV: 'test',
         DUPOND_AUTH_TOKEN: authToken,
+        DUPOND_APPROVAL_TOKEN: approvalToken,
         DUPOND_DB_PATH: dbPath,
         DUPOND_STATE_FILE: statePath,
         DUPOND_CONN_KEY_PATH: keyPath,
@@ -428,5 +430,63 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     assert.strictEqual(okJson.runs.length, 1);
     assert.strictEqual(okJson.evidence.candidateDiffStatus, 'unavailable');
     assert.ok(okJson.evidence.candidateDiffUnavailableReason);
+
+    // 5. Non-AEG key (TR-1) metadata update via POST /api/orchestrate/state succeeds without 422
+    const metaUpdateRes = await fetch(`${baseUrl}/api/orchestrate/state`, {
+      method: 'POST',
+      headers: authHeaders(projA.id),
+      body: JSON.stringify({
+        tasks: [
+          {
+            id: taskA.id,
+            key: taskA.key,
+            title: taskA.title,
+            description: taskA.description,
+            epicId: 'EPIC-1',
+            status: 'review',
+            priority: 'high',
+            assignedAgentId: 'agent-dev',
+          },
+        ],
+      }),
+    });
+    assert.strictEqual(metaUpdateRes.status, 200);
+    const metaJson = (await metaUpdateRes.json()) as any;
+    assert.strictEqual(metaJson.success, true);
+
+    // 6. POST /api/tasks/:id/review enforces project isolation, approval token, and request_changes
+    const foreignReview = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
+      method: 'POST',
+      headers: authHeaders(projB.id),
+      body: JSON.stringify({ decision: 'request_changes', comment: 'nope' }),
+    });
+    assert.strictEqual(foreignReview.status, 403);
+
+    const missingApprovalRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
+      method: 'POST',
+      headers: authHeaders(projA.id),
+      body: JSON.stringify({ decision: 'approve' }),
+    });
+    assert.strictEqual(missingApprovalRes.status, 403);
+
+    const approveRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
+      method: 'POST',
+      headers: { ...authHeaders(projA.id), 'X-Dupond-Approval-Token': approvalToken },
+      body: JSON.stringify({ decision: 'approve', comment: 'Looks good' }),
+    });
+    assert.strictEqual(approveRes.status, 200);
+    const approveJson = (await approveRes.json()) as any;
+    assert.strictEqual(approveJson.decision, 'approve');
+    assert.strictEqual(approveJson.approval.revisionSha, okJson.evidence.candidateRevision);
+
+    const requestChangesRes = await fetch(`${baseUrl}/api/tasks/${taskA.id}/review`, {
+      method: 'POST',
+      headers: authHeaders(projA.id),
+      body: JSON.stringify({ decision: 'request_changes', comment: 'Add edge-case test' }),
+    });
+    assert.strictEqual(requestChangesRes.status, 200);
+    const rcJson = (await requestChangesRes.json()) as any;
+    assert.strictEqual(rcJson.decision, 'request_changes');
+    assert.strictEqual(rcJson.authoritativeStatus, 'todo');
   }, 25000);
 });
