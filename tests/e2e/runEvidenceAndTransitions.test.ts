@@ -276,6 +276,8 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
 
       // B & C: Execute manually and inspect recorded run, attempts, diff, commands, and verification
       mockWorkerMode = 'pass';
+      const specialistSelect = page.getByTestId('task-detail-modal').locator('select').nth(2);
+      await specialistSelect.selectOption({ index: 1 });
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
       await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 20000 });
       await pwExpect(page.getByTestId('task-execution-run-id')).toContainText('Run: run-');
@@ -318,6 +320,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       // H (part 2): Execute NAV-102 with failing verification and inspect failed-run state
       mockWorkerMode = 'fail';
       await page.getByText('NAV-102').first().click();
+      await page.getByTestId('task-detail-modal').locator('select').nth(2).selectOption({ index: 1 });
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
       await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 20000 });
       await pwExpect(page.getByTestId('run-status-value')).toHaveText('failed');
