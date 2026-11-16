@@ -246,6 +246,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByTestId('verify-repo-btn').click();
       await page.getByTestId('repo-verification-result').waitFor({ state: 'visible' });
       await page.getByTestId('save-project-settings-btn').click();
+      await page.getByTestId('project-settings-modal').waitFor({ state: 'hidden' });
 
       await page.getByTestId('open-app-settings-btn').click();
       await page.getByTestId('gemini-api-key-input').fill(SYNTH_GEMINI_KEY);
