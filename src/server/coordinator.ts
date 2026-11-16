@@ -586,6 +586,8 @@ export class CoordinatorEngine {
     task?: Task;
     verification?: VerificationResult;
     error?: string;
+    reason?: string;
+    evidence?: unknown;
   }> {
     const effectiveProjectId = projectId || this.activeProjectId;
     const projectState = this.getState(effectiveProjectId);
@@ -617,8 +619,16 @@ export class CoordinatorEngine {
         reason: 'Status transition requested via orchestration API',
       });
       if (!outcome.ok) {
+        const freshDbTask = taskStore.getTaskScoped(dbTask.id, effectiveProjectId) || dbTask;
+        const currentProjected: Task = {
+          ...task,
+          status: this.toUiStatus(freshDbTask.status),
+        };
         return {
           success: false,
+          task: currentProjected,
+          reason: outcome.reason,
+          evidence: outcome.evidence,
           error: outcome.detail || `Lifecycle service refused "${targetStatus}" (${outcome.reason})`,
         };
       }

@@ -49,6 +49,7 @@ import { suggestRole } from './src/server/chat/roleSuggestion.js';
 import { toClientMessage } from './src/server/utils/errors.js';
 import { createProjectRouter, parseProjectContextHeader } from './src/server/projects/projectApi.js';
 import { defaultProjectStore, ProjectApiError } from './src/server/projects/projectStore.js';
+import { buildSanitizedRunEvidence } from './src/server/runs/runEvidence.js';
 
 app.use(requireAuth);
 
@@ -562,16 +563,26 @@ app.get('/api/runs/:id', (req: Request, res: Response) => {
     if (!projectId) return;
     const run = taskStore.getRunScoped(req.params.id, projectId);
     if (!run) return res.status(404).json({ error: 'Run not found' });
+    const task = taskStore.getTaskScoped(run.taskId, projectId);
     const attempts = taskStore.listAttempts(run.id, projectId);
     const verification = taskStore.getLatestVerification(run.id, projectId);
     const delivery = taskStore.getDeliveryForRun(run.id, projectId);
-    return res.json({ run, attempts, verification, delivery });
+    const project = defaultProjectStore.getProject(projectId);
+    const payload = buildSanitizedRunEvidence({
+      run,
+      task,
+      attempts,
+      verification,
+      delivery,
+      projectRepoLocalPath: project?.repository?.localPath,
+    });
+    return res.json(payload);
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Failed to get run') });
   }
 });
 
-// Endpoint: Read Latest Run for Task
+// Endpoint: Read Latest (or Selected) Run & Evidence for Task
 app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
   try {
     const requestedProjectId = parseProjectContextHeader(req) || undefined;
@@ -582,12 +593,44 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
     if (!projectId) return;
     const scopedTask = taskStore.getTaskScoped(req.params.id, projectId);
     const lookupTaskId = scopedTask ? scopedTask.id : req.params.id;
-    const run = taskStore.getLatestRunForTask(lookupTaskId, projectId) || taskStore.getRunScoped(req.params.id, projectId);
+    const runs = taskStore.listRunsForTask(lookupTaskId, projectId);
+
+    const requestedRunId = typeof req.query.runId === 'string' && req.query.runId.trim() ? req.query.runId.trim() : null;
+    let run = null as ReturnType<typeof taskStore.getLatestRunForTask>;
+    if (requestedRunId) {
+      const ownerProjectId = taskStore.getProjectIdForRun(requestedRunId);
+      if (ownerProjectId && ownerProjectId !== projectId) {
+        return res.status(403).json({
+          error: `Run ${requestedRunId} belongs to another project.`,
+          code: 'PROJECT_CONTEXT_MISMATCH',
+        });
+      }
+      const candidateRun = taskStore.getRunScoped(requestedRunId, projectId);
+      if (!candidateRun || candidateRun.taskId !== lookupTaskId) {
+        return res.status(404).json({ error: 'Run not found for task' });
+      }
+      run = candidateRun;
+    } else {
+      run = runs[0] || taskStore.getLatestRunForTask(lookupTaskId, projectId) || taskStore.getRunScoped(req.params.id, projectId);
+    }
+
     if (!run) return res.status(404).json({ error: 'No run found for task' });
     const attempts = taskStore.listAttempts(run.id, projectId);
     const verification = taskStore.getLatestVerification(run.id, projectId);
     const delivery = taskStore.getDeliveryForRun(run.id, projectId);
-    return res.json({ run, attempts, verification, delivery });
+    const project = defaultProjectStore.getProject(projectId);
+    const payload = buildSanitizedRunEvidence({
+      run,
+      task: scopedTask,
+      attempts,
+      verification,
+      delivery,
+      projectRepoLocalPath: project?.repository?.localPath,
+    });
+    return res.json({
+      ...payload,
+      runs,
+    });
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Failed to get task runs') });
   }

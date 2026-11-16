@@ -740,6 +740,14 @@ export class TaskStore {
     return this.mapRunRow(row);
   }
 
+  public listRunsForTask(taskId: string, projectId?: string): TaskRunRecord[] {
+    const stmt = projectId
+      ? this.db.prepare('SELECT * FROM task_runs WHERE task_id = ? AND project_id = ? ORDER BY created_at DESC')
+      : this.db.prepare('SELECT * FROM task_runs WHERE task_id = ? ORDER BY created_at DESC');
+    const rows = (projectId ? stmt.all(taskId, projectId) : stmt.all(taskId)) as any[];
+    return rows.map((row) => this.mapRunRow(row));
+  }
+
   public updateRun(id: string, updates: Partial<TaskRunRecord>, projectId?: string): void {
     const current = projectId ? this.getRunScoped(id, projectId) : this.getRun(id);
     if (!current) throw new DomainError(`Run ${id} not found${projectId ? ` in project ${projectId}` : ''}`);
