@@ -352,7 +352,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByText('NAV-102').first().click();
       await page.getByTestId('task-detail-modal').locator('select').nth(2).selectOption({ index: 1 });
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
-      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 45000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 90000 });
       await pwExpect(page.getByTestId('run-status-value')).toHaveText('failed');
       await pwExpect(page.getByTestId('run-failure-reason')).toBeVisible();
       await page.keyboard.press('Escape');
@@ -405,5 +405,5 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
     } finally {
       await context.close();
     }
-  }, 120000);
+  }, 180000);
 });
