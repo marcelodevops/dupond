@@ -239,6 +239,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
 
       // Configure Naviera repo + Gemini key
       await page.getByTestId('open-project-settings-btn').click();
+      await page.getByTestId('project-tab-repository').click();
       await page.getByTestId('project-local-path-input').fill(targetRepoDir);
       await page.getByTestId('project-target-branch-input').fill('main');
       await page.getByTestId('project-repo-url-input').fill(remoteDir);
