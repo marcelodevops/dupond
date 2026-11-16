@@ -8,6 +8,8 @@ import crypto from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { TaskStore } from '../src/server/db/database.js';
 import { ProjectStore } from '../src/server/projects/projectStore.js';
+import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.js';
+import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.js';
 import { buildSanitizedRunEvidence, MAX_DIFF_CHARS, MAX_LOG_CHARS, MAX_CHECK_OUTPUT_CHARS } from '../src/server/runs/runEvidence.js';
 import { computeEvidenceBinding } from '../src/server/verification/evidenceBinding.js';
 
@@ -558,5 +560,346 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     assert.strictEqual(freshStore.getUnresolvedReviewFeedback(taskA.id, projA.id).length, 1);
     assert.strictEqual(freshStore.getUnresolvedReviewFeedback(taskA.id, projB.id).length, 0);
     freshStore.getRawDb().close();
+  }, 25000);
+
+  it('requires complete candidate binding on delivery and revalidates before external git side effects', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    const remoteDir = path.join(tmpDir, 'remote.git');
+    fs.mkdirSync(repoDir, { recursive: true });
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'ignore' });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: repoDir, stdio: 'ignore' });
+    fs.writeFileSync(path.join(repoDir, 'README.md'), 'init\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: repoDir, stdio: 'ignore' });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+    fs.writeFileSync(path.join(repoDir, 'feature.ts'), 'export const feature = 1;\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'feat: add feature'], { cwd: repoDir, stdio: 'ignore' });
+    const candidateSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+    const remoteRefsBefore = execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).trim();
+
+    const store = new TaskStore(dbPath);
+    const projectStore = new ProjectStore(store);
+    const proj = projectStore.createProject({
+      name: 'Delivery Binding Proj',
+      actor: 'test-actor',
+    });
+
+    const task = store.createTask({
+      id: 'task-deliver-1',
+      projectId: proj.id,
+      key: 'DEL-1',
+      title: 'Deliverable Task',
+      description: 'Must bind exact candidate',
+      status: 'review',
+      priority: 'high',
+      targetRepo: 'owner/repo',
+      baseCommit: baseSha,
+      allowedPaths: ['**/*'],
+      protectedPaths: ['.env*'],
+      verificationCommands: ['npm test'],
+      acceptanceCriteria: [{ id: 'ac-1', title: 'ok', completed: true }],
+      workerConfig: { provider: 'gemini', model: 'gemini-3.8-flash' },
+      maxAttempts: 2,
+      timeoutSeconds: 60,
+      requireApproval: true,
+    });
+
+    const run1 = store.createRun({
+      taskId: task.id,
+      projectId: proj.id,
+      status: 'completed',
+      targetRepo: 'owner/repo',
+      baseCommit: baseSha,
+      targetBranch: 'dupond/del-1',
+      currentAttempt: 1,
+      durationMs: 50,
+    });
+    const att1 = store.createAttempt({
+      runId: run1.id,
+      attemptNumber: 1,
+      status: 'succeeded',
+      workerType: 'gemini:gemini-3.8-flash',
+      filesModified: ['feature.ts'],
+      durationMs: 40,
+      startedAt: new Date().toISOString(),
+    });
+
+    const binding1 = computeEvidenceBinding(task);
+    const ver1 = store.recordVerification({
+      runId: run1.id,
+      attemptId: att1.id,
+      revisionSha: candidateSha,
+      revisionTreeSha: execFileSync('git', ['rev-parse', `${candidateSha}^{tree}`], { cwd: repoDir, encoding: 'utf8' }).trim(),
+      passed: true,
+      checks: [{ command: 'npm test', exitCode: 0, passed: true, durationMs: 10, stdout: 'ok', stderr: '' }],
+      criteriaVerified: ['ac-1'],
+      requirementsFingerprint: binding1.requirementsFingerprint,
+      verificationConfigFingerprint: binding1.verificationConfigFingerprint,
+      evidenceBindingVersion: binding1.evidenceBindingVersion,
+    });
+
+    const fullBinding = {
+      runId: run1.id,
+      verificationId: ver1.id,
+      revisionSha: candidateSha,
+      requirementsFingerprint: binding1.requirementsFingerprint,
+      verificationConfigFingerprint: binding1.verificationConfigFingerprint,
+      evidenceBindingVersion: binding1.evidenceBindingVersion,
+    };
+
+    // 1. Direct TaskStore.validateDeliveryCandidateBinding rejects omitted/empty/malformed fields
+    const emptyCheck = store.validateDeliveryCandidateBinding({
+      projectId: proj.id,
+      runId: run1.id,
+      expectedVerificationId: '',
+      expectedRevisionSha: candidateSha,
+      expectedRequirementsFingerprint: binding1.requirementsFingerprint,
+      expectedVerificationConfigFingerprint: binding1.verificationConfigFingerprint,
+      expectedEvidenceBindingVersion: binding1.evidenceBindingVersion,
+    });
+    assert.strictEqual(emptyCheck.ok, false);
+    if (!emptyCheck.ok) {
+      assert.strictEqual(emptyCheck.status, 400);
+      assert.strictEqual(emptyCheck.code, 'CANDIDATE_BINDING_REQUIRED');
+    }
+
+    const malformedCheck = store.validateDeliveryCandidateBinding({
+      projectId: proj.id,
+      runId: run1.id,
+      expectedVerificationId: ver1.id,
+      expectedRevisionSha: 'not-a-sha',
+      expectedRequirementsFingerprint: binding1.requirementsFingerprint,
+      expectedVerificationConfigFingerprint: binding1.verificationConfigFingerprint,
+      expectedEvidenceBindingVersion: binding1.evidenceBindingVersion,
+    });
+    assert.strictEqual(malformedCheck.ok, false);
+    if (!malformedCheck.ok) {
+      assert.strictEqual(malformedCheck.status, 400);
+      assert.strictEqual(malformedCheck.code, 'MALFORMED_CANDIDATE_BINDING');
+    }
+    assert.strictEqual(
+      store.validateDeliveryCandidateBinding({
+        projectId: proj.id,
+        runId: run1.id,
+        expectedVerificationId: ver1.id,
+        expectedRevisionSha: candidateSha,
+        expectedRequirementsFingerprint: binding1.requirementsFingerprint,
+        expectedVerificationConfigFingerprint: binding1.verificationConfigFingerprint,
+        expectedEvidenceBindingVersion: binding1.evidenceBindingVersion,
+      }).ok,
+      true,
+    );
+
+    const authToken = 'test-auth-token';
+    const approvalToken = 'test-approval-token';
+    const port = await getFreePort();
+    serverProc = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PORT: String(port),
+        DUPOND_DB_PATH: dbPath,
+        DUPOND_STATE_FILE: statePath,
+        DUPOND_CONN_KEY_PATH: keyPath,
+        DUPOND_AUTH_TOKEN: authToken,
+        DUPOND_APPROVAL_TOKEN: approvalToken,
+      },
+      detached: true,
+      stdio: 'ignore',
+    });
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 40; i++) {
+      try {
+        const r = await fetch(`${baseUrl}/api/health`);
+        if (r.ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    const headers = {
+      Authorization: `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+      'X-Dupond-Project-Id': proj.id,
+      'X-Dupond-Approval-Token': approvalToken,
+    };
+
+    // 2. HTTP /api/delivery/dispatch rejects runId-only, omitted/empty fields, malformed SHA, and stale verification
+    const invalidPayloads: Array<{ body: Record<string, unknown>; expectedStatus: number; expectedCode: string }> = [
+      { body: { isApproved: true, runId: run1.id }, expectedStatus: 400, expectedCode: 'CANDIDATE_BINDING_REQUIRED' },
+      { body: { isApproved: true, ...fullBinding, verificationId: '' }, expectedStatus: 400, expectedCode: 'CANDIDATE_BINDING_REQUIRED' },
+      { body: { isApproved: true, ...fullBinding, revisionSha: '' }, expectedStatus: 400, expectedCode: 'CANDIDATE_BINDING_REQUIRED' },
+      { body: { isApproved: true, ...fullBinding, requirementsFingerprint: undefined }, expectedStatus: 400, expectedCode: 'CANDIDATE_BINDING_REQUIRED' },
+      { body: { isApproved: true, ...fullBinding, verificationConfigFingerprint: '   ' }, expectedStatus: 400, expectedCode: 'CANDIDATE_BINDING_REQUIRED' },
+      { body: { isApproved: true, ...fullBinding, evidenceBindingVersion: '' }, expectedStatus: 400, expectedCode: 'CANDIDATE_BINDING_REQUIRED' },
+      { body: { isApproved: true, ...fullBinding, revisionSha: 'bad-sha!' }, expectedStatus: 400, expectedCode: 'MALFORMED_CANDIDATE_BINDING' },
+      { body: { isApproved: true, ...fullBinding, verificationId: 'stale-ver-id' }, expectedStatus: 409, expectedCode: 'STALE_CANDIDATE_REVIEW' },
+    ];
+
+    for (const tc of invalidPayloads) {
+      const res = await fetch(`${baseUrl}/api/delivery/dispatch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(tc.body),
+      });
+      assert.strictEqual(res.status, tc.expectedStatus, `Expected ${tc.expectedStatus} for ${JSON.stringify(tc.body)}`);
+      const json = (await res.json()) as any;
+      assert.strictEqual(json.code, tc.expectedCode);
+    }
+
+    assert.strictEqual(execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).trim(), remoteRefsBefore);
+    assert.strictEqual(store.getDeliveryForRun(run1.id), null);
+
+    // 3. Revalidation inside GitHubDeliveryService.dispatchDelivery blocks rejection or candidate replacement after preflight
+    const verifier = new AuthoritativeVerifier();
+    const deliveryService = new GitHubDeliveryService(store, verifier);
+
+    // 3a. Candidate rejected (Request Changes) after preflight validation passes
+    const preflightA = store.validateDeliveryCandidateBinding({
+      projectId: proj.id,
+      runId: run1.id,
+      expectedVerificationId: ver1.id,
+      expectedRevisionSha: candidateSha,
+      expectedRequirementsFingerprint: binding1.requirementsFingerprint,
+      expectedVerificationConfigFingerprint: binding1.verificationConfigFingerprint,
+      expectedEvidenceBindingVersion: binding1.evidenceBindingVersion,
+    });
+    assert.strictEqual(preflightA.ok, true);
+
+    const rcRes = store.submitReviewDecision({
+      taskId: task.id,
+      projectId: proj.id,
+      decision: 'changes_requested',
+      comment: 'Rejected after preflight',
+      actor: 'test-actor',
+      expectedRunId: run1.id,
+      expectedVerificationId: ver1.id,
+      expectedRevisionSha: candidateSha,
+      expectedRequirementsFingerprint: binding1.requirementsFingerprint,
+      expectedVerificationConfigFingerprint: binding1.verificationConfigFingerprint,
+      expectedEvidenceBindingVersion: binding1.evidenceBindingVersion,
+    });
+    assert.strictEqual(rcRes.ok, true);
+
+    const dispatchAfterReject = await deliveryService.dispatchDelivery({
+      runId: run1.id,
+      isApproved: true,
+      disposableRemoteDir: remoteDir,
+      candidateBinding: {
+        verificationId: ver1.id,
+        revisionSha: candidateSha,
+        requirementsFingerprint: binding1.requirementsFingerprint,
+        verificationConfigFingerprint: binding1.verificationConfigFingerprint,
+        evidenceBindingVersion: binding1.evidenceBindingVersion,
+      },
+    });
+    assert.strictEqual(dispatchAfterReject.success, false);
+    assert.strictEqual(dispatchAfterReject.status, 409);
+    assert.strictEqual(dispatchAfterReject.code, 'CANDIDATE_REJECTED');
+    assert.strictEqual(execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).trim(), remoteRefsBefore);
+    assert.strictEqual(store.getDeliveryForRun(run1.id), null);
+
+    // 3b. Candidate replaced by a newer run after preflight validation passes
+    const task2 = store.createTask({
+      id: 'task-deliver-2',
+      projectId: proj.id,
+      key: 'DEL-2',
+      title: 'Replaced Candidate Task',
+      description: 'Will be superseded before dispatch',
+      status: 'review',
+      priority: 'high',
+      targetRepo: 'owner/repo',
+      baseCommit: baseSha,
+      allowedPaths: ['**/*'],
+      protectedPaths: ['.env*'],
+      verificationCommands: ['npm test'],
+      acceptanceCriteria: [{ id: 'ac-1', title: 'ok', completed: true }],
+      workerConfig: { provider: 'gemini', model: 'gemini-3.8-flash' },
+      maxAttempts: 2,
+      timeoutSeconds: 60,
+      requireApproval: true,
+    });
+    const run2 = store.createRun({
+      taskId: task2.id,
+      projectId: proj.id,
+      status: 'completed',
+      targetRepo: 'owner/repo',
+      baseCommit: baseSha,
+      targetBranch: 'dupond/del-2',
+      currentAttempt: 1,
+      durationMs: 50,
+    });
+    const att2 = store.createAttempt({
+      runId: run2.id,
+      attemptNumber: 1,
+      status: 'succeeded',
+      workerType: 'gemini:gemini-3.8-flash',
+      filesModified: ['feature.ts'],
+      durationMs: 40,
+      startedAt: new Date().toISOString(),
+    });
+    const binding2 = computeEvidenceBinding(task2);
+    const ver2 = store.recordVerification({
+      runId: run2.id,
+      attemptId: att2.id,
+      revisionSha: candidateSha,
+      revisionTreeSha: execFileSync('git', ['rev-parse', `${candidateSha}^{tree}`], { cwd: repoDir, encoding: 'utf8' }).trim(),
+      passed: true,
+      checks: [{ command: 'npm test', exitCode: 0, passed: true, durationMs: 10, stdout: 'ok', stderr: '' }],
+      criteriaVerified: ['ac-1'],
+      requirementsFingerprint: binding2.requirementsFingerprint,
+      verificationConfigFingerprint: binding2.verificationConfigFingerprint,
+      evidenceBindingVersion: binding2.evidenceBindingVersion,
+    });
+
+    const preflightB = store.validateDeliveryCandidateBinding({
+      projectId: proj.id,
+      runId: run2.id,
+      expectedVerificationId: ver2.id,
+      expectedRevisionSha: candidateSha,
+      expectedRequirementsFingerprint: binding2.requirementsFingerprint,
+      expectedVerificationConfigFingerprint: binding2.verificationConfigFingerprint,
+      expectedEvidenceBindingVersion: binding2.evidenceBindingVersion,
+    });
+    assert.strictEqual(preflightB.ok, true);
+
+    // Supersede run2 with run3 before dispatchDelivery executes
+    store.createRun({
+      taskId: task2.id,
+      projectId: proj.id,
+      status: 'running',
+      targetRepo: 'owner/repo',
+      baseCommit: baseSha,
+      targetBranch: 'dupond/del-2b',
+      currentAttempt: 1,
+      durationMs: 0,
+    });
+
+    const dispatchSuperseded = await deliveryService.dispatchDelivery({
+      runId: run2.id,
+      isApproved: true,
+      disposableRemoteDir: remoteDir,
+      candidateBinding: {
+        verificationId: ver2.id,
+        revisionSha: candidateSha,
+        requirementsFingerprint: binding2.requirementsFingerprint,
+        verificationConfigFingerprint: binding2.verificationConfigFingerprint,
+        evidenceBindingVersion: binding2.evidenceBindingVersion,
+      },
+    });
+    assert.strictEqual(dispatchSuperseded.success, false);
+    assert.strictEqual(dispatchSuperseded.status, 409);
+    assert.strictEqual(dispatchSuperseded.code, 'STALE_CANDIDATE_REVIEW');
+    assert.strictEqual(execFileSync('git', ['show-ref'], { cwd: remoteDir, encoding: 'utf8' }).trim(), remoteRefsBefore);
+    assert.strictEqual(store.getDeliveryForRun(run2.id), null);
+
+    store.getRawDb().close();
   }, 25000);
 });
