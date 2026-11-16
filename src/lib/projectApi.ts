@@ -484,6 +484,12 @@ export const projectApi = {
       decision: 'approve' | 'request_changes';
       comment?: string;
       approvedBy?: string;
+      runId: string;
+      verificationId: string;
+      revisionSha: string;
+      requirementsFingerprint: string;
+      verificationConfigFingerprint: string;
+      evidenceBindingVersion: string;
     },
     approvalToken?: string
   ): Promise<ReviewTaskResponse> {
@@ -527,6 +533,11 @@ export const projectApi = {
       approvedBy?: string;
       repoUrl?: string;
       targetBaseBranch?: string;
+      verificationId?: string;
+      revisionSha?: string;
+      requirementsFingerprint?: string;
+      verificationConfigFingerprint?: string;
+      evidenceBindingVersion?: string;
     },
     approvalToken?: string
   ): Promise<DeliverRunResponse> {

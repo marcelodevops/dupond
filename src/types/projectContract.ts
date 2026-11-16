@@ -458,6 +458,25 @@ export interface VerificationSummary {
   requirementsFingerprint?: string | null;
   verificationConfigFingerprint?: string | null;
   evidenceBindingVersion?: string | null;
+  revokedAt?: string | null;
+  revokedReason?: string | null;
+}
+
+export interface ReviewDecisionSummary {
+  id: string;
+  projectId: string;
+  taskId: string;
+  runId: string;
+  verificationId: string;
+  revisionSha: string;
+  requirementsFingerprint: string;
+  verificationConfigFingerprint: string;
+  evidenceBindingVersion: string;
+  decision: 'approved' | 'changes_requested';
+  comment?: string | null;
+  actor: string;
+  resolvedByRunId?: string | null;
+  createdAt: string;
 }
 
 export interface DeliverySummary {
@@ -499,6 +518,8 @@ export interface TaskRunsEvidenceResponse {
   attempts: RunAttemptSummary[];
   verification: VerificationSummary | null;
   delivery: DeliverySummary | null;
+  reviewDecisions?: ReviewDecisionSummary[];
+  unresolvedReviewFeedback?: ReviewDecisionSummary[];
   evidence: CandidateEvidenceSummary;
   runs?: TaskRunSummary[];
 }

@@ -45,6 +45,14 @@ interface TaskDetailModalProps {
   onReviewTask?: (
     taskId: string,
     decision: 'approve' | 'request_changes',
+    candidateBinding: {
+      runId: string;
+      verificationId: string;
+      revisionSha: string;
+      requirementsFingerprint: string;
+      verificationConfigFingerprint: string;
+      evidenceBindingVersion: string;
+    },
     comment?: string,
     approvalToken?: string
   ) => Promise<{ ok: boolean; error?: string; code?: string }>;
@@ -52,7 +60,14 @@ interface TaskDetailModalProps {
     taskId: string,
     runId: string,
     isApproved: boolean,
-    approvalToken?: string
+    approvalToken?: string,
+    candidateBinding?: {
+      verificationId?: string;
+      revisionSha?: string;
+      requirementsFingerprint?: string;
+      verificationConfigFingerprint?: string;
+      evidenceBindingVersion?: string;
+    }
   ) => Promise<{ ok: boolean; error?: string; code?: string; prUrl?: string }>;
 }
 
@@ -557,7 +572,56 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 </div>
               )}
 
-              {task.status === 'review' && runEvidence?.verification?.passed && runEvidence?.run && (onReviewTask || onDeliverRun) && (
+              {runEvidence?.unresolvedReviewFeedback && runEvidence.unresolvedReviewFeedback.length > 0 && (
+                <div
+                  data-testid="task-unresolved-review-feedback"
+                  className="p-2.5 rounded-lg bg-amber-950/50 border border-amber-700/60 text-amber-100 text-[11px] space-y-1"
+                >
+                  <div className="font-semibold text-amber-300">
+                    Unresolved Operator Change Requests ({runEvidence.unresolvedReviewFeedback.length})
+                  </div>
+                  {runEvidence.unresolvedReviewFeedback.map((fb) => (
+                    <div key={fb.id} className="text-[11px] text-slate-200">
+                      <span className="font-mono text-amber-300">[{fb.revisionSha.slice(0, 10)}]</span>{' '}
+                      {fb.comment || 'Changes requested.'}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {runEvidence?.reviewDecisions && runEvidence.reviewDecisions.length > 0 && (
+                <div
+                  data-testid="run-review-decisions"
+                  className="p-2 rounded-lg bg-slate-950/70 border border-slate-800 text-[11px] space-y-1"
+                >
+                  <div className="font-semibold text-slate-300">
+                    Review History ({runEvidence.reviewDecisions.length})
+                  </div>
+                  {runEvidence.reviewDecisions.map((rev) => (
+                    <div key={rev.id} className="text-[10px] text-slate-300">
+                      <span className="font-mono uppercase text-amber-300">{rev.decision}</span> by {rev.actor} on{' '}
+                      <span className="font-mono">{rev.revisionSha.slice(0, 10)}</span>
+                      {rev.comment ? `: ${rev.comment}` : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {task.status === 'review' && runEvidence?.verification?.passed && !runEvidence.verification.revokedAt && runEvidence?.run && (onReviewTask || onDeliverRun) && (() => {
+                const ver = runEvidence.verification;
+                const candidateBinding =
+                  ver.requirementsFingerprint && ver.verificationConfigFingerprint && ver.evidenceBindingVersion
+                    ? {
+                        runId: runEvidence.run.id,
+                        verificationId: ver.id,
+                        revisionSha: ver.revisionSha,
+                        requirementsFingerprint: ver.requirementsFingerprint,
+                        verificationConfigFingerprint: ver.verificationConfigFingerprint,
+                        evidenceBindingVersion: ver.evidenceBindingVersion,
+                      }
+                    : null;
+                if (!candidateBinding) return null;
+                return (
                 <div className="space-y-2 pt-1 border-t border-amber-800/40">
                   <textarea
                     data-testid="review-feedback-input"
@@ -606,7 +670,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                           setReviewActionError(null);
                           setIsSubmittingReviewOrDelivery(true);
                           try {
-                            const res = await onDeliverRun(task.id, runEvidence.run.id, true, approvalTokenInput);
+                            const res = await onDeliverRun(task.id, runEvidence.run.id, true, approvalTokenInput, candidateBinding);
                             if (!res.ok) {
                               if (res.code === 'APPROVAL_CREDENTIAL_REQUIRED') {
                                 setShowApprovalTokenField(true);
@@ -632,7 +696,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                           setReviewActionError(null);
                           setIsSubmittingReviewOrDelivery(true);
                           try {
-                            const res = await onReviewTask(task.id, 'approve', reviewComment, approvalTokenInput);
+                            const res = await onReviewTask(task.id, 'approve', candidateBinding, reviewComment, approvalTokenInput);
                             if (!res.ok) {
                               if (res.code === 'APPROVAL_CREDENTIAL_REQUIRED') {
                                 setShowApprovalTokenField(true);
@@ -660,7 +724,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                           setReviewActionError(null);
                           setIsSubmittingReviewOrDelivery(true);
                           try {
-                            const res = await onDeliverRun(task.id, runEvidence.run.id, true, approvalTokenInput);
+                            const res = await onDeliverRun(task.id, runEvidence.run.id, true, approvalTokenInput, candidateBinding);
                             if (!res.ok) {
                               if (res.code === 'APPROVAL_CREDENTIAL_REQUIRED') {
                                 setShowApprovalTokenField(true);
@@ -686,7 +750,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                           setReviewActionError(null);
                           setIsSubmittingReviewOrDelivery(true);
                           try {
-                            const res = await onReviewTask(task.id, 'request_changes', reviewComment);
+                            const res = await onReviewTask(task.id, 'request_changes', candidateBinding, reviewComment);
                             if (!res.ok) {
                               setReviewActionError(res.error || 'Request changes failed.');
                             } else {
@@ -704,7 +768,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                     )}
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </div>
           )}
 

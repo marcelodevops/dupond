@@ -573,6 +573,14 @@ function AppWorkspace() {
   const handleReviewTask = async (
     taskId: string,
     decision: 'approve' | 'request_changes',
+    candidateBinding: {
+      runId: string;
+      verificationId: string;
+      revisionSha: string;
+      requirementsFingerprint: string;
+      verificationConfigFingerprint: string;
+      evidenceBindingVersion: string;
+    },
     comment?: string,
     approvalToken?: string
   ): Promise<{ ok: boolean; error?: string; code?: string }> => {
@@ -581,7 +589,7 @@ function AppWorkspace() {
       const res = await projectApi.reviewTask(
         capturedProjectId,
         taskId,
-        { decision, comment, approvedBy: 'operator' },
+        { decision, comment, approvedBy: 'operator', ...candidateBinding },
         approvalToken
       );
       if (capturedProjectId !== activeProjectIdRef.current) {
@@ -612,7 +620,14 @@ function AppWorkspace() {
     taskId: string,
     runId: string,
     isApproved: boolean,
-    approvalToken?: string
+    approvalToken?: string,
+    candidateBinding?: {
+      verificationId?: string;
+      revisionSha?: string;
+      requirementsFingerprint?: string;
+      verificationConfigFingerprint?: string;
+      evidenceBindingVersion?: string;
+    }
   ): Promise<{ ok: boolean; error?: string; code?: string; prUrl?: string }> => {
     const capturedProjectId = currentProject?.id || getActiveProjectId() || 'default';
     try {
@@ -624,6 +639,7 @@ function AppWorkspace() {
           approvedBy: isApproved ? 'operator' : undefined,
           repoUrl: currentProject?.repository?.repoUrl || integrationConfig?.repository?.repoUrl || undefined,
           targetBaseBranch: currentProject?.repository?.defaultBranch || integrationConfig?.repository?.defaultBranch || undefined,
+          ...(candidateBinding || {}),
         },
         approvalToken
       );
