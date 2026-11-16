@@ -172,6 +172,13 @@ async function runLiveParityDemo() {
     isApproved: true,
     approvedBy: 'marcelodevops-operator',
     repoUrl: 'marcelodevops/dupond-live-demo',
+    candidateBinding: {
+      verificationId: v?.id || '',
+      revisionSha: v?.revisionSha || '',
+      requirementsFingerprint: v?.requirementsFingerprint || '',
+      verificationConfigFingerprint: v?.verificationConfigFingerprint || '',
+      evidenceBindingVersion: v?.evidenceBindingVersion || '',
+    },
   });
   console.log(`[Delivery Success] ${deliveryResult.success}`);
   console.log(`[Pull Request URL] ${deliveryResult.prUrl || deliveryResult.deliveryRecord?.prUrl}`);

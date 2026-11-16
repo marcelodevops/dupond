@@ -375,7 +375,11 @@ export class ProjectStore {
           ...(s.checkCommand ? { checkCommand: s.checkCommand } : {}),
         }));
 
-        const cleanCriteria = cleanSubtasks.map((s) => ({
+        const rawCriteria =
+          Array.isArray((t as any).acceptanceCriteria) && (t as any).acceptanceCriteria.length > 0
+            ? (t as any).acceptanceCriteria
+            : cleanSubtasks;
+        const cleanCriteria = rawCriteria.map((s: any) => ({
           id: s.id,
           title: s.title,
           completed: false,
@@ -383,8 +387,8 @@ export class ProjectStore {
         }));
 
         const verificationCommands = cleanCriteria
-          .filter((c) => c.checkCommand)
-          .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
+          .filter((c: any) => c.checkCommand)
+          .map((c: any) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
 
         this.db.prepare(`
           INSERT INTO tasks (

@@ -49,6 +49,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
   let mockGeminiPort: number;
   let mockGeminiServer: http.Server;
   let mockWorkerMode: 'pass' | 'fail' = 'pass';
+  let lastWorkerPrompt = '';
   let serverProc: ChildProcess | null = null;
   let serverLogs = '';
   let browser: Browser;
@@ -68,6 +69,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       DUPOND_BIND_HOST: '127.0.0.1',
       NODE_ENV: 'production',
       DUPOND_AUTH_TOKEN: SYNTH_AUTH_TOKEN,
+      DUPOND_APPROVAL_TOKEN: 'e2e_approval_token_01',
       DUPOND_DB_PATH: dbPath,
       DUPOND_STATE_FILE: statePath,
       DUPOND_CONN_KEY_PATH: keyPath,
@@ -180,6 +182,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
 
         // Coding worker turn 1: emit write_file tool calls; turn 2 (after functionResponse): emit final text
         if (!body.includes('functionResponse')) {
+          lastWorkerPrompt = body;
           const parts =
             mockWorkerMode === 'fail'
               ? [
@@ -244,9 +247,15 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
 
     const page = await context.newPage();
     const apiUrls: string[] = [];
+    const stateMutationFailures: number[] = [];
     page.on('request', (req) => {
       if (req.url().includes('/api/')) {
         apiUrls.push(`${req.method()} ${new URL(req.url()).pathname}`);
+      }
+    });
+    page.on('response', (res) => {
+      if (res.request().method() === 'POST' && new URL(res.url()).pathname === '/api/orchestrate/state' && res.status() >= 400) {
+        stateMutationFailures.push(res.status());
       }
     });
 
@@ -308,7 +317,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       const specialistSelect = page.getByTestId('task-detail-modal').locator('select').nth(2);
       await specialistSelect.selectOption({ index: 1 });
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
-      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 45000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 90000 });
       await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded');
       await pwExpect(page.getByTestId('task-execution-run-id')).toContainText('Run: run-');
       await pwExpect(page.getByTestId('run-id-value')).toContainText('run-');
@@ -389,11 +398,58 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.unroute('**/api/orchestrate/tasks/*/transition', delayedHandler);
       await pwExpect(switcherBtn).toContainText('Secondary');
 
-      // Switch back to Naviera for mobile viewport check
+      // Switch back to Naviera for Review Decision -> Delivery -> Done + mobile viewport check
       await switcherBtn.click();
       await page.getByRole('button', { name: /Naviera/i }).click();
       await page.getByText('NAV-101').first().click();
       await pwExpect(page.getByTestId('run-candidate-diff')).toBeVisible();
+
+      // J: Request Changes -> To Do (feedback persists across restart & project switch) -> rejected evidence cannot restore Review -> Re-execute receives feedback -> Approve & Deliver PR -> Done
+      await pwExpect(page.getByTestId('request-changes-btn')).toBeVisible();
+      await page.getByTestId('review-feedback-input').fill('Please verify helper export');
+      await page.getByTestId('request-changes-btn').click();
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('todo');
+      await pwExpect(page.getByTestId('task-unresolved-review-feedback')).toContainText('Please verify helper export');
+
+      // Restart server & switch projects to confirm feedback durability and scoping
+      await stopAppServer();
+      await startAppServer();
+      await page.reload({ waitUntil: 'networkidle' });
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /Secondary/i }).click();
+      await pwExpect(switcherBtn).toContainText('Secondary');
+      assert.strictEqual(await page.evaluate(() => document.body.innerText.includes('Please verify helper export')), false);
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /Naviera/i }).click();
+      await page.getByText('NAV-101').first().click();
+      await pwExpect(page.getByTestId('task-unresolved-review-feedback')).toContainText('Please verify helper export');
+
+      // Rejected evidence cannot restore Review without fresh work
+      await page.getByTestId('task-detail-status-select').selectOption('review');
+      await pwExpect(page.getByTestId('task-transition-refusal')).toBeVisible();
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('todo');
+
+      // Re-execute: next worker receives unresolved operator feedback in prompt
+      lastWorkerPrompt = '';
+      mockWorkerMode = 'pass';
+      await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 90000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded');
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('review');
+      assert.ok(lastWorkerPrompt.includes('Please verify helper export'), 'Next worker prompt must include unresolved operator review feedback');
+
+      // Missing approval token -> 403 reveals token input
+      await page.getByTestId('approve-deliver-pr-btn').click();
+      await pwExpect(page.getByTestId('review-delivery-error')).toBeVisible();
+      await pwExpect(page.getByTestId('review-approval-token-input')).toBeVisible();
+
+      // Provide approval token -> Approve & Deliver PR -> Done
+      await page.getByTestId('review-approval-token-input').fill('e2e_approval_token_01');
+      await page.getByTestId('approve-deliver-pr-btn').click();
+      await pwExpect(page.getByTestId('run-delivery-status')).toBeVisible({ timeout: 20000 });
+      await pwExpect(page.getByTestId('run-delivery-status')).toContainText('PR:');
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('done');
+      assert.strictEqual(stateMutationFailures.length, 0, 'Secondary project metadata edits must not trigger POST /api/orchestrate/state 422');
 
       // I (part 2): Narrow mobile viewport check
       await page.setViewportSize({ width: 390, height: 844 });
@@ -405,5 +461,5 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
     } finally {
       await context.close();
     }
-  }, 180000);
+  }, 240000);
 });

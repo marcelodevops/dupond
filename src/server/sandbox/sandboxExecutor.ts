@@ -146,8 +146,8 @@ export class SandboxExecutor {
 
   public stopAndConfirmContainerRemoval(runtime: string, containerName: string): boolean {
     try {
-      // 1. Explicitly stop running container
-      spawnSync(runtime, ['stop', '-t', '1', containerName], { stdio: 'pipe', encoding: 'utf-8' });
+      // 1. Immediately kill running container (SIGKILL avoids waiting on PID 1 grace period)
+      spawnSync(runtime, ['kill', containerName], { stdio: 'pipe', encoding: 'utf-8' });
       // 2. Force-remove container
       spawnSync(runtime, ['rm', '-f', containerName], { stdio: 'pipe', encoding: 'utf-8' });
       // 3. Confirm removal via inspect
@@ -357,6 +357,8 @@ ${networkRule}
         '--network', options.allowNetwork ? 'bridge' : 'none',
         ...containerMounts,
         '-w', realWorktree,
+        '--env', 'HOME=/tmp',
+        '--env', 'TMPDIR=/tmp',
         '--env', 'NODE_ENV=test',
         '--env', 'CI=true',
         'node:22-bookworm',
@@ -364,6 +366,23 @@ ${networkRule}
       ];
     } else {
       throw new DomainError('Restricted execution sandbox unavailable: Host lacks required container runtime (podman or docker) on Linux. Refusing to run untrusted code on host.');
+    }
+
+    // Container CLIs (rootless podman/docker) need host HOME/XDG_DATA_HOME to
+    // access pre-pulled image storage instead of re-pulling 1.1 GB into
+    // sandboxTmp on every run; container env remains isolated via --env flags.
+    const spawnEnv = containerName ? process.env : cleanEnv;
+
+    if (options.abortSignal?.aborted) {
+      return {
+        command: options.command,
+        exitCode: -1,
+        stdout: '',
+        stderr: 'Execution aborted before start.',
+        durationMs: Date.now() - startTime,
+        timedOut: false,
+        killed: true,
+      };
     }
 
     return new Promise<SandboxExecutionResult>((resolve) => {
@@ -375,7 +394,7 @@ ${networkRule}
       // Spawn in a separate process group (detached: true) so we can kill the whole tree
       const child: ChildProcess = spawn(execCmd, execArgs, {
         cwd: realWorktree,
-        env: cleanEnv,
+        env: spawnEnv,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -384,13 +403,21 @@ ${networkRule}
         this.activeProcesses.set(options.runId, child);
       }
 
+      let settled = false;
       const onAbort = () => {
         killed = true;
+        this.killProcessTree(child);
         if (containerName && (this.hasPodman || this.hasDocker)) {
           this.stopAndConfirmContainerRemoval(execCmd, containerName);
+          // If abort fired while podman/docker was still creating the container,
+          // retry cleanup shortly after so conmon cannot keep pipes open.
+          setTimeout(() => {
+            if (!settled) {
+              this.stopAndConfirmContainerRemoval(execCmd, containerName!);
+            }
+          }, 300).unref();
           if (options.runId) this.activeContainers.delete(options.runId);
         }
-        this.killProcessTree(child);
       };
 
       if (options.abortSignal) {
@@ -416,6 +443,7 @@ ${networkRule}
       }, timeoutMs);
 
       child.on('close', (code) => {
+        settled = true;
         clearTimeout(timer);
         if (options.abortSignal) {
           options.abortSignal.removeEventListener('abort', onAbort);

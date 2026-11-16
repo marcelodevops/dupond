@@ -10,6 +10,7 @@ import { SandboxExecutor } from '../src/server/sandbox/sandboxExecutor.ts';
 import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
 import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.ts';
 import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.ts';
+import { computeEvidenceBinding } from '../src/server/verification/evidenceBinding.ts';
 import { CodingWorkerAdapter, WorkerExecutionContext, WorkerExecutionResult } from '../src/server/worker/types.ts';
 import { coordinator, isMaskedSecret } from '../src/server/coordinator.ts';
 import { validateAuthToken, getExpectedToken } from '../src/server/auth.ts';
@@ -101,12 +102,24 @@ async function runAcceptanceSuite() {
     assert.strictEqual(run1.status, 'completed', 'Run 1 must succeed');
     assert.strictEqual(store.getTask(task1.id)?.status, 'review');
 
+    const bindingFor = (runId: string) => {
+      const v = store.getLatestVerification(runId)!;
+      return {
+        verificationId: v.id,
+        revisionSha: v.revisionSha,
+        requirementsFingerprint: v.requirementsFingerprint || '',
+        verificationConfigFingerprint: v.verificationConfigFingerprint || '',
+        evidenceBindingVersion: v.evidenceBindingVersion || '',
+      };
+    };
+
     // Deliver PR
     const delivery1 = await deliveryService.dispatchDelivery({
       runId: run1.id,
       isApproved: true,
       approvedBy: 'lead-engineer',
       disposableRemoteDir: disposableRemote,
+      candidateBinding: bindingFor(run1.id),
     });
 
     assert.strictEqual(delivery1.success, true);
@@ -490,12 +503,14 @@ async function runAcceptanceSuite() {
       isApproved: true,
       approvedBy: 'lead-engineer',
       disposableRemoteDir: disposableRemote,
+      candidateBinding: bindingFor(run1.id),
     });
     const repeatDelivery2 = await deliveryService.dispatchDelivery({
       runId: run1.id,
       isApproved: true,
       approvedBy: 'lead-engineer',
       disposableRemoteDir: disposableRemote,
+      candidateBinding: bindingFor(run1.id),
     });
     assert.strictEqual(repeatDelivery1.prUrl, repeatDelivery2.prUrl);
     assert.ok(repeatDelivery2.message?.includes('Existing pull request reconciled'));
@@ -575,19 +590,24 @@ async function runAcceptanceSuite() {
       startedAt: new Date().toISOString(),
     });
 
+    const approvalBinding = computeEvidenceBinding(approvalTask);
     store.recordVerification({
       runId: approvalRun.id,
       attemptId: approvalAttempt.id,
-      revisionSha: 'sha-appr',
+      revisionSha: 'abcdef1234567890abcdef1234567890abcdef12',
       passed: true,
       checks: [{ command: 'echo ok', exitCode: 0, stdout: 'ok', stderr: '', passed: true, durationMs: 5 }],
       criteriaVerified: [],
+      requirementsFingerprint: approvalBinding.requirementsFingerprint,
+      verificationConfigFingerprint: approvalBinding.verificationConfigFingerprint,
+      evidenceBindingVersion: approvalBinding.evidenceBindingVersion,
     });
 
     const unapprovedDelivery = await deliveryService.dispatchDelivery({
       runId: approvalRun.id,
       isApproved: false, // Unauthorized!
       disposableRemoteDir: disposableRemote,
+      candidateBinding: bindingFor(approvalRun.id),
     });
     assert.strictEqual(unapprovedDelivery.success, false);
     assert.strictEqual(unapprovedDelivery.status, 403);

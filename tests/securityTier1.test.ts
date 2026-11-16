@@ -156,11 +156,19 @@ async function main() {
     // ------------------------------------------------------------------------
     // Test 5: delivery refuses option-injection in targetBaseBranch
     // ------------------------------------------------------------------------
+    const dummyBinding = {
+      verificationId: 'ver-dummy',
+      revisionSha: '9e8dcc66371e11b1a27f0e5b3b2c6b5e91c8e7a9',
+      requirementsFingerprint: 'req-fp',
+      verificationConfigFingerprint: 'cfg-fp',
+      evidenceBindingVersion: 'v1',
+    };
     const injectionDelivery = await defaultGitHubDelivery.dispatchDelivery({
       runId: 'does-not-exist',
       targetBaseBranch: '--upload-pack=evil',
       isApproved: true,
       approvedBy: 'attacker',
+      candidateBinding: dummyBinding,
     });
     assert.strictEqual(injectionDelivery.status, 400, 'option-injected base branch must be refused with 400');
     assert.strictEqual(injectionDelivery.blocked, true);
@@ -169,6 +177,7 @@ async function main() {
     const validRefUnknownRun = await defaultGitHubDelivery.dispatchDelivery({
       runId: 'does-not-exist',
       targetBaseBranch: 'main',
+      candidateBinding: dummyBinding,
     });
     assert.strictEqual(validRefUnknownRun.status, 404, 'valid base branch still reaches normal run resolution');
     console.log('✔ [PASS] dispatchDelivery validates targetBaseBranch before any git invocation');

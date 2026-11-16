@@ -8,6 +8,7 @@ import { TaskStore } from '../src/server/db/database.js';
 import { WorkspaceManager } from '../src/server/workspace/workspaceManager.js';
 import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.js';
 import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.js';
+import { computeEvidenceBinding } from '../src/server/verification/evidenceBinding.js';
 import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.js';
 import {
   resolveTargetRepository,
@@ -197,6 +198,17 @@ async function main() {
     execFileSync('git', ['push', 'origin', 'main'], { cwd: clone2Dir });
     const remoteBaseShaA = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: clone2Dir, encoding: 'utf-8' }).trim();
 
+    const bindingFor = (runId: string) => {
+      const v = store.getLatestVerification(runId)!;
+      return {
+        verificationId: v.id,
+        revisionSha: v.revisionSha,
+        requirementsFingerprint: v.requirementsFingerprint || '',
+        verificationConfigFingerprint: v.verificationConfigFingerprint || '',
+        evidenceBindingVersion: v.evidenceBindingVersion || '',
+      };
+    };
+
     // Delivery attempt 1: Notice that Clone 1 local repository does NOT have the new commit cached.
     // GitHubDeliveryService MUST fetch the remote base, merge it, re-verify, and invalidate approval!
     const deliveryAttempt1 = await deliveryService.dispatchDelivery({
@@ -205,6 +217,7 @@ async function main() {
       approvedBy: 'operator-1',
       repoUrl: 'example/dual-clone-app',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(runA.id),
     });
 
     assert.strictEqual(deliveryAttempt1.success, false, 'Delivery must block when remote base drift creates a new revision');
@@ -221,6 +234,7 @@ async function main() {
       approvedBy: 'operator-reapproved',
       repoUrl: 'example/dual-clone-app',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(runA.id),
     });
 
     assert.strictEqual(deliveryAttempt2.success, true, 'Delivery with re-approved merged commit must succeed');
@@ -293,6 +307,7 @@ async function main() {
       approvedBy: 'operator-1',
       repoUrl: 'example/dual-clone-app',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(runB.id),
     });
 
     assert.strictEqual(conflictResult.success, false, 'Delivery must fail when remote base conflicts');
@@ -359,6 +374,7 @@ async function main() {
       approvedBy: 'operator-1',
       repoUrl: 'example/dual-clone-app',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(runC.id),
     });
 
     assert.strictEqual(brokenCheckResult.success, false, 'Delivery must fail when combined changes fail re-validation');
@@ -378,6 +394,7 @@ async function main() {
       approvedBy: 'operator-1',
       repoUrl: 'example/dual-clone-app',
       targetBaseBranch: 'nonexistent-remote-branch-xyz',
+      candidateBinding: bindingFor(runA.id),
     });
 
     assert.strictEqual(unavailableResult.success, false, 'Delivery must fail when remote branch does not exist');
@@ -431,6 +448,7 @@ async function main() {
       approvedBy: 'operator-override',
       repoUrl: 'evil-org/attacker-repo',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(runA.id),
     });
     assert.strictEqual(overrideAttempt.success, false, 'Conflicting request repoUrl must be refused');
     assert.strictEqual(overrideAttempt.status, 400);
@@ -444,6 +462,7 @@ async function main() {
       approvedBy: 'operator-agree',
       repoUrl: 'example/dual-clone-app',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(runA.id),
     });
     assert.ok(!agreeingAttempt.error?.includes('conflicts with the target recorded'), 'Agreeing repoUrl must not be refused as an override');
     console.log('✔ [PASS] Request repoUrl agreeing with the persisted target is still accepted');
@@ -485,6 +504,7 @@ async function main() {
       durationMs: 100,
     });
     const guardAttempt = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: mirrorWorktree.worktreePath, encoding: 'utf-8' }).trim();
+    const guardBinding = computeEvidenceBinding(guardTask);
     store.recordVerification({
       runId: guardRun.id,
       attemptId: store.createAttempt({
@@ -500,6 +520,9 @@ async function main() {
       passed: true,
       checks: [{ command: 'echo ok', exitCode: 0, stdout: 'ok', stderr: '', passed: true, durationMs: 5 }],
       criteriaVerified: ['crit-guard'],
+      requirementsFingerprint: guardBinding.requirementsFingerprint,
+      verificationConfigFingerprint: guardBinding.verificationConfigFingerprint,
+      evidenceBindingVersion: guardBinding.evidenceBindingVersion,
     });
 
     const guardDelivery = await deliveryService.dispatchDelivery({
@@ -507,6 +530,7 @@ async function main() {
       isApproved: true,
       approvedBy: 'operator-guard',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(guardRun.id),
     });
     assert.strictEqual(guardDelivery.success, false, 'Mismatched delivery remote must be refused');
     assert.strictEqual(guardDelivery.status, 400);
@@ -544,12 +568,33 @@ async function main() {
       currentAttempt: 1,
       durationMs: 100,
     });
+    const unrecordedBinding = computeEvidenceBinding(unrecordedTask);
+    store.recordVerification({
+      runId: unrecordedRun.id,
+      attemptId: store.createAttempt({
+        runId: unrecordedRun.id,
+        attemptNumber: 1,
+        status: 'succeeded',
+        workerType: 'test',
+        filesModified: [],
+        durationMs: 10,
+        startedAt: new Date().toISOString(),
+      }).id,
+      revisionSha: workerCommitA,
+      passed: true,
+      checks: [{ command: 'echo ok', exitCode: 0, stdout: 'ok', stderr: '', passed: true, durationMs: 5 }],
+      criteriaVerified: ['crit-unrecorded'],
+      requirementsFingerprint: unrecordedBinding.requirementsFingerprint,
+      verificationConfigFingerprint: unrecordedBinding.verificationConfigFingerprint,
+      evidenceBindingVersion: unrecordedBinding.evidenceBindingVersion,
+    });
     const unrecordedDelivery = await deliveryService.dispatchDelivery({
       runId: unrecordedRun.id,
       isApproved: true,
       approvedBy: 'operator-unrecorded',
       repoUrl: 'example/dual-clone-app',
       targetBaseBranch: 'main',
+      candidateBinding: bindingFor(unrecordedRun.id),
     });
     assert.strictEqual(unrecordedDelivery.success, false, 'Run without a persisted target must fail closed');
     assert.strictEqual(unrecordedDelivery.blocked, true);

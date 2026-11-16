@@ -69,6 +69,14 @@ Your instructions:
 4. When done, output a summary of changes and a concise commit message.
 `;
 
+  if (context.operatorReviewFeedback && context.operatorReviewFeedback.length > 0) {
+    prompt += `\n=== OPERATOR REVIEW FEEDBACK (MUST ADDRESS) ===\nThe operator requested changes on a prior candidate revision. Address every point below:\n`;
+    for (const fb of context.operatorReviewFeedback) {
+      prompt += `- [${fb.createdAt}] ${fb.actor} (on revision ${fb.revisionSha.slice(0, 12)}): ${fb.comment}\n`;
+    }
+    prompt += `\n`;
+  }
+
   if (context.repairFeedback) {
     prompt += `\nATTENTION: A PREVIOUS ATTEMPT FAILED VERIFICATION. Please review this feedback and repair the code:
 Failing Command: ${context.repairFeedback.failingCommand || 'Verification command'}

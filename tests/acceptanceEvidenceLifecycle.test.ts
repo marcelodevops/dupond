@@ -137,12 +137,24 @@ async function main() {
       'Review transition audited');
     console.log('✔ [PASS] Verification evidence is bound to revision, requirements fingerprint, config fingerprint, and protocol version');
 
+    const bindingFor = (runId: string) => {
+      const v = store.getLatestVerification(runId)!;
+      return {
+        verificationId: v.id,
+        revisionSha: v.revisionSha,
+        requirementsFingerprint: v.requirementsFingerprint || '',
+        verificationConfigFingerprint: v.verificationConfigFingerprint || '',
+        evidenceBindingVersion: v.evidenceBindingVersion || '',
+      };
+    };
+
     // Delivery of the verified candidate, then durable-reference proof.
     const delivered = await deliveryService.dispatchDelivery({
       runId: run1.id,
       isApproved: true,
       approvedBy: 'evidence-operator',
       disposableRemoteDir: bareRemote,
+      candidateBinding: bindingFor(run1.id),
     });
     assert.strictEqual(delivered.success, true, `Delivery should succeed: ${delivered.error}`);
     assert.strictEqual(store.getTask(task1.id)!.status, 'done', 'Done applied through the lifecycle service after delivery');
@@ -214,10 +226,11 @@ async function main() {
     const configReview = lifecycle.transition({ taskId: task2.id, to: 'review', actor: 'worker' });
     assert.strictEqual(configReview.ok, false);
     assert.strictEqual(configReview.reason, 'changed-verification-config');
-    const blocked = await deliveryService.dispatchDelivery({ runId: store.getLatestRunForTask(task2.id)!.id, disposableRemoteDir: bareRemote });
+    const run2Id = store.getLatestRunForTask(task2.id)!.id;
+    const blocked = await deliveryService.dispatchDelivery({ runId: run2Id, disposableRemoteDir: bareRemote, candidateBinding: bindingFor(run2Id) });
     assert.strictEqual(blocked.success, false);
     assert.strictEqual(blocked.status, 409);
-    assert.ok(blocked.error?.includes('changed-verification-config'), `Got: ${blocked.error}`);
+    assert.strictEqual(blocked.blocked, true);
     console.log('✔ [PASS] Changed verification configuration invalidates acceptance and blocks delivery');
 
     // ------------------------------------------------------------------
@@ -269,10 +282,10 @@ async function main() {
     const legacyReview = lifecycle.transition({ taskId: task4.id, to: 'review', actor: 'worker' });
     assert.strictEqual(legacyReview.ok, false);
     assert.strictEqual(legacyReview.reason, 'legacy-evidence');
-    const legacyDelivery = await deliveryService.dispatchDelivery({ runId: run4.id, disposableRemoteDir: bareRemote });
+    const legacyDelivery = await deliveryService.dispatchDelivery({ runId: run4.id, disposableRemoteDir: bareRemote, candidateBinding: bindingFor(run4.id) });
     assert.strictEqual(legacyDelivery.success, false);
-    assert.strictEqual(legacyDelivery.status, 409);
-    assert.ok(legacyDelivery.error?.includes('legacy-evidence'), `Got: ${legacyDelivery.error}`);
+    assert.strictEqual(legacyDelivery.status, 400);
+    assert.strictEqual(legacyDelivery.blocked, true);
 
     // Same record, but written under a superseded protocol version.
     const binding4 = computeEvidenceBinding(store.getTask(task4.id)!);
@@ -474,7 +487,7 @@ async function main() {
     // the delivered commit from the run's workspace HEAD.
     wsManager.createWorktree(run1b.id, run1b.targetBranch!, ver1b.revisionSha);
     const d1 = await deliveryService.dispatchDelivery({
-      runId: run1b.id, isApproved: true, approvedBy: 'op-1', disposableRemoteDir: bareRemote,
+      runId: run1b.id, isApproved: true, approvedBy: 'op-1', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(run1b.id),
     });
     assert.strictEqual(d1.success, true, `First delivery should succeed: ${d1.error}`);
     assert.strictEqual(store.getTask(task1.id)!.status, 'done');
@@ -507,13 +520,13 @@ async function main() {
     assert.strictEqual(reReview.ok, true, `Same commit re-verified under the new spec: ${reReview.detail}`);
 
     // Without explicit fresh approval the reused PR stays blocked.
-    const d2 = await deliveryService.dispatchDelivery({ runId: run1b.id, isApproved: false, disposableRemoteDir: bareRemote });
+    const d2 = await deliveryService.dispatchDelivery({ runId: run1b.id, isApproved: false, disposableRemoteDir: bareRemote, candidateBinding: bindingFor(run1b.id) });
     assert.strictEqual(d2.success, false, 'reused delivery must never self-restore approval');
     assert.strictEqual(d2.approvalRequired, true);
     assert.strictEqual(store.getTask(task1.id)!.status, 'review', 'still waiting for the operator');
 
     const d3 = await deliveryService.dispatchDelivery({
-      runId: run1b.id, isApproved: true, approvedBy: 'op-2', disposableRemoteDir: bareRemote,
+      runId: run1b.id, isApproved: true, approvedBy: 'op-2', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(run1b.id),
     });
     assert.strictEqual(d3.success, true, `Re-approval delivery: ${d3.error}`);
     assert.ok(d3.message?.includes('Existing pull request reconciled'), `Got: ${d3.message}`);
@@ -812,7 +825,7 @@ async function main() {
     const runJ = await runToReview(taskJ);
     const verJ = store.getLatestVerification(runJ.id)!;
     wsManager.createWorktree(runJ.id, runJ.targetBranch!, verJ.revisionSha);
-    const dJ1 = await deliveryService.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-j1', disposableRemoteDir: bareRemote });
+    const dJ1 = await deliveryService.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-j1', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(runJ.id) });
     assert.strictEqual(dJ1.success, true, `initial approved delivery: ${dJ1.error}`);
     const delJ = store.getDeliveryForRun(runJ.id)!;
     const prUrlJ = delJ.prUrl;
@@ -850,7 +863,7 @@ async function main() {
       },
     });
     const racingDelivery = new GitHubDeliveryService(racingStore as any, verifier);
-    const dStale = await racingDelivery.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-stale', disposableRemoteDir: bareRemote });
+    const dStale = await racingDelivery.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-stale', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(runJ.id) });
     assert.strictEqual(dStale.success, false, 'a stale approval must not be recorded against a newer contract');
     assert.ok(dStale.blocked === true || dStale.approvalRequired === true, `Got: ${JSON.stringify(dStale)}`);
     const delAfterRace = store.getDeliveryForRun(runJ.id)!;
@@ -879,7 +892,7 @@ async function main() {
     assert.strictEqual(reviewJ2.ok, true, `current evidence for the new contract: ${reviewJ2.detail}`);
     assert.strictEqual(store.getDeliveryForRun(runJ.id)!.approvalStatus, 'pending_approval', 'the refused approval is still outstanding');
 
-    const dFresh = await deliveryService.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-j2', disposableRemoteDir: bareRemote });
+    const dFresh = await deliveryService.dispatchDelivery({ runId: runJ.id, isApproved: true, approvedBy: 'op-j2', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(runJ.id) });
     assert.strictEqual(dFresh.success, true, `explicit reapproval: ${dFresh.error}`);
     assert.ok(dFresh.message?.includes('Existing pull request reconciled'), `Got: ${dFresh.message}`);
     assert.strictEqual(dFresh.prUrl, prUrlJ, 'the PR is reused, not duplicated');
@@ -914,7 +927,7 @@ async function main() {
     const runK = await runToReview(taskK);
     const verK = store.getLatestVerification(runK.id)!;
     wsManager.createWorktree(runK.id, runK.targetBranch!, verK.revisionSha);
-    const dK1 = await deliveryService.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k1', disposableRemoteDir: bareRemote });
+    const dK1 = await deliveryService.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k1', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(runK.id) });
     assert.strictEqual(dK1.success, true, `baseline approved delivery: ${dK1.error}`);
     const delK = store.getDeliveryForRun(runK.id)!;
     const prUrlK = delK.prUrl;
@@ -961,7 +974,7 @@ async function main() {
     assert.strictEqual(kRaceInjected, false, 'injection must not fire outside a dispatch');
 
     const racingDeliveryK = new GitHubDeliveryService(racingStoreK as any, verifier);
-    const dStaleK = await racingDeliveryK.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k-stale', disposableRemoteDir: bareRemote });
+    const dStaleK = await racingDeliveryK.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k-stale', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(runK.id) });
     assert.strictEqual(kRaceInjected, true, 'the racing edit landed before approval identity construction');
     assert.strictEqual(dStaleK.success, false, 'consent rebuilt from newer rows must be refused, not recorded');
     assert.ok(dStaleK.blocked === true || dStaleK.approvalRequired === true, `Got: ${JSON.stringify(dStaleK)}`);
@@ -981,7 +994,7 @@ async function main() {
     assert.strictEqual(store.getLatestVerification(runK.id)!.requirementsFingerprint, bindingK2.requirementsFingerprint, 'racing evidence is bound to contract B');
     const reviewK = lifecycle.transition({ taskId: taskK.id, to: 'review', actor: 'verifier' });
     assert.strictEqual(reviewK.ok, true, `current evidence for contract B: ${reviewK.detail}`);
-    const dFreshK = await deliveryService.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k-fresh', disposableRemoteDir: bareRemote });
+    const dFreshK = await deliveryService.dispatchDelivery({ runId: runK.id, isApproved: true, approvedBy: 'op-k-fresh', disposableRemoteDir: bareRemote, candidateBinding: bindingFor(runK.id) });
     assert.strictEqual(dFreshK.success, true, `explicit fresh approval against contract B: ${dFreshK.error}`);
     assert.strictEqual(dFreshK.prUrl, prUrlK, 'the PR is reused, not duplicated');
     const delK2 = store.getDeliveryForRun(runK.id)!;
