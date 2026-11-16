@@ -136,7 +136,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       let body = '';
       req.on('data', (c) => (body += c.toString('utf-8')));
       req.on('end', () => {
-        const isPlan = body.includes('plan') || body.includes('epics') || body.includes('quote-request');
+        const isPlan = body.includes('suggestedTimelineWeeks') || body.includes('epics');
         const textPayload = isPlan
           ? JSON.stringify({
               summary: 'Synthetic Naviera Plan',
