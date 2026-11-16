@@ -259,9 +259,9 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       // Adopt synthetic Naviera plan
       await page.getByRole('button', { name: /Ingest Plan/i }).click();
       await page.locator('textarea').first().fill('Add a validated quote-request endpoint.');
-      await page.getByRole('button', { name: /Decompose|Generate|Parse/i }).click();
-      await page.getByText('NAV-101').waitFor({ state: 'visible', timeout: 15000 });
-      await page.getByRole('button', { name: /Adopt/i }).click();
+      await page.getByRole('button', { name: /Decompose & Orchestrate Plan with AI/i }).click();
+      await page.getByRole('button', { name: /Adopt Plan to Kanban Board/i }).waitFor({ state: 'visible', timeout: 15000 });
+      await page.getByRole('button', { name: /Adopt Plan to Kanban Board/i }).click();
       await page.getByText('NAV-101').first().waitFor({ state: 'visible' });
 
       // H (part 1): Before execution, TaskDetailModal shows explicit no-runs state
