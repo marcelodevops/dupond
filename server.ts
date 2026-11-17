@@ -190,7 +190,7 @@ app.post('/api/orchestrate/tasks/:id/register', (req: Request, res: Response) =>
 
     const result = coordinator.registerProjectedTask(req.params.id, projectId);
     if (!result.success) {
-      return res.status(404).json(result);
+      return res.status(result.status || 422).json(result);
     }
     res.json(result);
   } catch (error: any) {

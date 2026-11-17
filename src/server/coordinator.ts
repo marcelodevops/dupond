@@ -691,22 +691,55 @@ export class CoordinatorEngine {
     task: Task,
     projectId: string,
     initialStatus: 'todo' | 'in_progress' | 'backlog' | 'blocked' = 'todo',
-  ): TaskRecord {
+  ):
+    | { ok: true; task: TaskRecord }
+    | { ok: false; status: number; code: string; reason: string; nextAction: string; error: string } {
     const projectConfig = defaultProjectStore.getProject(projectId);
     const projectState = this.getState(projectId);
     const projectRepo = projectState.integrationConfig?.repository;
 
-    const configuredRepo =
-      task.targetRepo ||
-      projectRepo?.repoUrl ||
-      projectConfig?.repository?.repoUrl ||
-      process.env.DUPOND_TARGET_REPO;
+    const useLegacyIntegrationRepo =
+      projectId === 'default' && !projectConfig?.repository?.repoUrl && !projectConfig?.repository?.localPath;
+    const legacyRepoUrl =
+      useLegacyIntegrationRepo &&
+      projectRepo?.repoUrl &&
+      projectRepo.repoUrl !== 'https://github.com/acme-corp/dupond-core-system'
+        ? projectRepo.repoUrl.trim()
+        : '';
+    const legacyLocalPath =
+      useLegacyIntegrationRepo &&
+      projectRepo?.localPath &&
+      projectRepo.localPath !== '/Users/mac/ops/repos/dupond-agent' &&
+      fs.existsSync(projectRepo.localPath)
+        ? projectRepo.localPath
+        : undefined;
+
+    const rawConfiguredRepo =
+      task.targetRepo?.trim() ||
+      projectConfig?.repository?.repoUrl?.trim() ||
+      legacyRepoUrl ||
+      process.env.DUPOND_TARGET_REPO?.trim() ||
+      '';
+    const configuredRepo = rawConfiguredRepo && rawConfiguredRepo !== 'local' ? rawConfiguredRepo : undefined;
     const configuredRepoPath =
       task.targetRepoPath ||
-      (projectRepo?.localPath && fs.existsSync(projectRepo.localPath) ? projectRepo.localPath : undefined) ||
       (projectConfig?.repository?.localPath && fs.existsSync(projectConfig.repository.localPath)
         ? projectConfig.repository.localPath
-        : undefined);
+        : undefined) ||
+      legacyLocalPath;
+
+    if (!configuredRepo && !configuredRepoPath) {
+      return {
+        ok: false,
+        status: 422,
+        code: 'REPOSITORY_CONFIGURATION_REQUIRED',
+        reason: 'repository-configuration-required',
+        nextAction: 'configure_project_repository',
+        error:
+          'No target repository is configured for this task or project. Open Project Settings → Repository to configure a repository before registering this task.',
+      };
+    }
+
     const baseCommit =
       task.baseCommit ||
       projectRepo?.defaultBranch ||
@@ -748,7 +781,7 @@ export class CoordinatorEngine {
             .filter((c) => c.checkCommand)
             .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
 
-    return taskStore.createTask({
+    const created = taskStore.createTask({
       id: task.id,
       projectId,
       key: task.key,
@@ -756,7 +789,7 @@ export class CoordinatorEngine {
       description: task.description,
       status: initialStatus,
       priority: task.priority || 'high',
-      targetRepo: configuredRepo || orchestratorRepoSlug(),
+      targetRepo: configuredRepo || 'local',
       targetRepoPath: configuredRepoPath,
       baseCommit,
       allowedPaths,
@@ -768,10 +801,14 @@ export class CoordinatorEngine {
       timeoutSeconds: task.timeoutSeconds || 300,
       requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
     });
+    return { ok: true, task: created };
   }
 
   public registerProjectedTask(taskId: string, projectId?: string): {
     success: boolean;
+    status?: number;
+    code?: string;
+    reason?: string;
     alreadyRegistered?: boolean;
     task?: Task;
     dbTask?: TaskRecord;
@@ -782,7 +819,7 @@ export class CoordinatorEngine {
     const projectState = this.getState(effectiveProjectId);
     const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
-      return { success: false, error: `Task ${taskId} not found in project ${effectiveProjectId}.` };
+      return { success: false, status: 404, error: `Task ${taskId} not found in project ${effectiveProjectId}.` };
     }
 
     const existing =
@@ -802,7 +839,18 @@ export class CoordinatorEngine {
       };
     }
 
-    const dbTask = this.registerProjectedTaskAuthoritatively(task, effectiveProjectId, 'todo');
+    const reg = this.registerProjectedTaskAuthoritatively(task, effectiveProjectId, 'todo');
+    if (!reg.ok) {
+      return {
+        success: false,
+        status: reg.status,
+        code: reg.code,
+        reason: reg.reason,
+        nextAction: reg.nextAction,
+        error: reg.error,
+      };
+    }
+    const dbTask = reg.task;
     taskStore.recordAudit({
       taskId: dbTask.id,
       projectId: effectiveProjectId,
@@ -1118,8 +1166,39 @@ ${implementationCode.slice(0, 500)}...
       };
     }
 
+    const requestedWorkerConfig =
+      storeTask?.workerConfig && storeTask.workerConfig.provider
+        ? storeTask.workerConfig
+        : task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL };
+
     if (!storeTask) {
-      storeTask = this.registerProjectedTaskAuthoritatively(task, executionProjectId, 'in_progress');
+      const reg = this.registerProjectedTaskAuthoritatively(task, executionProjectId, 'in_progress');
+      if (!reg.ok) {
+        let earlyWorkerAvailable = false;
+        try {
+          earlyWorkerAvailable = (await resolveCodingWorker(requestedWorkerConfig).isAvailable()).available;
+        } catch {
+          earlyWorkerAvailable = false;
+        }
+        if (!earlyWorkerAvailable) {
+          throw blocked();
+        }
+        throw new DomainError(reg.error);
+      }
+      storeTask = reg.task;
+    }
+
+    // Authoritatively resolve and check the worker configured for this task
+    let taskWorker: CodingWorkerAdapter;
+    try {
+      taskWorker = resolveCodingWorker(requestedWorkerConfig);
+    } catch (cfgErr: any) {
+      throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
+    }
+
+    const workerAvailable = await taskWorker.isAvailable();
+    if (!workerAvailable.available) {
+      throw blocked();
     }
 
     const effectiveVerificationCommands =
@@ -1159,24 +1238,8 @@ ${implementationCode.slice(0, 500)}...
             storeTask.baseCommit ||
             'HEAD',
       verificationCommands: effectiveVerificationCommands,
-      workerConfig:
-        storeTask.workerConfig && storeTask.workerConfig.provider
-          ? storeTask.workerConfig
-          : task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
+      workerConfig: requestedWorkerConfig,
     };
-
-    // Authoritatively resolve and check the worker configured for this task
-    let taskWorker: CodingWorkerAdapter;
-    try {
-      taskWorker = resolveCodingWorker(effectiveStoreTask.workerConfig);
-    } catch (cfgErr: any) {
-      throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
-    }
-
-    const workerAvailable = await taskWorker.isAvailable();
-    if (!workerAvailable.available) {
-      throw blocked();
-    }
 
     // Real Coding Worker Execution via isolated worktree and sandbox!
     const resolvedRepo = resolveTargetRepository({
