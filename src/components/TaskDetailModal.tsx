@@ -43,7 +43,10 @@ interface TaskDetailModalProps {
   allTasks: Task[];
   onExecuteAgentOnTask: (task: Task, agent: Agent) => Promise<void>;
   isExecutingStep: boolean;
-  onRegisterTask?: (taskId: string) => Promise<{ ok: boolean; error?: string }>;
+  onRegisterTask?: (
+    taskId: string,
+  ) => Promise<{ ok: boolean; code?: string; nextAction?: string; error?: string }>;
+  onOpenProjectSettings?: () => void;
   onReviewTask?: (
     taskId: string,
     decision: 'approve' | 'request_changes',
@@ -101,6 +104,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   onExecuteAgentOnTask,
   isExecutingStep,
   onRegisterTask,
+  onOpenProjectSettings,
   onReviewTask,
   onDeliverRun,
 }) => {
@@ -120,6 +124,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   const [authoritativeTaskRegistered, setAuthoritativeTaskRegistered] = useState<boolean | null>(null);
   const [isRegisteringTask, setIsRegisteringTask] = useState(false);
   const [registrationError, setRegistrationError] = useState<string | null>(null);
+  const [registrationCode, setRegistrationCode] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
   const [isLoadingRuns, setIsLoadingRuns] = useState(true);
   const [runsLoadError, setRunsLoadError] = useState<string | null>(null);
@@ -304,6 +309,55 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
     if (!assignee) return;
     await onExecuteAgentOnTask(task, assignee);
   };
+
+  const renderRegistrationControl = (buttonTestId: string) => (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        {onRegisterTask && (
+          <button
+            type="button"
+            data-testid={buttonTestId}
+            disabled={isRegisteringTask}
+            onClick={async () => {
+              setRegistrationError(null);
+              setRegistrationCode(null);
+              setIsRegisteringTask(true);
+              try {
+                const res = await onRegisterTask(task.id);
+                if (!res.ok && mountedRef.current) {
+                  setRegistrationCode(res.code || null);
+                  setRegistrationError(res.error || 'Task registration failed.');
+                }
+              } finally {
+                if (mountedRef.current) setIsRegisteringTask(false);
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
+          >
+            {isRegisteringTask ? 'Registering...' : 'Register in Authoritative Store'}
+          </button>
+        )}
+        {registrationCode === 'REPOSITORY_CONFIGURATION_REQUIRED' && onOpenProjectSettings && (
+          <button
+            type="button"
+            data-testid="open-project-settings-from-task-btn"
+            onClick={() => {
+              onClose();
+              onOpenProjectSettings();
+            }}
+            className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+          >
+            Open Project Settings
+          </button>
+        )}
+      </div>
+      {registrationError && (
+        <p data-testid="task-registration-error" className="text-[11px] text-rose-300">
+          {registrationError}
+        </p>
+      )}
+    </>
+  );
 
   return (
     <div
@@ -504,29 +558,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                     Registering creates an authoritative <span className="font-mono font-semibold">todo</span> record
                     without granting verification or approval.
                   </p>
-                  {onRegisterTask && (
-                    <button
-                      type="button"
-                      data-testid="register-authoritative-task-btn"
-                      disabled={isRegisteringTask}
-                      onClick={async () => {
-                        setRegistrationError(null);
-                        setIsRegisteringTask(true);
-                        try {
-                          const res = await onRegisterTask(task.id);
-                          if (!res.ok && mountedRef.current) {
-                            setRegistrationError(res.error || 'Task registration failed.');
-                          }
-                        } finally {
-                          if (mountedRef.current) setIsRegisteringTask(false);
-                        }
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
-                    >
-                      {isRegisteringTask ? 'Registering...' : 'Register in Authoritative Store'}
-                    </button>
-                  )}
-                  {registrationError && <p className="text-[11px] text-rose-300">{registrationError}</p>}
+                  {renderRegistrationControl('register-authoritative-task-btn')}
                 </div>
               ) : transitionFeedback.nextAction === 'execute_agent_step' ? (
                 <p className="text-[11px] text-rose-200/90">
@@ -1038,29 +1070,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                     authoritative store as <span className="font-mono">todo</span> (without granting verification or
                     approval), then run <span className="font-semibold">Execute Agent Step</span>.
                   </p>
-                  {onRegisterTask && (
-                    <button
-                      type="button"
-                      data-testid="runs-register-authoritative-task-btn"
-                      disabled={isRegisteringTask}
-                      onClick={async () => {
-                        setRegistrationError(null);
-                        setIsRegisteringTask(true);
-                        try {
-                          const res = await onRegisterTask(task.id);
-                          if (!res.ok && mountedRef.current) {
-                            setRegistrationError(res.error || 'Task registration failed.');
-                          }
-                        } finally {
-                          if (mountedRef.current) setIsRegisteringTask(false);
-                        }
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
-                    >
-                      {isRegisteringTask ? 'Registering...' : 'Register in Authoritative Store'}
-                    </button>
-                  )}
-                  {registrationError && <p className="text-[11px] text-rose-300">{registrationError}</p>}
+                  {renderRegistrationControl('runs-register-authoritative-task-btn')}
                 </div>
               ) : (
                 <div

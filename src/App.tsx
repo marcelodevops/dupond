@@ -576,7 +576,9 @@ function AppWorkspace() {
     }
   };
 
-  const handleRegisterTask = async (taskId: string): Promise<{ ok: boolean; error?: string }> => {
+  const handleRegisterTask = async (
+    taskId: string,
+  ): Promise<{ ok: boolean; code?: string; nextAction?: string; error?: string }> => {
     if (isSwitchingProject) {
       return { ok: false, error: 'Cannot register task while project switch is in progress.' };
     }
@@ -598,8 +600,14 @@ function AppWorkspace() {
       }
       if (!res.ok || !data.success) {
         const msg = data.error || `Registration failed (HTTP ${res.status})`;
-        showToast('Task Registration Failed', msg, 'alert');
-        return { ok: false, error: msg };
+        showToast(
+          data.code === 'REPOSITORY_CONFIGURATION_REQUIRED'
+            ? 'Repository Configuration Required'
+            : 'Task Registration Failed',
+          msg,
+          'alert',
+        );
+        return { ok: false, code: data.code, nextAction: data.nextAction, error: msg };
       }
       if (data.task) {
         setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
@@ -1142,6 +1150,10 @@ function AppWorkspace() {
         onExecuteAgentOnTask={executeAgentStep}
         isExecutingStep={isProcessingStep}
         onRegisterTask={handleRegisterTask}
+        onOpenProjectSettings={() => {
+          setSettingsInitialTab('repository');
+          setIsSettingsModalOpen(true);
+        }}
         onReviewTask={handleReviewTask}
         onDeliverRun={handleDeliverRun}
       />
