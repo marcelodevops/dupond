@@ -453,13 +453,16 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await pwExpect(page.getByTestId('register-authoritative-task-btn')).toBeVisible();
       await page.getByTestId('register-authoritative-task-btn').click();
 
-      await pwExpect(page.getByTestId('task-registration-error')).toContainText('Project Settings');
-      await pwExpect(page.getByTestId('open-project-settings-from-task-btn')).toBeVisible();
-      await page.getByTestId('open-project-settings-from-task-btn').click();
+      const refusalBanner = page.getByTestId('task-transition-refusal');
+      await pwExpect(refusalBanner.getByTestId('task-registration-error')).toContainText('Project Settings');
+      await pwExpect(refusalBanner.getByTestId('open-project-settings-from-task-btn')).toBeVisible();
+      await refusalBanner.getByTestId('open-project-settings-from-task-btn').click();
 
       // Configure Secondary project's repository via Project Settings, then register LEG-404
       await pwExpect(page.getByTestId('project-settings-modal')).toBeVisible();
-      await pwExpect(page.getByTestId('project-repo-url-input')).toBeVisible();
+      await pwExpect(page.getByTestId('project-local-path-input')).toBeVisible();
+      await page.getByTestId('project-local-path-input').fill(targetRepoDir);
+      await page.getByTestId('project-target-branch-input').fill('main');
       await page.getByTestId('project-repo-url-input').fill(remoteDir);
       await page.getByTestId('verify-repo-btn').click();
       await page.getByTestId('repo-verification-result').waitFor({ state: 'visible' });
