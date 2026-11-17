@@ -238,6 +238,7 @@ function AppWorkspace() {
     taskId: string;
     targetStatus: TaskStatus;
     reason?: string;
+    nextAction?: string;
     message: string;
   } | null>(null);
   const [lastExecutedRunByTask, setLastExecutedRunByTask] = useState<
@@ -534,9 +535,14 @@ function AppWorkspace() {
           taskId,
           targetStatus: newStatus,
           reason: data.reason,
+          nextAction: data.nextAction,
           message: failureDetails,
         });
-        showToast('Quality Gate Blocked', `Cannot move to ${newStatus.toUpperCase()}: ${failureDetails}`, 'alert');
+        showToast(
+          data.reason === 'unregistered-task' ? 'Unregistered Board Task' : 'Quality Gate Blocked',
+          `Cannot move to ${newStatus.toUpperCase()}: ${failureDetails}`,
+          'alert',
+        );
         // Refresh server state to ensure UI stays accurate without altering authoritative status
         const stateRes = await apiFetch('/api/orchestrate/state', {
           headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
@@ -567,6 +573,50 @@ function AppWorkspace() {
         message: msg,
       });
       showToast('Status Update Error', msg, 'alert');
+    }
+  };
+
+  const handleRegisterTask = async (taskId: string): Promise<{ ok: boolean; error?: string }> => {
+    if (isSwitchingProject) {
+      return { ok: false, error: 'Cannot register task while project switch is in progress.' };
+    }
+    if (isArchived) {
+      return { ok: false, error: 'Archived projects are read-only.' };
+    }
+    const capturedProjectId = currentProject?.id || getActiveProjectId();
+    try {
+      const res = await apiFetch(`/api/orchestrate/tasks/${encodeURIComponent(taskId)}/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {}),
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (capturedProjectId !== activeProjectIdRef.current) {
+        return { ok: false, error: 'Project switched during registration.' };
+      }
+      if (!res.ok || !data.success) {
+        const msg = data.error || `Registration failed (HTTP ${res.status})`;
+        showToast('Task Registration Failed', msg, 'alert');
+        return { ok: false, error: msg };
+      }
+      if (data.task) {
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+        setSelectedTaskForModal((prev) => (prev && prev.id === taskId ? data.task : prev));
+      }
+      setTransitionFeedback((prev) => (prev?.taskId === taskId ? null : prev));
+      setRunRefreshKey((k) => k + 1);
+      showToast(
+        'Authoritative Task Registered',
+        `${data.task?.key || taskId} is registered in ${data.task?.status?.toUpperCase() || 'TODO'}. Run Execute Agent Step to generate verified evidence.`,
+        'success',
+      );
+      return { ok: true };
+    } catch (err: any) {
+      const msg = err?.message || 'Task registration failed';
+      showToast('Task Registration Failed', msg, 'alert');
+      return { ok: false, error: msg };
     }
   };
 
@@ -993,6 +1043,9 @@ function AppWorkspace() {
             onOpenIngestModal={() => setIsIngestModalOpen(true)}
             onOpenIntegrations={() => setActiveTab('integrations')}
             activeProcessingTaskId={activeProcessingTaskId}
+            transitionFeedback={transitionFeedback}
+            onDismissTransitionFeedback={() => setTransitionFeedback(null)}
+            onInspectBlockedTask={(task) => setSelectedTaskForModal(task)}
           />
         )}
 
@@ -1088,6 +1141,7 @@ function AppWorkspace() {
         allTasks={tasks}
         onExecuteAgentOnTask={executeAgentStep}
         isExecutingStep={isProcessingStep}
+        onRegisterTask={handleRegisterTask}
         onReviewTask={handleReviewTask}
         onDeliverRun={handleDeliverRun}
       />
