@@ -268,6 +268,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
         data: { name: 'Secondary', description: 'Secondary isolation project' },
       });
       assert.strictEqual(createSecondary.status(), 201);
+      const secondaryProjectId = ((await createSecondary.json()) as { id: string }).id;
 
       const createNaviera = await page.request.post(`${serverUrl}/api/projects`, {
         headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
@@ -398,9 +399,87 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.unroute('**/api/orchestrate/tasks/*/transition', delayedHandler);
       await pwExpect(switcherBtn).toContainText('Secondary');
 
+      // K: Board-only unregistered task -> Kanban forward arrow blocked with actionable banner -> safe registration -> registered task without evidence
+      const secStateRes = await page.request.get(`${serverUrl}/api/orchestrate/state`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': secondaryProjectId },
+      });
+      assert.strictEqual(secStateRes.status(), 200);
+      const secState = (await secStateRes.json()) as any;
+      const legacyBoardTask = {
+        id: 'task-board-only-e2e',
+        key: 'LEG-404',
+        title: 'Legacy Board-Only Task',
+        description: 'Unregistered task projected on board',
+        status: 'review',
+        priority: 'high',
+        epicId: 'EPIC-1',
+        assignedAgentId: 'agent-dev',
+        estimatedHours: 2,
+        spentHours: 0,
+        subtasks: [{ id: 'sub-leg-1', title: 'Export check', completed: true }],
+        deliverables: [],
+        dependencies: [],
+        tags: [],
+        lastUpdated: 'Just now',
+      };
+      const putBoardRes = await page.request.post(`${serverUrl}/api/orchestrate/state`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': secondaryProjectId },
+        data: { ...secState, tasks: [...(secState.tasks || []), legacyBoardTask] },
+      });
+      assert.strictEqual(putBoardRes.status(), 200);
+
+      await page.reload({ waitUntil: 'networkidle' });
+      await pwExpect(switcherBtn).toContainText('Secondary');
+      await pwExpect(page.getByText('LEG-404').first()).toBeVisible();
+
+      // Click Kanban forward arrow on LEG-404 (attempting review -> done)
+      const legCard = page.locator('div.group', { hasText: 'LEG-404' }).first();
+      await legCard.getByTitle(/Request authoritative transition to done/i).click();
+
+      await pwExpect(page.getByTestId('kanban-transition-blocked-banner')).toBeVisible();
+      await pwExpect(page.getByTestId('kanban-transition-blocked-banner')).toContainText('unregistered-task');
+      assert.strictEqual(
+        await page.evaluate(() => document.body.innerText.includes('Inspected Physical Code Artifact on Disk')),
+        false,
+        'Legacy .dupond_artifacts message must never appear',
+      );
+      if (shotDir) {
+        await page.screenshot({ path: path.join(shotDir, 'board-only-blocked.png'), fullPage: false });
+      }
+
+      // Inspect & Resolve -> Register in Authoritative Store (without granting verification/approval)
+      await page.getByTestId('inspect-blocked-task-btn').click();
+      await pwExpect(page.getByTestId('task-transition-refusal')).toContainText('unregistered-task');
+      await pwExpect(page.getByTestId('register-authoritative-task-btn')).toBeVisible();
+      await page.getByTestId('register-authoritative-task-btn').click();
+
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('todo');
+      await pwExpect(page.getByTestId('task-no-runs-state')).toBeVisible();
+      await pwExpect(page.getByTestId('task-no-runs-state')).toContainText('Execute Agent Step on This Task');
+      if (shotDir) {
+        await page.screenshot({ path: path.join(shotDir, 'registered-no-evidence.png'), fullPage: false });
+      }
+
+      // Registered task without evidence cannot enter Review
+      await page.getByTestId('task-detail-status-select').selectOption('review');
+      await pwExpect(page.getByTestId('task-transition-refusal')).toContainText('no-evidence');
+      await pwExpect(page.getByTestId('task-transition-refusal')).toContainText('Execute Agent Step on This Task');
+      await page.keyboard.press('Escape');
+
+      // Restart server & verify registered LEG-404 persists in Secondary as todo without runs and stays isolated from Naviera
+      await stopAppServer();
+      await startAppServer();
+      await page.reload({ waitUntil: 'networkidle' });
+      await pwExpect(switcherBtn).toContainText('Secondary');
+      await page.getByText('LEG-404').first().click();
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('todo');
+      await pwExpect(page.getByTestId('task-no-runs-state')).toBeVisible();
+      await page.keyboard.press('Escape');
+
       // Switch back to Naviera for Review Decision -> Delivery -> Done + mobile viewport check
       await switcherBtn.click();
       await page.getByRole('button', { name: /Naviera/i }).click();
+      assert.strictEqual(await page.evaluate(() => document.body.innerText.includes('LEG-404')), false);
       await page.getByText('NAV-101').first().click();
       await pwExpect(page.getByTestId('run-candidate-diff')).toBeVisible();
 
@@ -443,12 +522,17 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await pwExpect(page.getByTestId('review-delivery-error')).toBeVisible();
       await pwExpect(page.getByTestId('review-approval-token-input')).toBeVisible();
 
-      // Provide approval token -> Approve & Deliver PR -> Done
+      // Provide approval token -> Separate Approve Review -> Push & Create PR -> Done
       await page.getByTestId('review-approval-token-input').fill('e2e_approval_token_01');
-      await page.getByTestId('approve-deliver-pr-btn').click();
+      await page.getByTestId('approve-review-btn').click();
+      await pwExpect(page.getByTestId('deliver-pr-btn')).toBeVisible({ timeout: 20000 });
+      await page.getByTestId('deliver-pr-btn').click();
       await pwExpect(page.getByTestId('run-delivery-status')).toBeVisible({ timeout: 20000 });
       await pwExpect(page.getByTestId('run-delivery-status')).toContainText('PR:');
       await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('done');
+      if (shotDir) {
+        await page.screenshot({ path: path.join(shotDir, 'review-approve-deliver-pr.png'), fullPage: false });
+      }
       assert.strictEqual(stateMutationFailures.length, 0, 'Secondary project metadata edits must not trigger POST /api/orchestrate/state 422');
 
       // I (part 2): Narrow mobile viewport check
