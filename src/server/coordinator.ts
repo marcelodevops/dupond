@@ -587,6 +587,8 @@ export class CoordinatorEngine {
     verification?: VerificationResult;
     error?: string;
     reason?: string;
+    code?: string;
+    nextAction?: string;
     evidence?: unknown;
   }> {
     const effectiveProjectId = projectId || this.activeProjectId;
@@ -624,10 +626,24 @@ export class CoordinatorEngine {
           ...task,
           status: this.toUiStatus(freshDbTask.status),
         };
+        const nextAction =
+          outcome.reason === 'delivery-pending' || outcome.reason === 'approval-pending' || outcome.reason === 'delivered-revision-mismatch'
+            ? 'approve_and_deliver'
+            : outcome.reason === 'no-evidence' ||
+                outcome.reason === 'missing-verification' ||
+                outcome.reason === 'failed-verification' ||
+                outcome.reason === 'stale-requirements' ||
+                outcome.reason === 'changed-verification-config' ||
+                outcome.reason === 'uncovered-criteria' ||
+                outcome.reason === 'changes-requested' ||
+                outcome.reason === 'legacy-evidence'
+              ? 'execute_agent_step'
+              : undefined;
         return {
           success: false,
           task: currentProjected,
           reason: outcome.reason,
+          nextAction,
           evidence: outcome.evidence,
           error: outcome.detail || `Lifecycle service refused "${targetStatus}" (${outcome.reason})`,
         };
@@ -641,15 +657,15 @@ export class CoordinatorEngine {
       return { success: true, task: projected };
     }
 
-    if (targetStatus === 'done') {
-      const verification = await this.verifyTaskQualityGates(task);
-      if (!verification.passed) {
-        return {
-          success: false,
-          error: 'Quality gates failed. Task cannot be marked Done until all checks pass.',
-          verification,
-        };
-      }
+    if (targetStatus === 'review' || targetStatus === 'done') {
+      return {
+        success: false,
+        task,
+        reason: 'unregistered-task',
+        code: 'UNREGISTERED_TASK',
+        nextAction: 'register_task',
+        error: `Task ${task.key} exists only in projected board state and is not registered in the authoritative task store. Register it into the authoritative store, then run Execute Agent Step to generate verified evidence.`,
+      };
     }
 
     const updatedTask: Task = {
@@ -663,6 +679,161 @@ export class CoordinatorEngine {
     return {
       success: true,
       task: updatedTask,
+    };
+  }
+
+  /**
+   * Registers a projected UI task into the authoritative SQLite TaskStore using
+   * the project's repository contract. Never grants verification, acceptance
+   * criteria completion, or delivery approval during recovery.
+   */
+  private registerProjectedTaskAuthoritatively(
+    task: Task,
+    projectId: string,
+    initialStatus: 'todo' | 'in_progress' | 'backlog' | 'blocked' = 'todo',
+  ): TaskRecord {
+    const projectConfig = defaultProjectStore.getProject(projectId);
+    const projectState = this.getState(projectId);
+    const projectRepo = projectState.integrationConfig?.repository;
+
+    const configuredRepo =
+      task.targetRepo ||
+      projectRepo?.repoUrl ||
+      projectConfig?.repository?.repoUrl ||
+      process.env.DUPOND_TARGET_REPO;
+    const configuredRepoPath =
+      task.targetRepoPath ||
+      (projectRepo?.localPath && fs.existsSync(projectRepo.localPath) ? projectRepo.localPath : undefined) ||
+      (projectConfig?.repository?.localPath && fs.existsSync(projectConfig.repository.localPath)
+        ? projectConfig.repository.localPath
+        : undefined);
+    const baseCommit =
+      task.baseCommit ||
+      projectRepo?.defaultBranch ||
+      projectConfig?.repository?.defaultBranch ||
+      'HEAD';
+    const allowedPaths =
+      task.allowedPaths && task.allowedPaths.length > 0 ? task.allowedPaths : ['src/**', 'workspace/**'];
+    const defaultProtectedPaths = [
+      '.github/**',
+      'package.json',
+      'package-lock.json',
+      'tsconfig.json',
+      'tests/**',
+      '.env*',
+    ];
+    const protectedPaths = Array.from(new Set([...defaultProtectedPaths, ...(task.protectedPaths || [])]));
+
+    const rawCriteria =
+      task.acceptanceCriteria && task.acceptanceCriteria.length > 0
+        ? task.acceptanceCriteria
+        : (task.subtasks || []).map((s) => ({
+            id: s.id,
+            title: s.title,
+            completed: false,
+            checkCommand: s.checkCommand,
+          }));
+
+    const criteria = rawCriteria.map((c) => ({
+      id: c.id,
+      title: c.title,
+      completed: false,
+      checkCommand: c.checkCommand,
+    }));
+
+    const verificationCommands =
+      task.verificationCommands && task.verificationCommands.length > 0
+        ? task.verificationCommands
+        : criteria
+            .filter((c) => c.checkCommand)
+            .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
+
+    return taskStore.createTask({
+      id: task.id,
+      projectId,
+      key: task.key,
+      title: task.title,
+      description: task.description,
+      status: initialStatus,
+      priority: task.priority || 'high',
+      targetRepo: configuredRepo || orchestratorRepoSlug(),
+      targetRepoPath: configuredRepoPath,
+      baseCommit,
+      allowedPaths,
+      protectedPaths,
+      verificationCommands: verificationCommands.length > 0 ? verificationCommands : ['npm test'],
+      acceptanceCriteria: criteria,
+      workerConfig: task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
+      maxAttempts: task.maxAttempts || 3,
+      timeoutSeconds: task.timeoutSeconds || 300,
+      requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
+    });
+  }
+
+  public registerProjectedTask(taskId: string, projectId?: string): {
+    success: boolean;
+    alreadyRegistered?: boolean;
+    task?: Task;
+    dbTask?: TaskRecord;
+    nextAction?: string;
+    error?: string;
+  } {
+    const effectiveProjectId = projectId || this.activeProjectId;
+    const projectState = this.getState(effectiveProjectId);
+    const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
+    if (!task) {
+      return { success: false, error: `Task ${taskId} not found in project ${effectiveProjectId}.` };
+    }
+
+    const existing =
+      taskStore.getTaskScoped(task.id, effectiveProjectId) ||
+      taskStore.getTaskScoped(task.key, effectiveProjectId);
+    if (existing) {
+      const projected: Task = {
+        ...task,
+        status: this.toUiStatus(existing.status),
+      };
+      return {
+        success: true,
+        alreadyRegistered: true,
+        task: projected,
+        dbTask: existing,
+        nextAction: existing.status === 'review' ? 'approve_and_deliver' : 'execute_agent_step',
+      };
+    }
+
+    const dbTask = this.registerProjectedTaskAuthoritatively(task, effectiveProjectId, 'todo');
+    taskStore.recordAudit({
+      taskId: dbTask.id,
+      projectId: effectiveProjectId,
+      eventType: 'TASK_REGISTERED_FROM_BOARD',
+      actor: 'operator',
+      details: {
+        previousProjectedStatus: task.status,
+        registeredStatus: dbTask.status,
+      },
+    });
+
+    const projected: Task = {
+      ...task,
+      status: this.toUiStatus(dbTask.status),
+      lastUpdated: 'Just now',
+    };
+    if (effectiveProjectId === this.activeProjectId) {
+      this.state.tasks = this.state.tasks.map((t) => (t.id === projected.id ? projected : t));
+      this.saveStateToDisk();
+    } else {
+      const latestState = this.getState(effectiveProjectId);
+      latestState.tasks = latestState.tasks.map((t) => (t.id === projected.id ? projected : t));
+      defaultProjectStore.saveProjectState(effectiveProjectId, latestState);
+    }
+
+    return {
+      success: true,
+      alreadyRegistered: false,
+      task: projected,
+      dbTask,
+      nextAction: 'execute_agent_step',
     };
   }
 
@@ -948,80 +1119,7 @@ ${implementationCode.slice(0, 500)}...
     }
 
     if (!storeTask) {
-      const configuredRepo = task.targetRepo ||
-        projectRepo?.repoUrl ||
-        executionProjectConfig?.repository?.repoUrl ||
-        process.env.DUPOND_TARGET_REPO;
-      const configuredRepoPath = task.targetRepoPath ||
-        (projectRepo?.localPath && fs.existsSync(projectRepo.localPath)
-          ? projectRepo.localPath
-          : undefined) ||
-        (executionProjectConfig?.repository?.localPath && fs.existsSync(executionProjectConfig.repository.localPath)
-          ? executionProjectConfig.repository.localPath
-          : undefined);
-      const baseCommit = task.baseCommit ||
-        projectRepo?.defaultBranch ||
-        executionProjectConfig?.repository?.defaultBranch ||
-        'HEAD';
-      const allowedPaths = task.allowedPaths && task.allowedPaths.length > 0
-        ? task.allowedPaths
-        : ['src/**', 'workspace/**'];
-      const defaultProtectedPaths = [
-        '.github/**',
-        'package.json',
-        'package-lock.json',
-        'tsconfig.json',
-        'tests/**',
-        '.env*',
-      ];
-      const protectedPaths = Array.from(new Set([
-        ...defaultProtectedPaths,
-        ...(task.protectedPaths || []),
-      ]));
-
-      // Acceptance criteria and mapped verification commands
-      const rawCriteria = task.acceptanceCriteria && task.acceptanceCriteria.length > 0
-        ? task.acceptanceCriteria
-        : (task.subtasks || []).map((s) => ({
-            id: s.id,
-            title: s.title,
-            completed: Boolean(s.completed),
-            checkCommand: s.checkCommand,
-          }));
-
-      const criteria = rawCriteria.map((c) => ({
-        id: c.id,
-        title: c.title,
-        completed: Boolean(c.completed),
-        checkCommand: c.checkCommand,
-      }));
-
-      const verificationCommands = task.verificationCommands && task.verificationCommands.length > 0
-        ? task.verificationCommands
-        : criteria
-            .filter((c) => c.checkCommand)
-            .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
-
-      storeTask = taskStore.createTask({
-        id: task.id,
-        projectId: executionProjectId,
-        key: task.key,
-        title: task.title,
-        description: task.description,
-        status: 'in_progress',
-        priority: task.priority || 'high',
-        targetRepo: configuredRepo || orchestratorRepoSlug(),
-        targetRepoPath: configuredRepoPath,
-        baseCommit: baseCommit,
-        allowedPaths: allowedPaths,
-        protectedPaths: protectedPaths,
-        verificationCommands: verificationCommands.length > 0 ? verificationCommands : ['npm test'],
-        acceptanceCriteria: criteria,
-        workerConfig: task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
-        maxAttempts: task.maxAttempts || 3,
-        timeoutSeconds: task.timeoutSeconds || 300,
-        requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
-      });
+      storeTask = this.registerProjectedTaskAuthoritatively(task, executionProjectId, 'in_progress');
     }
 
     const effectiveVerificationCommands =

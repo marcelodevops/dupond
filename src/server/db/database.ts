@@ -904,7 +904,7 @@ export class TaskStore {
 
   public getLatestVerification(runId: string, projectId?: string): VerificationRecord | null {
     if (projectId && !this.getRunScoped(runId, projectId)) return null;
-    const stmt = this.db.prepare('SELECT * FROM verification_records WHERE run_id = ? ORDER BY verified_at DESC LIMIT 1');
+    const stmt = this.db.prepare('SELECT * FROM verification_records WHERE run_id = ? ORDER BY verified_at DESC, rowid DESC LIMIT 1');
     const row = stmt.get(runId) as any;
     if (!row) return null;
     return this.mapVerificationRow(row);
