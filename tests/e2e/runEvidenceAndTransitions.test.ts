@@ -447,11 +447,30 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
         await page.screenshot({ path: path.join(shotDir, 'board-only-blocked.png'), fullPage: false });
       }
 
-      // Inspect & Resolve -> Register in Authoritative Store (without granting verification/approval)
+      // Inspect & Resolve -> Register before repository is configured must fail with REPOSITORY_CONFIGURATION_REQUIRED and expose Project Settings action
       await page.getByTestId('inspect-blocked-task-btn').click();
       await pwExpect(page.getByTestId('task-transition-refusal')).toContainText('unregistered-task');
       await pwExpect(page.getByTestId('register-authoritative-task-btn')).toBeVisible();
       await page.getByTestId('register-authoritative-task-btn').click();
+
+      await pwExpect(page.getByTestId('task-registration-error')).toContainText('Project Settings');
+      await pwExpect(page.getByTestId('open-project-settings-from-task-btn')).toBeVisible();
+      await page.getByTestId('open-project-settings-from-task-btn').click();
+
+      // Configure Secondary project's repository via Project Settings, then register LEG-404
+      await pwExpect(page.getByTestId('project-settings-modal')).toBeVisible();
+      await pwExpect(page.getByTestId('project-repo-url-input')).toBeVisible();
+      await page.getByTestId('project-repo-url-input').fill(remoteDir);
+      await page.getByTestId('verify-repo-btn').click();
+      await page.getByTestId('repo-verification-result').waitFor({ state: 'visible' });
+      await page.getByTestId('save-project-settings-btn').click();
+      await pwExpect(page.getByTestId('save-project-settings-btn')).toBeDisabled();
+      await page.getByTestId('cancel-project-settings-btn').click();
+      await page.getByTestId('project-settings-modal').waitFor({ state: 'hidden' });
+
+      await page.getByText('LEG-404').first().click();
+      await pwExpect(page.getByTestId('unregistered-task-state')).toBeVisible();
+      await page.getByTestId('runs-register-authoritative-task-btn').click();
 
       await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('todo');
       await pwExpect(page.getByTestId('task-no-runs-state')).toBeVisible();

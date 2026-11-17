@@ -1131,7 +1131,26 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     });
     assert.ok(foreignRegRes.status === 403 || foreignRegRes.status === 404);
 
-    // 4. Register in projA -> becomes authoritative 'todo' with NO verification or approval granted
+    // 4a. Without configured repository, registration is rejected (never defaults to orchestrator repo)
+    const regNoRepoRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${boardOnlyTask.id}/register`, {
+      method: 'POST',
+      headers: headers(projA.id),
+    });
+    assert.strictEqual(regNoRepoRes.status, 422);
+    const regNoRepoJson = (await regNoRepoRes.json()) as any;
+    assert.strictEqual(regNoRepoJson.success, false);
+    assert.strictEqual(regNoRepoJson.code, 'REPOSITORY_CONFIGURATION_REQUIRED');
+    assert.strictEqual(regNoRepoJson.nextAction, 'configure_project_repository');
+    assert.strictEqual(store.getTaskScoped(boardOnlyTask.id, projA.id), null);
+
+    // 4b. Configure project repository -> registration uses configured project repository and grants NO verification/approval
+    const updateProjRes = await fetch(`${baseUrl}/api/projects/${projA.id}`, {
+      method: 'PATCH',
+      headers: headers(projA.id),
+      body: JSON.stringify({ repository: { repoUrl: 'custom-org/custom-app', defaultBranch: 'main' } }),
+    });
+    assert.strictEqual(updateProjRes.status, 200);
+
     const regRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${boardOnlyTask.id}/register`, {
       method: 'POST',
       headers: headers(projA.id),
@@ -1144,6 +1163,7 @@ describe('Authoritative task transitions & read-only run evidence', () => {
 
     const dbTask = store.getTaskScoped(boardOnlyTask.id, projA.id);
     assert.ok(dbTask);
+    assert.strictEqual(dbTask.targetRepo, 'custom-org/custom-app');
     assert.strictEqual(dbTask.status, 'todo');
     assert.strictEqual(dbTask.acceptanceCriteria.every((c) => c.completed === false), true);
     assert.strictEqual(store.listRunsForTask(dbTask.id, projA.id).length, 0);
