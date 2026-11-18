@@ -587,6 +587,8 @@ export class CoordinatorEngine {
     verification?: VerificationResult;
     error?: string;
     reason?: string;
+    code?: string;
+    nextAction?: string;
     evidence?: unknown;
   }> {
     const effectiveProjectId = projectId || this.activeProjectId;
@@ -624,10 +626,24 @@ export class CoordinatorEngine {
           ...task,
           status: this.toUiStatus(freshDbTask.status),
         };
+        const nextAction =
+          outcome.reason === 'delivery-pending' || outcome.reason === 'approval-pending' || outcome.reason === 'delivered-revision-mismatch'
+            ? 'approve_and_deliver'
+            : outcome.reason === 'no-evidence' ||
+                outcome.reason === 'missing-verification' ||
+                outcome.reason === 'failed-verification' ||
+                outcome.reason === 'stale-requirements' ||
+                outcome.reason === 'changed-verification-config' ||
+                outcome.reason === 'uncovered-criteria' ||
+                outcome.reason === 'changes-requested' ||
+                outcome.reason === 'legacy-evidence'
+              ? 'execute_agent_step'
+              : undefined;
         return {
           success: false,
           task: currentProjected,
           reason: outcome.reason,
+          nextAction,
           evidence: outcome.evidence,
           error: outcome.detail || `Lifecycle service refused "${targetStatus}" (${outcome.reason})`,
         };
@@ -641,15 +657,15 @@ export class CoordinatorEngine {
       return { success: true, task: projected };
     }
 
-    if (targetStatus === 'done') {
-      const verification = await this.verifyTaskQualityGates(task);
-      if (!verification.passed) {
-        return {
-          success: false,
-          error: 'Quality gates failed. Task cannot be marked Done until all checks pass.',
-          verification,
-        };
-      }
+    if (targetStatus === 'review' || targetStatus === 'done') {
+      return {
+        success: false,
+        task,
+        reason: 'unregistered-task',
+        code: 'UNREGISTERED_TASK',
+        nextAction: 'register_task',
+        error: `Task ${task.key} exists only in projected board state and is not registered in the authoritative task store. Register it into the authoritative store, then run Execute Agent Step to generate verified evidence.`,
+      };
     }
 
     const updatedTask: Task = {
@@ -663,6 +679,209 @@ export class CoordinatorEngine {
     return {
       success: true,
       task: updatedTask,
+    };
+  }
+
+  /**
+   * Registers a projected UI task into the authoritative SQLite TaskStore using
+   * the project's repository contract. Never grants verification, acceptance
+   * criteria completion, or delivery approval during recovery.
+   */
+  private registerProjectedTaskAuthoritatively(
+    task: Task,
+    projectId: string,
+    initialStatus: 'todo' | 'in_progress' | 'backlog' | 'blocked' = 'todo',
+  ):
+    | { ok: true; task: TaskRecord }
+    | { ok: false; status: number; code: string; reason: string; nextAction: string; error: string } {
+    const projectConfig = defaultProjectStore.getProject(projectId);
+    const projectState = this.getState(projectId);
+    const projectRepo = projectState.integrationConfig?.repository;
+
+    const useLegacyIntegrationRepo =
+      projectId === 'default' && !projectConfig?.repository?.repoUrl && !projectConfig?.repository?.localPath;
+    const legacyRepoUrl =
+      useLegacyIntegrationRepo &&
+      projectRepo?.repoUrl &&
+      projectRepo.repoUrl !== 'https://github.com/acme-corp/dupond-core-system'
+        ? projectRepo.repoUrl.trim()
+        : '';
+    const legacyLocalPath =
+      useLegacyIntegrationRepo &&
+      projectRepo?.localPath &&
+      projectRepo.localPath !== '/Users/mac/ops/repos/dupond-agent' &&
+      fs.existsSync(projectRepo.localPath)
+        ? projectRepo.localPath
+        : undefined;
+
+    const rawConfiguredRepo =
+      task.targetRepo?.trim() ||
+      projectConfig?.repository?.repoUrl?.trim() ||
+      legacyRepoUrl ||
+      process.env.DUPOND_TARGET_REPO?.trim() ||
+      '';
+    const configuredRepo = rawConfiguredRepo && rawConfiguredRepo !== 'local' ? rawConfiguredRepo : undefined;
+    const configuredRepoPath =
+      task.targetRepoPath ||
+      (projectConfig?.repository?.localPath && fs.existsSync(projectConfig.repository.localPath)
+        ? projectConfig.repository.localPath
+        : undefined) ||
+      legacyLocalPath;
+
+    if (!configuredRepo && !configuredRepoPath) {
+      return {
+        ok: false,
+        status: 422,
+        code: 'REPOSITORY_CONFIGURATION_REQUIRED',
+        reason: 'repository-configuration-required',
+        nextAction: 'configure_project_repository',
+        error:
+          'No target repository is configured for this task or project. Open Project Settings → Repository to configure a repository before registering this task.',
+      };
+    }
+
+    const baseCommit =
+      task.baseCommit ||
+      projectRepo?.defaultBranch ||
+      projectConfig?.repository?.defaultBranch ||
+      'HEAD';
+    const allowedPaths =
+      task.allowedPaths && task.allowedPaths.length > 0 ? task.allowedPaths : ['src/**', 'workspace/**'];
+    const defaultProtectedPaths = [
+      '.github/**',
+      'package.json',
+      'package-lock.json',
+      'tsconfig.json',
+      'tests/**',
+      '.env*',
+    ];
+    const protectedPaths = Array.from(new Set([...defaultProtectedPaths, ...(task.protectedPaths || [])]));
+
+    const rawCriteria =
+      task.acceptanceCriteria && task.acceptanceCriteria.length > 0
+        ? task.acceptanceCriteria
+        : (task.subtasks || []).map((s) => ({
+            id: s.id,
+            title: s.title,
+            completed: false,
+            checkCommand: s.checkCommand,
+          }));
+
+    const criteria = rawCriteria.map((c) => ({
+      id: c.id,
+      title: c.title,
+      completed: false,
+      checkCommand: c.checkCommand,
+    }));
+
+    const verificationCommands =
+      task.verificationCommands && task.verificationCommands.length > 0
+        ? task.verificationCommands
+        : criteria
+            .filter((c) => c.checkCommand)
+            .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
+
+    const created = taskStore.createTask({
+      id: task.id,
+      projectId,
+      key: task.key,
+      title: task.title,
+      description: task.description,
+      status: initialStatus,
+      priority: task.priority || 'high',
+      targetRepo: configuredRepo || 'local',
+      targetRepoPath: configuredRepoPath,
+      baseCommit,
+      allowedPaths,
+      protectedPaths,
+      verificationCommands: verificationCommands.length > 0 ? verificationCommands : ['npm test'],
+      acceptanceCriteria: criteria,
+      workerConfig: task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
+      maxAttempts: task.maxAttempts || 3,
+      timeoutSeconds: task.timeoutSeconds || 300,
+      requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
+    });
+    return { ok: true, task: created };
+  }
+
+  public registerProjectedTask(taskId: string, projectId?: string): {
+    success: boolean;
+    status?: number;
+    code?: string;
+    reason?: string;
+    alreadyRegistered?: boolean;
+    task?: Task;
+    dbTask?: TaskRecord;
+    nextAction?: string;
+    error?: string;
+  } {
+    const effectiveProjectId = projectId || this.activeProjectId;
+    const projectState = this.getState(effectiveProjectId);
+    const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
+    if (!task) {
+      return { success: false, status: 404, error: `Task ${taskId} not found in project ${effectiveProjectId}.` };
+    }
+
+    const existing =
+      taskStore.getTaskScoped(task.id, effectiveProjectId) ||
+      taskStore.getTaskScoped(task.key, effectiveProjectId);
+    if (existing) {
+      const projected: Task = {
+        ...task,
+        status: this.toUiStatus(existing.status),
+      };
+      return {
+        success: true,
+        alreadyRegistered: true,
+        task: projected,
+        dbTask: existing,
+        nextAction: existing.status === 'review' ? 'approve_and_deliver' : 'execute_agent_step',
+      };
+    }
+
+    const reg = this.registerProjectedTaskAuthoritatively(task, effectiveProjectId, 'todo');
+    if (!reg.ok) {
+      return {
+        success: false,
+        status: reg.status,
+        code: reg.code,
+        reason: reg.reason,
+        nextAction: reg.nextAction,
+        error: reg.error,
+      };
+    }
+    const dbTask = reg.task;
+    taskStore.recordAudit({
+      taskId: dbTask.id,
+      projectId: effectiveProjectId,
+      eventType: 'TASK_REGISTERED_FROM_BOARD',
+      actor: 'operator',
+      details: {
+        previousProjectedStatus: task.status,
+        registeredStatus: dbTask.status,
+      },
+    });
+
+    const projected: Task = {
+      ...task,
+      status: this.toUiStatus(dbTask.status),
+      lastUpdated: 'Just now',
+    };
+    if (effectiveProjectId === this.activeProjectId) {
+      this.state.tasks = this.state.tasks.map((t) => (t.id === projected.id ? projected : t));
+      this.saveStateToDisk();
+    } else {
+      const latestState = this.getState(effectiveProjectId);
+      latestState.tasks = latestState.tasks.map((t) => (t.id === projected.id ? projected : t));
+      defaultProjectStore.saveProjectState(effectiveProjectId, latestState);
+    }
+
+    return {
+      success: true,
+      alreadyRegistered: false,
+      task: projected,
+      dbTask,
+      nextAction: 'execute_agent_step',
     };
   }
 
@@ -947,81 +1166,39 @@ ${implementationCode.slice(0, 500)}...
       };
     }
 
+    const requestedWorkerConfig =
+      storeTask?.workerConfig && storeTask.workerConfig.provider
+        ? storeTask.workerConfig
+        : task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL };
+
     if (!storeTask) {
-      const configuredRepo = task.targetRepo ||
-        projectRepo?.repoUrl ||
-        executionProjectConfig?.repository?.repoUrl ||
-        process.env.DUPOND_TARGET_REPO;
-      const configuredRepoPath = task.targetRepoPath ||
-        (projectRepo?.localPath && fs.existsSync(projectRepo.localPath)
-          ? projectRepo.localPath
-          : undefined) ||
-        (executionProjectConfig?.repository?.localPath && fs.existsSync(executionProjectConfig.repository.localPath)
-          ? executionProjectConfig.repository.localPath
-          : undefined);
-      const baseCommit = task.baseCommit ||
-        projectRepo?.defaultBranch ||
-        executionProjectConfig?.repository?.defaultBranch ||
-        'HEAD';
-      const allowedPaths = task.allowedPaths && task.allowedPaths.length > 0
-        ? task.allowedPaths
-        : ['src/**', 'workspace/**'];
-      const defaultProtectedPaths = [
-        '.github/**',
-        'package.json',
-        'package-lock.json',
-        'tsconfig.json',
-        'tests/**',
-        '.env*',
-      ];
-      const protectedPaths = Array.from(new Set([
-        ...defaultProtectedPaths,
-        ...(task.protectedPaths || []),
-      ]));
+      const reg = this.registerProjectedTaskAuthoritatively(task, executionProjectId, 'in_progress');
+      if (!reg.ok) {
+        let earlyWorkerAvailable = false;
+        try {
+          earlyWorkerAvailable = (await resolveCodingWorker(requestedWorkerConfig).isAvailable()).available;
+        } catch {
+          earlyWorkerAvailable = false;
+        }
+        if (!earlyWorkerAvailable) {
+          throw blocked();
+        }
+        throw new DomainError(reg.error);
+      }
+      storeTask = reg.task;
+    }
 
-      // Acceptance criteria and mapped verification commands
-      const rawCriteria = task.acceptanceCriteria && task.acceptanceCriteria.length > 0
-        ? task.acceptanceCriteria
-        : (task.subtasks || []).map((s) => ({
-            id: s.id,
-            title: s.title,
-            completed: Boolean(s.completed),
-            checkCommand: s.checkCommand,
-          }));
+    // Authoritatively resolve and check the worker configured for this task
+    let taskWorker: CodingWorkerAdapter;
+    try {
+      taskWorker = resolveCodingWorker(requestedWorkerConfig);
+    } catch (cfgErr: any) {
+      throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
+    }
 
-      const criteria = rawCriteria.map((c) => ({
-        id: c.id,
-        title: c.title,
-        completed: Boolean(c.completed),
-        checkCommand: c.checkCommand,
-      }));
-
-      const verificationCommands = task.verificationCommands && task.verificationCommands.length > 0
-        ? task.verificationCommands
-        : criteria
-            .filter((c) => c.checkCommand)
-            .map((c) => ({ command: c.checkCommand!, criteriaIds: [c.id] }));
-
-      storeTask = taskStore.createTask({
-        id: task.id,
-        projectId: executionProjectId,
-        key: task.key,
-        title: task.title,
-        description: task.description,
-        status: 'in_progress',
-        priority: task.priority || 'high',
-        targetRepo: configuredRepo || orchestratorRepoSlug(),
-        targetRepoPath: configuredRepoPath,
-        baseCommit: baseCommit,
-        allowedPaths: allowedPaths,
-        protectedPaths: protectedPaths,
-        verificationCommands: verificationCommands.length > 0 ? verificationCommands : ['npm test'],
-        acceptanceCriteria: criteria,
-        workerConfig: task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
-        maxAttempts: task.maxAttempts || 3,
-        timeoutSeconds: task.timeoutSeconds || 300,
-        requireApproval: task.requireApproval !== undefined ? task.requireApproval : true,
-      });
+    const workerAvailable = await taskWorker.isAvailable();
+    if (!workerAvailable.available) {
+      throw blocked();
     }
 
     const effectiveVerificationCommands =
@@ -1061,24 +1238,8 @@ ${implementationCode.slice(0, 500)}...
             storeTask.baseCommit ||
             'HEAD',
       verificationCommands: effectiveVerificationCommands,
-      workerConfig:
-        storeTask.workerConfig && storeTask.workerConfig.provider
-          ? storeTask.workerConfig
-          : task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL },
+      workerConfig: requestedWorkerConfig,
     };
-
-    // Authoritatively resolve and check the worker configured for this task
-    let taskWorker: CodingWorkerAdapter;
-    try {
-      taskWorker = resolveCodingWorker(effectiveStoreTask.workerConfig);
-    } catch (cfgErr: any) {
-      throw new DomainError(`Worker configuration blocked: ${cfgErr.message}`);
-    }
-
-    const workerAvailable = await taskWorker.isAvailable();
-    if (!workerAvailable.available) {
-      throw blocked();
-    }
 
     // Real Coding Worker Execution via isolated worktree and sandbox!
     const resolvedRepo = resolveTargetRepository({

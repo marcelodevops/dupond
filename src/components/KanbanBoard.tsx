@@ -35,6 +35,15 @@ interface KanbanBoardProps {
   onOpenIntegrations?: () => void;
   activeProcessingTaskId?: string;
   isLoading?: boolean;
+  transitionFeedback?: {
+    taskId: string;
+    targetStatus: TaskStatus;
+    reason?: string;
+    nextAction?: string;
+    message: string;
+  } | null;
+  onDismissTransitionFeedback?: () => void;
+  onInspectBlockedTask?: (task: Task) => void;
 }
 
 const COLUMNS: { id: TaskStatus; label: string; color: string; badgeBg: string }[] = [
@@ -56,6 +65,9 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   onOpenIntegrations,
   activeProcessingTaskId,
   isLoading = false,
+  transitionFeedback,
+  onDismissTransitionFeedback,
+  onInspectBlockedTask,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState<string>('all');
@@ -203,6 +215,56 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Actionable Transition Blocked Banner */}
+      {(() => {
+        const blockedTask = transitionFeedback
+          ? tasks.find((t) => t.id === transitionFeedback.taskId)
+          : undefined;
+        if (!transitionFeedback || !blockedTask) return null;
+        return (
+          <div
+            data-testid="kanban-transition-blocked-banner"
+            className="p-3.5 rounded-xl border bg-rose-950/40 border-rose-800/70 text-rose-100 text-xs flex flex-wrap items-center justify-between gap-3"
+          >
+            <div className="space-y-1 min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span className="font-bold text-rose-200">
+                  {blockedTask.key}: Move to {transitionFeedback.targetStatus.toUpperCase()} Blocked
+                </span>
+                {transitionFeedback.reason && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-900/60 border border-rose-700/60 text-rose-200">
+                    {transitionFeedback.reason}
+                  </span>
+                )}
+              </div>
+              <p className="text-rose-100/90 leading-relaxed">{transitionFeedback.message}</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {onInspectBlockedTask && (
+                <button
+                  type="button"
+                  data-testid="inspect-blocked-task-btn"
+                  onClick={() => onInspectBlockedTask(blockedTask)}
+                  className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shadow-sm"
+                >
+                  Inspect &amp; Resolve
+                </button>
+              )}
+              {onDismissTransitionFeedback && (
+                <button
+                  type="button"
+                  onClick={onDismissTransitionFeedback}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+                >
+                  Dismiss
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 5-Column Responsive Board, Loading State, or Empty Workspace State */}
       {isLoading ? (
