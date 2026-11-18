@@ -53,7 +53,8 @@ describe('OpenAI credential onboarding browser E2E', () => {
   let repoDir: string;
   let mockOpenAIServer: http.Server;
   let mockOpenAIPort: number;
-  let mockMode: 'normal' | 'hang' = 'normal';
+  let mockMode: 'normal' | 'hang' | 'delay-gpt-4o-mini' = 'normal';
+  let releaseDelayedModel!: () => void;
   let mockAbortedCount = 0;
   const openMockResponses = new Set<http.ServerResponse>();
   let serverProc: ChildProcess | null = null;
@@ -151,6 +152,20 @@ describe('OpenAI credential onboarding browser E2E', () => {
           return;
         }
         const parsed = JSON.parse(body || '{}');
+        if (mockMode === 'delay-gpt-4o-mini' && parsed.model === 'gpt-4o-mini') {
+          new Promise<void>((r) => (releaseDelayedModel = r)).then(() => {
+            if (!res.writableEnded) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: { message: 'delayed failure', code: 'invalid_api_key' } }));
+            }
+          });
+          return;
+        }
+        if (parsed.model === 'nonexistent-custom-model') {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'The model nonexistent-custom-model does not exist', code: 'model_not_found' } }));
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
@@ -287,16 +302,67 @@ describe('OpenAI credential onboarding browser E2E', () => {
 
       await page.getByTestId('test-openai-key-btn').click();
       await pwExpect(page.getByTestId('openai-error-banner')).toBeVisible();
-      await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Verification Failed');
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verification Failed');
 
-      // Replace with valid key + select explicit model o3-mini -> Verified
+      // Replace with valid key + select explicit model o3-mini -> Verified (o3-mini)
       await page.getByTestId('openai-api-key-input').fill(SYNTH_GOOD_KEY_1);
       await page.getByTestId('save-openai-key-btn').click();
       await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Unverified');
       await page.getByTestId('openai-test-model-select').selectOption('o3-mini');
       await page.getByTestId('test-openai-key-btn').click();
       await pwExpect(page.getByTestId('openai-success-banner')).toContainText('model o3-mini');
-      await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Verified');
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verified (o3-mini)');
+
+      // Custom model rejection by provider + custom model verification
+      await page.getByTestId('openai-test-model-select').selectOption('__custom__');
+      await page.getByTestId('openai-custom-model-input').fill('nonexistent-custom-model');
+      await page.getByTestId('test-openai-key-btn').click();
+      await pwExpect(page.getByTestId('openai-error-banner')).toBeVisible();
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verification Failed (nonexistent-custom-model)');
+
+      await page.getByTestId('openai-custom-model-input').fill('gpt-4.1-mini');
+      await page.getByTestId('test-openai-key-btn').click();
+      await pwExpect(page.getByTestId('openai-success-banner')).toContainText('model gpt-4.1-mini');
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verified (gpt-4.1-mini)');
+
+      // Changing selected model during a pending test never shows the newly selected model as verified
+      mockMode = 'delay-gpt-4o-mini';
+      await page.getByTestId('openai-test-model-select').selectOption('gpt-4o-mini');
+      await page.getByTestId('test-openai-key-btn').click();
+      await pwExpect(page.getByTestId('openai-test-pending')).toBeVisible();
+      await page.getByTestId('openai-test-model-select').selectOption('gpt-4o');
+      releaseDelayedModel();
+      await pwExpect(page.getByTestId('openai-test-pending')).toBeHidden({ timeout: 10000 });
+      await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Unverified');
+      await pwExpect(page.getByTestId('openai-different-model-verified-note')).toContainText('gpt-4o-mini');
+      mockMode = 'normal';
+
+      // Cross-model API ordering race: Model A (gpt-4o-mini) starts first, Model B (gpt-4.1-mini) finishes first, then A completes -> B retained across restart
+      mockMode = 'delay-gpt-4o-mini';
+      const reqAPromise = fetch(`${serverUrl}/api/credentials/openai/test`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${SYNTH_OPERATOR_TOKEN}`,
+        },
+        body: JSON.stringify({ model: 'gpt-4o-mini' }),
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      const reqBRes = await fetch(`${serverUrl}/api/credentials/openai/test`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${SYNTH_OPERATOR_TOKEN}`,
+        },
+        body: JSON.stringify({ model: 'gpt-4.1-mini' }),
+      });
+      assert.strictEqual(reqBRes.status, 200);
+      assert.strictEqual(((await reqBRes.json()) as any).ok, true);
+      releaseDelayedModel();
+      const reqARes = await reqAPromise;
+      const reqAJson = (await reqARes.json()) as any;
+      assert.strictEqual(reqAJson.stale, true);
+      mockMode = 'normal';
 
       // Unsaved edit discard guard preserves key when Keep Editing clicked
       await page.getByTestId('openai-api-key-input').fill(SYNTH_GOOD_KEY_2);
@@ -308,13 +374,13 @@ describe('OpenAI credential onboarding browser E2E', () => {
       await page.getByTestId('app-settings-confirm-discard-btn').click();
       await pwExpect(switcherBtn).toContainText('OpenAI Worker Project');
 
-      // Restart persistence: Verified + Saved survive server restart
+      // Restart persistence: Verified (gpt-4.1-mini) + Saved survive server restart
       await stopAppServer();
       await startAppServer();
       await page.goto(serverUrl, { waitUntil: 'networkidle' });
       await page.getByTestId('open-app-settings-btn').click();
       await pwExpect(page.getByTestId('openai-saved-badge')).toHaveText('Saved');
-      await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Verified');
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verified (gpt-4.1-mini)');
 
       // Cancel during hanging provider preserves Verified
       mockMode = 'hang';
@@ -323,7 +389,7 @@ describe('OpenAI credential onboarding browser E2E', () => {
       await pwExpect(page.getByTestId('openai-test-pending')).toBeVisible();
       await page.getByTestId('cancel-openai-test-btn').click();
       await pwExpect(page.getByTestId('openai-inconclusive-banner')).toContainText('cancelled');
-      await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Verified');
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verified (gpt-4.1-mini)');
       await page.waitForTimeout(100);
       assert.ok(mockAbortedCount > abortedBeforeCancel);
 
@@ -371,12 +437,12 @@ describe('OpenAI credential onboarding browser E2E', () => {
       await pwExpect(page.getByTestId('openai-saved-badge')).toHaveText('Env Active');
       await pwExpect(page.getByTestId('openai-env-precedence-notice')).toBeVisible();
       await page.getByTestId('test-openai-key-btn').click();
-      await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Verified');
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verified');
 
       mockMode = 'hang';
       await page.getByTestId('test-openai-key-btn').click();
       await pwExpect(page.getByTestId('openai-inconclusive-banner')).toContainText('timed out', { timeout: 10000 });
-      await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Verified');
+      await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verified');
       mockMode = 'normal';
       for (const r of openMockResponses) {
         try {

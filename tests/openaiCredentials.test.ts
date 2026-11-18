@@ -363,4 +363,104 @@ describe('OpenAI credential storage, precedence, worker wiring, connection tests
     const paths = connectionKeyMaintenancePaths(keyPath);
     assert.strictEqual(fs.existsSync(paths.lockPath), false);
   });
+
+  it('enforces provider-level cross-model ordering atomically across restarts and supports custom model IDs', async () => {
+    const store = new TaskStore(dbPath);
+    const cred = new AppCredentialStore(store);
+    const key = 'sk-synth-openai-ordering-1234567890';
+    cred.saveOpenAIKey(key);
+
+    let releaseModelA!: () => void;
+    const modelAGate = new Promise<void>((r) => (releaseModelA = r));
+    const observedModels: string[] = [];
+
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => (body += d.toString()));
+      req.on('end', async () => {
+        const parsed = JSON.parse(body || '{}');
+        observedModels.push(parsed.model);
+        if (parsed.model === 'gpt-4o-mini') {
+          await modelAGate;
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'late failure', code: 'invalid_api_key' } }));
+          return;
+        }
+        if (parsed.model === 'unknown-custom-model') {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'The model unknown-custom-model does not exist', code: 'model_not_found' } }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'resp_order', object: 'response', model: parsed.model, output: [] }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as any).port;
+
+    try {
+      process.env.DUPOND_ALLOW_TEST_OPENAI_ENDPOINT = '1';
+      process.env.DUPOND_OPENAI_TEST_BASE_URL = `http://127.0.0.1:${port}/v1`;
+
+      // Invalid/malformed model identifiers are rejected by bounded validation
+      const blankModelRes = await testOpenAIConnection({ store: cred, model: '   ' });
+      assert.strictEqual(blankModelRes.ok, false);
+      assert.strictEqual(blankModelRes.reason, 'model_access');
+      const spaceModelRes = await testOpenAIConnection({ store: cred, model: 'gpt 4o' });
+      assert.strictEqual(spaceModelRes.ok, false);
+      assert.strictEqual(spaceModelRes.reason, 'model_access');
+      const overlongModelRes = await testOpenAIConnection({ store: cred, model: 'm'.repeat(129) });
+      assert.strictEqual(overlongModelRes.ok, false);
+      assert.strictEqual(overlongModelRes.reason, 'model_access');
+
+      // Custom model rejected by provider reports model_access and records tested model
+      const providerRejectRes = await testOpenAIConnection({ store: cred, model: 'unknown-custom-model' });
+      assert.strictEqual(providerRejectRes.ok, false);
+      assert.strictEqual(providerRejectRes.reason, 'model_access');
+      assert.strictEqual(getOpenAICredentialStatus(cred).lastTestModel, 'unknown-custom-model');
+
+      // Cross-model ordering: Model A starts first, Model B (custom model) starts second and finishes first
+      const testAPromise = testOpenAIConnection({ store: cred, model: 'gpt-4o-mini' });
+      await new Promise((r) => setTimeout(r, 30));
+      const testBRes = await testOpenAIConnection({ store: cred, model: 'gpt-4.1-mini' });
+      assert.strictEqual(testBRes.ok, true);
+      assert.strictEqual(testBRes.model, 'gpt-4.1-mini');
+
+      // Now Model A finishes late -> must be rejected as stale and MUST NOT overwrite Model B
+      releaseModelA();
+      const testARes = await testAPromise;
+      assert.strictEqual(testARes.stale, true);
+      assert.strictEqual(testARes.outcome, 'stale');
+
+      const statusAfterRace = getOpenAICredentialStatus(cred);
+      assert.strictEqual(statusAfterRace.lastTestModel, 'gpt-4.1-mini');
+      assert.strictEqual(statusAfterRace.lastTestOutcome, 'passed');
+
+      // Simulate restart: reopen DB and verify newer custom model test allocates higher seq and succeeds
+      const snap = cred.getOpenAIKeySnapshot()!;
+      const staleSqlWrite = cred.recordOpenAITestResultIfCurrent({
+        expectedVersion: snap.credentialVersion,
+        expectedFingerprint: snap.keyFingerprint,
+        expectedModel: 'gpt-4o-mini',
+        testSeq: 1,
+        outcome: 'failed',
+        error: 'stale seq 1',
+      });
+      assert.strictEqual(staleSqlWrite, false);
+
+      store.getRawDb().close();
+      const storeRestarted = new TaskStore(dbPath);
+      const credRestarted = new AppCredentialStore(storeRestarted);
+      assert.strictEqual(getOpenAICredentialStatus(credRestarted).lastTestModel, 'gpt-4.1-mini');
+
+      const postRestartRes = await testOpenAIConnection({ store: credRestarted, model: 'ft:gpt-4o-mini:acme:custom:1' });
+      assert.strictEqual(postRestartRes.ok, true);
+      assert.strictEqual(getOpenAICredentialStatus(credRestarted).lastTestModel, 'ft:gpt-4o-mini:acme:custom:1');
+      assert.ok(observedModels.includes('gpt-4.1-mini'));
+      assert.ok(observedModels.includes('ft:gpt-4o-mini:acme:custom:1'));
+      storeRestarted.getRawDb().close();
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
 });
