@@ -28,6 +28,7 @@ interface TaskDetailModalProps {
     taskId: string;
     targetStatus: TaskStatus;
     reason?: string;
+    nextAction?: string;
     message: string;
   } | null;
   lastExecutionInfo?: {
@@ -42,6 +43,10 @@ interface TaskDetailModalProps {
   allTasks: Task[];
   onExecuteAgentOnTask: (task: Task, agent: Agent) => Promise<void>;
   isExecutingStep: boolean;
+  onRegisterTask?: (
+    taskId: string,
+  ) => Promise<{ ok: boolean; code?: string; nextAction?: string; error?: string }>;
+  onOpenProjectSettings?: () => void;
   onReviewTask?: (
     taskId: string,
     decision: 'approve' | 'request_changes',
@@ -98,6 +103,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   allTasks,
   onExecuteAgentOnTask,
   isExecutingStep,
+  onRegisterTask,
+  onOpenProjectSettings,
   onReviewTask,
   onDeliverRun,
 }) => {
@@ -114,6 +121,10 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   const [localReviewApproved, setLocalReviewApproved] = useState(false);
 
   const [runEvidence, setRunEvidence] = useState<TaskRunsEvidenceResponse | null>(null);
+  const [authoritativeTaskRegistered, setAuthoritativeTaskRegistered] = useState<boolean | null>(null);
+  const [isRegisteringTask, setIsRegisteringTask] = useState(false);
+  const [registrationError, setRegistrationError] = useState<string | null>(null);
+  const [registrationCode, setRegistrationCode] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
   const [isLoadingRuns, setIsLoadingRuns] = useState(true);
   const [runsLoadError, setRunsLoadError] = useState<string | null>(null);
@@ -148,12 +159,13 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
         setRunsLoadError(null);
       }
       try {
-        const res = await projectApi.getTaskRuns(projectId, task.id, selectedRunId, controller.signal);
+        const res = await projectApi.getTaskRunsWithRegistration(projectId, task.id, selectedRunId, controller.signal);
         if (!active || !mountedRef.current || controller.signal.aborted) return;
-        setRunEvidence(res);
+        setRunEvidence(res.evidence);
+        setAuthoritativeTaskRegistered(res.authoritativeTaskRegistered);
         setRunsLoadError(null);
 
-        if (res && (res.run.status === 'pending' || res.run.status === 'running')) {
+        if (res.evidence && (res.evidence.run.status === 'pending' || res.evidence.run.status === 'running')) {
           pollTimer = setTimeout(() => {
             if (active && mountedRef.current && !controller.signal.aborted) {
               void loadRuns(false);
@@ -297,6 +309,55 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
     if (!assignee) return;
     await onExecuteAgentOnTask(task, assignee);
   };
+
+  const renderRegistrationControl = (buttonTestId: string) => (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        {onRegisterTask && (
+          <button
+            type="button"
+            data-testid={buttonTestId}
+            disabled={isRegisteringTask}
+            onClick={async () => {
+              setRegistrationError(null);
+              setRegistrationCode(null);
+              setIsRegisteringTask(true);
+              try {
+                const res = await onRegisterTask(task.id);
+                if (!res.ok && mountedRef.current) {
+                  setRegistrationCode(res.code || null);
+                  setRegistrationError(res.error || 'Task registration failed.');
+                }
+              } finally {
+                if (mountedRef.current) setIsRegisteringTask(false);
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
+          >
+            {isRegisteringTask ? 'Registering...' : 'Register in Authoritative Store'}
+          </button>
+        )}
+        {registrationCode === 'REPOSITORY_CONFIGURATION_REQUIRED' && onOpenProjectSettings && (
+          <button
+            type="button"
+            data-testid="open-project-settings-from-task-btn"
+            onClick={() => {
+              onClose();
+              onOpenProjectSettings();
+            }}
+            className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+          >
+            Open Project Settings
+          </button>
+        )}
+      </div>
+      {registrationError && (
+        <p data-testid="task-registration-error" className="text-[11px] text-rose-300">
+          {registrationError}
+        </p>
+      )}
+    </>
+  );
 
   return (
     <div
@@ -490,9 +551,29 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 )}
               </div>
               <p className="leading-relaxed text-rose-100">{transitionFeedback.message}</p>
-              {transitionFeedback.targetStatus === 'done' && (
-                <p className="text-[11px] text-rose-300/90">
-                  Authoritative status remains <span className="font-mono font-semibold">{task.status}</span>. Moving to Done requires recorded delivery and human approval; UI approval/delivery controls are separate later stages.
+              {transitionFeedback.reason === 'unregistered-task' ? (
+                <div className="pt-1.5 space-y-2">
+                  <p className="text-[11px] text-rose-200/90">
+                    Authoritative status cannot advance because this task only exists in projected board state.
+                    Registering creates an authoritative <span className="font-mono font-semibold">todo</span> record
+                    without granting verification or approval.
+                  </p>
+                  {renderRegistrationControl('register-authoritative-task-btn')}
+                </div>
+              ) : transitionFeedback.nextAction === 'execute_agent_step' ? (
+                <p className="text-[11px] text-rose-200/90">
+                  Authoritative status remains <span className="font-mono font-semibold">{task.status}</span>. Next
+                  action: run <span className="font-semibold">Execute Agent Step on This Task</span> below to generate
+                  fresh passing verification evidence.
+                </p>
+              ) : (transitionFeedback.nextAction === 'approve_and_deliver' || transitionFeedback.targetStatus === 'done') && (
+                <p className="text-[11px] text-rose-200/90">
+                  Authoritative status remains <span className="font-mono font-semibold">{task.status}</span>. Move to
+                  Done is separate from <span className="font-semibold">Approve Review</span> and{' '}
+                  <span className="font-semibold">Deliver PR</span>: inspect <span className="font-semibold">Runs &amp; Evidence</span>{' '}
+                  below, click <span className="font-semibold">Approve Review</span>, then click{' '}
+                  <span className="font-semibold">Push &amp; Create PR</span> (or{' '}
+                  <span className="font-semibold">Approve &amp; Deliver PR</span>).
                 </p>
               )}
             </div>
@@ -976,15 +1057,38 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 {runsLoadError}
               </div>
             ) : !runEvidence ? (
-              <div
-                data-testid="task-no-runs-state"
-                className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 text-xs text-slate-400 space-y-1"
-              >
-                <p className="font-semibold text-slate-300">No runs recorded for this task yet.</p>
-                <p className="text-[11px] text-slate-500">
-                  Run ID: Not recorded · Candidate Revision: Not recorded · Verification: Not available
-                </p>
-              </div>
+              authoritativeTaskRegistered === false ? (
+                <div
+                  data-testid="unregistered-task-state"
+                  className="p-3.5 rounded-lg bg-amber-950/35 border border-amber-800/60 text-xs text-amber-100 space-y-2"
+                >
+                  <p className="font-semibold text-amber-300">
+                    Unregistered Board Task (Missing Authoritative Record)
+                  </p>
+                  <p className="text-[11px] text-amber-100/90 leading-relaxed">
+                    This task exists only in projected board state and cannot enter Review or Done. Register it in the
+                    authoritative store as <span className="font-mono">todo</span> (without granting verification or
+                    approval), then run <span className="font-semibold">Execute Agent Step</span>.
+                  </p>
+                  {renderRegistrationControl('runs-register-authoritative-task-btn')}
+                </div>
+              ) : (
+                <div
+                  data-testid="task-no-runs-state"
+                  className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 text-xs text-slate-300 space-y-1.5"
+                >
+                  <p className="font-semibold text-slate-200">
+                    No runs or verification evidence recorded for this task yet.
+                  </p>
+                  <p className="text-[11px] text-slate-400">
+                    Missing requirement: passing authoritative run verification. Next action: click{' '}
+                    <span className="font-semibold text-indigo-300">Execute Agent Step on This Task</span> below.
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Run ID: Not recorded · Candidate Revision: Not recorded · Verification: Not available
+                  </p>
+                </div>
+              )
             ) : (
               <div className="space-y-3">
                 {/* Run Metadata Grid */}

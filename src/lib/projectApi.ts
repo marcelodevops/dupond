@@ -444,12 +444,12 @@ export const projectApi = {
   /**
    * Read authoritative run history and read-only candidate evidence for a task
    */
-  async getTaskRuns(
+  async getTaskRunsWithRegistration(
     projectId: string,
     taskId: string,
     runId?: string,
     signal?: AbortSignal
-  ): Promise<TaskRunsEvidenceResponse | null> {
+  ): Promise<{ evidence: TaskRunsEvidenceResponse | null; authoritativeTaskRegistered: boolean | null }> {
     const query = runId ? `?runId=${encodeURIComponent(runId)}` : '';
     const res = await apiFetch(
       `/api/tasks/${encodeURIComponent(taskId)}/runs${query}`,
@@ -459,9 +459,6 @@ export const projectApi = {
         signal,
       }
     );
-    if (res.status === 404) {
-      return null;
-    }
     const text = await res.text();
     let data: any = null;
     if (text) {
@@ -471,10 +468,31 @@ export const projectApi = {
         data = text;
       }
     }
+    if (res.status === 404) {
+      return {
+        evidence: null,
+        authoritativeTaskRegistered:
+          typeof data?.authoritativeTaskRegistered === 'boolean' ? data.authoritativeTaskRegistered : null,
+      };
+    }
     if (!res.ok) {
       throw new ProjectApiError(res.status, data || res.statusText || 'Failed to load run evidence');
     }
-    return data as TaskRunsEvidenceResponse;
+    return {
+      evidence: data as TaskRunsEvidenceResponse,
+      authoritativeTaskRegistered:
+        typeof data?.authoritativeTaskRegistered === 'boolean' ? data.authoritativeTaskRegistered : true,
+    };
+  },
+
+  async getTaskRuns(
+    projectId: string,
+    taskId: string,
+    runId?: string,
+    signal?: AbortSignal
+  ): Promise<TaskRunsEvidenceResponse | null> {
+    const { evidence } = await this.getTaskRunsWithRegistration(projectId, taskId, runId, signal);
+    return evidence;
   },
 
   async reviewTask(

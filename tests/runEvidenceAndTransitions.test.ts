@@ -1045,4 +1045,140 @@ describe('Authoritative task transitions & read-only run evidence', () => {
 
     store.getRawDb().close();
   }, 25000);
+
+  it('blocks unregistered board tasks without legacy artifact fallback and supports safe authoritative registration', async () => {
+    const store = new TaskStore(dbPath);
+    const projectStore = new ProjectStore(store);
+    const projA = projectStore.createProject({ name: 'Board Recovery A', actor: 'test-actor' });
+    const projB = projectStore.createProject({ name: 'Board Recovery B', actor: 'test-actor' });
+
+    const boardOnlyTask = {
+      id: 'task-board-only-1',
+      key: 'LEG-105',
+      title: 'Legacy Board-Only Task',
+      description: 'Exists only in projected board state',
+      status: 'review',
+      priority: 'high',
+      epicId: 'EPIC-1',
+      assignedAgentId: 'agent-dev',
+      estimatedHours: 2,
+      spentHours: 0,
+      subtasks: [{ id: 'sub-1', title: 'Check export', completed: true }],
+      deliverables: [],
+      dependencies: [],
+      tags: [],
+      lastUpdated: 'Just now',
+    };
+    const projAState = projectStore.getProjectState<Record<string, any>>(projA.id, {});
+    projectStore.saveProjectState(projA.id, { ...projAState, tasks: [boardOnlyTask] });
+
+    const authToken = 'test-auth-token';
+    const port = await getFreePort();
+    serverProc = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PORT: String(port),
+        DUPOND_DB_PATH: dbPath,
+        DUPOND_STATE_FILE: statePath,
+        DUPOND_CONN_KEY_PATH: keyPath,
+        DUPOND_AUTH_TOKEN: authToken,
+      },
+      detached: true,
+      stdio: 'ignore',
+    });
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 40; i++) {
+      try {
+        const r = await fetch(`${baseUrl}/api/health`);
+        if (r.ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    const headers = (pid: string) => ({
+      Authorization: `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+      'X-Dupond-Project-Id': pid,
+    });
+
+    // 1. Transitioning unregistered task to done/review fails with unregistered-task, never legacy .dupond_artifacts
+    const transitionDoneRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${boardOnlyTask.id}/transition`, {
+      method: 'POST',
+      headers: headers(projA.id),
+      body: JSON.stringify({ status: 'done' }),
+    });
+    assert.strictEqual(transitionDoneRes.status, 422);
+    const transitionDoneJson = (await transitionDoneRes.json()) as any;
+    assert.strictEqual(transitionDoneJson.reason, 'unregistered-task');
+    assert.strictEqual(transitionDoneJson.code, 'UNREGISTERED_TASK');
+    assert.strictEqual(transitionDoneJson.nextAction, 'register_task');
+    assert.ok(!String(transitionDoneJson.error || '').includes('Inspected Physical Code Artifact'));
+
+    // 2. GET /api/tasks/:id/runs reports authoritativeTaskRegistered: false
+    const runsBeforeRes = await fetch(`${baseUrl}/api/tasks/${boardOnlyTask.id}/runs`, {
+      headers: headers(projA.id),
+    });
+    assert.strictEqual(runsBeforeRes.status, 404);
+    const runsBeforeJson = (await runsBeforeRes.json()) as any;
+    assert.strictEqual(runsBeforeJson.authoritativeTaskRegistered, false);
+
+    // 3. Foreign project cannot register projA's board-only task
+    const foreignRegRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${boardOnlyTask.id}/register`, {
+      method: 'POST',
+      headers: headers(projB.id),
+    });
+    assert.ok(foreignRegRes.status === 403 || foreignRegRes.status === 404);
+
+    // 4a. Without configured repository, registration is rejected (never defaults to orchestrator repo)
+    const regNoRepoRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${boardOnlyTask.id}/register`, {
+      method: 'POST',
+      headers: headers(projA.id),
+    });
+    assert.strictEqual(regNoRepoRes.status, 422);
+    const regNoRepoJson = (await regNoRepoRes.json()) as any;
+    assert.strictEqual(regNoRepoJson.success, false);
+    assert.strictEqual(regNoRepoJson.code, 'REPOSITORY_CONFIGURATION_REQUIRED');
+    assert.strictEqual(regNoRepoJson.nextAction, 'configure_project_repository');
+    assert.strictEqual(store.getTaskScoped(boardOnlyTask.id, projA.id), null);
+
+    // 4b. Configure project repository -> registration uses configured project repository and grants NO verification/approval
+    const updateProjRes = await fetch(`${baseUrl}/api/projects/${projA.id}`, {
+      method: 'PATCH',
+      headers: headers(projA.id),
+      body: JSON.stringify({ repository: { repoUrl: 'custom-org/custom-app', defaultBranch: 'main' } }),
+    });
+    assert.strictEqual(updateProjRes.status, 200);
+
+    const regRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${boardOnlyTask.id}/register`, {
+      method: 'POST',
+      headers: headers(projA.id),
+    });
+    assert.strictEqual(regRes.status, 200);
+    const regJson = (await regRes.json()) as any;
+    assert.strictEqual(regJson.success, true);
+    assert.strictEqual(regJson.task.status, 'todo');
+    assert.strictEqual(regJson.nextAction, 'execute_agent_step');
+
+    const dbTask = store.getTaskScoped(boardOnlyTask.id, projA.id);
+    assert.ok(dbTask);
+    assert.strictEqual(dbTask.targetRepo, 'custom-org/custom-app');
+    assert.strictEqual(dbTask.status, 'todo');
+    assert.strictEqual(dbTask.acceptanceCriteria.every((c) => c.completed === false), true);
+    assert.strictEqual(store.listRunsForTask(dbTask.id, projA.id).length, 0);
+
+    // 5. After registration, moving to review/done without evidence is blocked with missing-verification
+    const transitionReviewRes = await fetch(`${baseUrl}/api/orchestrate/tasks/${boardOnlyTask.id}/transition`, {
+      method: 'POST',
+      headers: headers(projA.id),
+      body: JSON.stringify({ status: 'review' }),
+    });
+    assert.strictEqual(transitionReviewRes.status, 422);
+    const transitionReviewJson = (await transitionReviewRes.json()) as any;
+    assert.strictEqual(transitionReviewJson.reason, 'no-evidence');
+    assert.strictEqual(transitionReviewJson.nextAction, 'execute_agent_step');
+
+    store.getRawDb().close();
+  }, 25000);
 });

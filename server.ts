@@ -152,19 +152,22 @@ app.post('/api/orchestrate/state', (req: Request, res: Response) => {
   res.json(result);
 });
 
+function resolveCoordinatorTaskProjectId(req: Request, taskId: string): string | null {
+  const requestedProjectId = parseProjectContextHeader(req) || undefined;
+  const dbProjectId =
+    (requestedProjectId ? taskStore.getTaskScoped(taskId, requestedProjectId)?.projectId : undefined) ||
+    taskStore.getProjectIdForTask(taskId);
+  const inRequestedCoordinator = requestedProjectId
+    ? coordinator.getState(requestedProjectId).tasks.some((t) => t.id === taskId || t.key === taskId)
+    : false;
+  const inDefaultCoordinator = coordinator.getState('default').tasks.some((t) => t.id === taskId || t.key === taskId);
+  return dbProjectId || (inRequestedCoordinator ? requestedProjectId! : inDefaultCoordinator ? 'default' : null);
+}
+
 // Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
 app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Response) => {
   try {
-    const requestedProjectId = parseProjectContextHeader(req) || undefined;
-    const dbProjectId =
-      (requestedProjectId ? taskStore.getTaskScoped(req.params.id, requestedProjectId)?.projectId : undefined) ||
-      taskStore.getProjectIdForTask(req.params.id);
-    const inRequestedCoordinator = requestedProjectId
-      ? coordinator.getState(requestedProjectId).tasks.some((t) => t.id === req.params.id || t.key === req.params.id)
-      : false;
-    const inDefaultCoordinator = coordinator.getState('default').tasks.some((t) => t.id === req.params.id || t.key === req.params.id);
-    const taskProjectId = dbProjectId || (inRequestedCoordinator ? requestedProjectId! : inDefaultCoordinator ? 'default' : null);
-    const projectId = projectContext(req, res, taskProjectId);
+    const projectId = projectContext(req, res, resolveCoordinatorTaskProjectId(req, req.params.id));
     if (!projectId) return;
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: 'status is required' });
@@ -176,6 +179,22 @@ app.post('/api/orchestrate/tasks/:id/transition', async (req: Request, res: Resp
     res.json(result);
   } catch (error: any) {
     res.status(500).json({ error: toClientMessage(error, 'Status transition failed') });
+  }
+});
+
+// Endpoint: Register a board-only/legacy task into the authoritative store without granting verification/approval
+app.post('/api/orchestrate/tasks/:id/register', (req: Request, res: Response) => {
+  try {
+    const projectId = projectContext(req, res, resolveCoordinatorTaskProjectId(req, req.params.id));
+    if (!projectId) return;
+
+    const result = coordinator.registerProjectedTask(req.params.id, projectId);
+    if (!result.success) {
+      return res.status(result.status || 422).json(result);
+    }
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: toClientMessage(error, 'Task registration failed') });
   }
 });
 
@@ -807,7 +826,13 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
       run = runs[0] || taskStore.getLatestRunForTask(lookupTaskId, projectId) || taskStore.getRunScoped(req.params.id, projectId);
     }
 
-    if (!run) return res.status(404).json({ error: 'No run found for task' });
+    if (!run) {
+      return res.status(404).json({
+        error: 'No run found for task',
+        authoritativeTaskRegistered: Boolean(scopedTask),
+        authoritativeStatus: scopedTask?.status ?? null,
+      });
+    }
     const attempts = taskStore.listAttempts(run.id, projectId);
     const verification = taskStore.getLatestVerification(run.id, projectId);
     const delivery = taskStore.getDeliveryForRun(run.id, projectId);
@@ -824,6 +849,7 @@ app.get('/api/tasks/:id/runs', (req: Request, res: Response) => {
     });
     return res.json({
       ...payload,
+      authoritativeTaskRegistered: Boolean(scopedTask),
       runs,
     });
   } catch (error: any) {
