@@ -1218,7 +1218,12 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     const identicalCard = makeCard('dup-same', 'DUP-1', 'review', 'Identical Duplicate');
     const unrelatedCard = makeCard('other-rev', 'OTH-1', 'review', 'Unrelated Review Task');
     const conflictV1 = makeCard('dup-conflict', 'CON-1', 'review', 'Variant One Title');
-    const conflictV2 = makeCard('dup-conflict', 'CON-1', 'in_progress', 'Variant Two Title');
+    const conflictV2 = {
+      ...makeCard('dup-conflict', 'CON-1', 'in_progress', 'Variant Two Title'),
+      description: 'Discarded variant details',
+      deliverables: ['discarded-only.ts'],
+      tags: ['discarded-tag'],
+    };
 
     const projAState = projectStore.getProjectState<Record<string, any>>(projA.id, {});
     projectStore.saveProjectState(projA.id, {
@@ -1307,6 +1312,21 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     assert.strictEqual(conflictRegRes.status, 409);
     assert.strictEqual(((await conflictRegRes.json()) as any).code, 'TASK_IDENTITY_CONFLICT');
 
+    // 3b. If durable preservation fails, resolution must fail visibly WITHOUT removing identityConflict
+    store.getRawDb().exec(
+      "CREATE TRIGGER block_identity_recovery BEFORE INSERT ON task_identity_recoveries BEGIN SELECT RAISE(ABORT, 'simulated preservation failure'); END;",
+    );
+    const failedResolveRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-conflict/resolve-conflict`, {
+      method: 'POST',
+      headers: headers(projA.id),
+      body: JSON.stringify({ variantIndex: 0 }),
+    });
+    assert.strictEqual(failedResolveRes.status, 500);
+    assert.strictEqual(((await failedResolveRes.json()) as any).code, 'RECOVERY_PRESERVATION_FAILED');
+    const stateAfterFailedResolve = (await (await fetch(`${baseUrl}/api/orchestrate/state`, { headers: headers(projA.id) })).json()) as any;
+    assert.strictEqual(stateAfterFailedResolve.tasks.find((t: any) => t.id === 'dup-conflict').identityConflict.variantCount, 2);
+    store.getRawDb().exec('DROP TRIGGER block_identity_recovery;');
+
     // Resolve conflict explicitly by choosing variant 1 (index 0)
     const resolveRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-conflict/resolve-conflict`, {
       method: 'POST',
@@ -1317,6 +1337,7 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     const resolveJson = (await resolveRes.json()) as any;
     assert.strictEqual(resolveJson.task.title, 'Variant One Title');
     assert.strictEqual(resolveJson.task.identityConflict, undefined);
+    assert.ok(resolveJson.recoveryId);
 
     // 4. Registering 'dup-same' moves ONLY 'dup-same' in projA to todo; unrelated 'other-rev' and projB 'dup-same' remain review
     const regRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-same/register`, {
@@ -1333,5 +1354,98 @@ describe('Authoritative task transitions & read-only run evidence', () => {
     assert.strictEqual(store.getTaskScoped('dup-same', projB.id), null);
 
     store.getRawDb().close();
-  }, 25000);
+
+    // 5. Restart server and verify preserved variants (including discarded-only fields) survive and remain project-scoped
+    try {
+      process.kill(-serverProc.pid!, 'SIGTERM');
+    } catch {}
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, 1500);
+      serverProc!.once('exit', () => {
+        clearTimeout(t);
+        resolve();
+      });
+    });
+
+    const port2 = await getFreePort();
+    serverProc = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PORT: String(port2),
+        DUPOND_DB_PATH: dbPath,
+        DUPOND_STATE_FILE: statePath,
+        DUPOND_CONN_KEY_PATH: keyPath,
+        DUPOND_AUTH_TOKEN: authToken,
+      },
+      detached: true,
+      stdio: 'ignore',
+    });
+    const baseUrl2 = `http://127.0.0.1:${port2}`;
+    for (let i = 0; i < 40; i++) {
+      try {
+        const r = await fetch(`${baseUrl2}/api/health`);
+        if (r.ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    const recARes = await fetch(`${baseUrl2}/api/tasks/dup-conflict/identity-recoveries`, {
+      headers: headers(projA.id),
+    });
+    assert.strictEqual(recARes.status, 200);
+    const recAJson = (await recARes.json()) as any;
+    assert.strictEqual(recAJson.recoveries.length, 1);
+    assert.strictEqual(recAJson.recoveries[0].chosenVariantIndex, 0);
+    assert.strictEqual(recAJson.recoveries[0].variants.length, 2);
+    assert.strictEqual(recAJson.recoveries[0].variants[1].description, 'Discarded variant details');
+    assert.deepStrictEqual(recAJson.recoveries[0].variants[1].deliverables, ['discarded-only.ts']);
+    assert.deepStrictEqual(recAJson.recoveries[0].variants[1].tags, ['discarded-tag']);
+
+    const recBRes = await fetch(`${baseUrl2}/api/tasks/dup-conflict/identity-recoveries`, {
+      headers: headers(projB.id),
+    });
+    assert.strictEqual(recBRes.status, 200);
+    assert.strictEqual(((await recBRes.json()) as any).recoveries.length, 0);
+  }, 30000);
+
+  it('isolates e2ePipeline.test.ts from pre-existing sentinel DB, state, and key files', () => {
+    const sentinelDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-sentinel-'));
+    const sentinelDb = path.join(sentinelDir, 'sentinel.db');
+    const sentinelState = path.join(sentinelDir, 'sentinel_state.json');
+    const sentinelKey = path.join(sentinelDir, '.sentinel_key');
+
+    const dbBytes = Buffer.from('SENTINEL-DB-BYTES-DO-NOT-TOUCH\n');
+    const stateBytes = Buffer.from(JSON.stringify({ tasks: [{ id: 'sentinel-1', status: 'review' }] }));
+    const keyBytes = Buffer.from('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef');
+
+    fs.writeFileSync(sentinelDb, dbBytes);
+    fs.writeFileSync(sentinelState, stateBytes);
+    fs.writeFileSync(sentinelKey, keyBytes, { mode: 0o600 });
+
+    try {
+      execFileSync(
+        process.execPath,
+        [path.resolve(process.cwd(), 'node_modules', '.bin', 'vitest'), 'run', 'tests/e2ePipeline.test.ts'],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            DUPOND_DB_PATH: sentinelDb,
+            DUPOND_STATE_FILE: sentinelState,
+            DUPOND_CONN_KEY_PATH: sentinelKey,
+          },
+          stdio: 'pipe',
+        },
+      );
+
+      assert.strictEqual(Buffer.compare(fs.readFileSync(sentinelDb), dbBytes), 0);
+      assert.strictEqual(Buffer.compare(fs.readFileSync(sentinelState), stateBytes), 0);
+      assert.strictEqual(Buffer.compare(fs.readFileSync(sentinelKey), keyBytes), 0);
+      assert.strictEqual(fs.existsSync(`${sentinelDb}-wal`), false);
+      assert.strictEqual(fs.existsSync(`${sentinelDb}-shm`), false);
+    } finally {
+      fs.rmSync(sentinelDir, { recursive: true, force: true });
+    }
+  }, 120000);
 });
