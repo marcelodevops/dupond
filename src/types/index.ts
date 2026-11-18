@@ -48,6 +48,13 @@ export interface Task {
   workerConfig?: { provider: string; model: string };
   maxAttempts?: number;
   timeoutSeconds?: number;
+  identityConflict?: {
+    taskId: string;
+    taskKey: string;
+    detectedAt: string;
+    variantCount: number;
+    variants: Array<Record<string, unknown>>;
+  };
 }
 
 export interface Epic {

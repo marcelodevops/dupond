@@ -25,6 +25,7 @@ import { defaultProjectStore } from './projects/projectStore.js';
 import type { TaskRecord } from './db/schema.js';
 import { mergePostedCriteria, promoteChecklistItems } from '../services/acceptanceMapping.js';
 import { defaultLifecycleService } from './lifecycle/lifecycleService.js';
+import { reconcileProjectTaskIdentity, TaskIdentityReconciliationResult } from './tasks/taskIdentity.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
 import { WorkspaceManager } from './workspace/workspaceManager.js';
 import { resolveTargetRepository, orchestratorRepoSlug, isOrchestratorSelfTarget } from './workspace/targetRepositoryResolver.js';
@@ -179,9 +180,48 @@ export class CoordinatorEngine {
     }
   }
 
+  private reconcileAndAuditTaskIdentity(tasks: Task[], projectId: string): TaskIdentityReconciliationResult {
+    const res = reconcileProjectTaskIdentity(tasks);
+    for (const c of res.consolidated) {
+      try {
+        taskStore.recordAudit({
+          taskId: c.taskId,
+          projectId,
+          eventType: 'TASK_DUPLICATE_CONSOLIDATED',
+          actor: 'system',
+          details: {
+            taskKey: c.taskKey,
+            duplicateCount: c.duplicateCount,
+            resolution: 'collapsed_identical',
+          },
+        });
+      } catch {}
+    }
+    for (const conf of res.conflicts) {
+      if (tasks.filter((t) => (t.id || t.key) === conf.taskId).length > 1) {
+        try {
+          taskStore.recordAudit({
+            taskId: conf.taskId,
+            projectId,
+            eventType: 'TASK_DUPLICATE_CONFLICT',
+            actor: 'system',
+            details: {
+              taskKey: conf.taskKey,
+              variantCount: conf.variantCount,
+              variantStatuses: conf.variants.map((v) => v.status),
+              detectedAt: conf.detectedAt,
+            },
+          });
+        } catch {}
+      }
+    }
+    return res;
+  }
+
   private projectAuthoritativeStatusesInternal(): number {
-    let changed = 0;
-    const nextTasks = this.state.tasks.map((task) => {
+    const idRec = this.reconcileAndAuditTaskIdentity(this.state.tasks, this.activeProjectId);
+    let changed = idRec.changed ? 1 : 0;
+    const nextTasks = idRec.tasks.map((task) => {
       const dbTask = taskStore.getTask(task.id, this.activeProjectId) || taskStore.getTask(task.key, this.activeProjectId);
       if (!dbTask) return task;
       const projected = this.toUiStatus(dbTask.status);
@@ -311,7 +351,14 @@ export class CoordinatorEngine {
 
   public getState(projectId = this.activeProjectId): ServerState {
     if (projectId === this.activeProjectId) return this.state;
-    return defaultProjectStore.getProjectState(projectId, this.emptyState());
+    const projState = defaultProjectStore.getProjectState(projectId, this.emptyState());
+    const idRec = this.reconcileAndAuditTaskIdentity(projState.tasks || [], projectId);
+    if (idRec.changed) {
+      const updated = { ...projState, tasks: idRec.tasks };
+      defaultProjectStore.saveProjectState(projectId, updated);
+      return updated;
+    }
+    return projState;
   }
 
   public reloadState(projectId = this.activeProjectId): void {
@@ -547,7 +594,8 @@ export class CoordinatorEngine {
       // Whatever the caller posted, the board then displays the contract the
       // authoritative store actually holds. A requirement that was refused,
       // revoked, or re-bound cannot keep being shown as if it were granted.
-      validatedPartial.tasks = validatedPartial.tasks.map((task) => this.mirrorAuthoritativeSpec(
+      const idRec = this.reconcileAndAuditTaskIdentity(validatedPartial.tasks, this.activeProjectId);
+      validatedPartial.tasks = idRec.tasks.map((task) => this.mirrorAuthoritativeSpec(
         task,
         taskStore.getTask(task.id || '', this.activeProjectId) || taskStore.getTask(task.key || '', this.activeProjectId),
       ));
@@ -589,6 +637,7 @@ export class CoordinatorEngine {
     reason?: string;
     code?: string;
     nextAction?: string;
+    correlationId?: string;
     evidence?: unknown;
   }> {
     const effectiveProjectId = projectId || this.activeProjectId;
@@ -596,6 +645,35 @@ export class CoordinatorEngine {
     const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
       return { success: false, error: `Task ${taskId} not found` };
+    }
+
+    if (task.identityConflict) {
+      const correlationId = crypto.randomUUID();
+      try {
+        taskStore.recordAudit({
+          taskId: task.id,
+          projectId: effectiveProjectId,
+          eventType: 'TRANSITION_REFUSED_IDENTITY_CONFLICT',
+          actor: 'operator',
+          details: {
+            correlationId,
+            taskKey: task.key,
+            requestedStatus: targetStatus,
+            currentProjectedStatus: task.status,
+            variantCount: task.identityConflict.variantCount,
+            reason: 'identity-conflict',
+          },
+        });
+      } catch {}
+      return {
+        success: false,
+        task,
+        reason: 'identity-conflict',
+        code: 'TASK_IDENTITY_CONFLICT',
+        nextAction: 'resolve_identity_conflict',
+        correlationId,
+        error: `Conflicting duplicate copies exist for task ${task.key} (${task.identityConflict.variantCount} variants). Resolve the identity conflict before transitioning.`,
+      };
     }
 
     const saveProjectTasks = (updatedTask: Task) => {
@@ -658,13 +736,30 @@ export class CoordinatorEngine {
     }
 
     if (targetStatus === 'review' || targetStatus === 'done') {
+      const correlationId = crypto.randomUUID();
+      try {
+        taskStore.recordAudit({
+          taskId: task.id,
+          projectId: effectiveProjectId,
+          eventType: 'TRANSITION_REFUSED_UNREGISTERED',
+          actor: 'operator',
+          details: {
+            correlationId,
+            taskKey: task.key,
+            requestedStatus: targetStatus,
+            currentProjectedStatus: task.status,
+            reason: 'unregistered-task',
+          },
+        });
+      } catch {}
       return {
         success: false,
         task,
         reason: 'unregistered-task',
         code: 'UNREGISTERED_TASK',
         nextAction: 'register_task',
-        error: `Task ${task.key} exists only in projected board state and is not registered in the authoritative task store. Register it into the authoritative store, then run Execute Agent Step to generate verified evidence.`,
+        correlationId,
+        error: `Task ${task.key} exists only in projected board state and is not registered in the authoritative task store. Registering will move it to To Do; fresh execution and verification are required before Review.`,
       };
     }
 
@@ -817,9 +912,29 @@ export class CoordinatorEngine {
   } {
     const effectiveProjectId = projectId || this.activeProjectId;
     const projectState = this.getState(effectiveProjectId);
-    const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
+    const idRec = this.reconcileAndAuditTaskIdentity(projectState.tasks, effectiveProjectId);
+    if (idRec.changed) {
+      if (effectiveProjectId === this.activeProjectId) {
+        this.state.tasks = idRec.tasks;
+        this.saveStateToDisk();
+      } else {
+        defaultProjectStore.saveProjectState(effectiveProjectId, { ...projectState, tasks: idRec.tasks });
+      }
+    }
+    const task = idRec.tasks.find((t) => t.id === taskId || t.key === taskId);
     if (!task) {
       return { success: false, status: 404, error: `Task ${taskId} not found in project ${effectiveProjectId}.` };
+    }
+
+    if (task.identityConflict) {
+      return {
+        success: false,
+        status: 409,
+        code: 'TASK_IDENTITY_CONFLICT',
+        reason: 'identity-conflict',
+        nextAction: 'resolve_identity_conflict',
+        error: `Conflicting duplicate copies exist for task ${task.key}. Resolve the identity conflict before registering.`,
+      };
     }
 
     const existing =
@@ -883,6 +998,68 @@ export class CoordinatorEngine {
       dbTask,
       nextAction: 'execute_agent_step',
     };
+  }
+
+  public resolveTaskIdentityConflict(
+    taskId: string,
+    variantIndex: number,
+    projectId?: string,
+  ): { success: boolean; status?: number; task?: Task; error?: string } {
+    const effectiveProjectId = projectId || this.activeProjectId;
+    const projectState = this.getState(effectiveProjectId);
+    const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
+    if (!task) {
+      return { success: false, status: 404, error: `Task ${taskId} not found in project ${effectiveProjectId}.` };
+    }
+    const conflict = task.identityConflict;
+    if (!conflict || !Array.isArray(conflict.variants) || conflict.variants.length === 0) {
+      return { success: false, status: 400, error: `Task ${task.key} has no active identity conflict.` };
+    }
+    if (!Number.isInteger(variantIndex) || variantIndex < 0 || variantIndex >= conflict.variants.length) {
+      return {
+        success: false,
+        status: 400,
+        error: `variantIndex must be between 0 and ${conflict.variants.length - 1}.`,
+      };
+    }
+
+    const chosenRaw = conflict.variants[variantIndex] as unknown as Task;
+    const dbTask =
+      taskStore.getTaskScoped(task.id, effectiveProjectId) ||
+      taskStore.getTaskScoped(task.key, effectiveProjectId);
+    const resolvedTask: Task = {
+      ...chosenRaw,
+      id: task.id,
+      status: dbTask ? this.toUiStatus(dbTask.status) : chosenRaw.status,
+      lastUpdated: 'Just now',
+    };
+    delete resolvedTask.identityConflict;
+
+    if (effectiveProjectId === this.activeProjectId) {
+      this.state.tasks = this.state.tasks.map((t) => (t.id === task.id ? resolvedTask : t));
+      this.saveStateToDisk();
+    } else {
+      const latestState = this.getState(effectiveProjectId);
+      latestState.tasks = latestState.tasks.map((t) => (t.id === task.id ? resolvedTask : t));
+      defaultProjectStore.saveProjectState(effectiveProjectId, latestState);
+    }
+
+    try {
+      taskStore.recordAudit({
+        taskId: task.id,
+        projectId: effectiveProjectId,
+        eventType: 'TASK_IDENTITY_CONFLICT_RESOLVED',
+        actor: 'operator',
+        details: {
+          taskKey: resolvedTask.key,
+          chosenVariantIndex: variantIndex,
+          variantCount: conflict.variants.length,
+          resolvedStatus: resolvedTask.status,
+        },
+      });
+    } catch {}
+
+    return { success: true, task: resolvedTask };
   }
 
   /**

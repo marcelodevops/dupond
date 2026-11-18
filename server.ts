@@ -198,6 +198,22 @@ app.post('/api/orchestrate/tasks/:id/register', (req: Request, res: Response) =>
   }
 });
 
+// Endpoint: Explicitly resolve a conflicting duplicate task identity by choosing one preserved variant
+app.post('/api/orchestrate/tasks/:id/resolve-conflict', (req: Request, res: Response) => {
+  try {
+    const projectId = projectContext(req, res, resolveCoordinatorTaskProjectId(req, req.params.id));
+    if (!projectId) return;
+    const { variantIndex } = req.body || {};
+    const result = coordinator.resolveTaskIdentityConflict(req.params.id, Number(variantIndex), projectId);
+    if (!result.success) {
+      return res.status(result.status || 400).json(result);
+    }
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: toClientMessage(error, 'Conflict resolution failed') });
+  }
+});
+
 // Endpoint: Single Step Execution Trigger for "Next Cycle"
 app.post('/api/orchestrate/engine/step', async (_req: Request, res: Response) => {
   try {
