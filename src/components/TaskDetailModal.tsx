@@ -46,6 +46,7 @@ interface TaskDetailModalProps {
   onRegisterTask?: (
     taskId: string,
   ) => Promise<{ ok: boolean; code?: string; nextAction?: string; error?: string }>;
+  onResolveIdentityConflict?: (taskId: string, variantIndex: number) => Promise<{ ok: boolean; error?: string }>;
   onOpenProjectSettings?: () => void;
   onReviewTask?: (
     taskId: string,
@@ -104,6 +105,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   onExecuteAgentOnTask,
   isExecutingStep,
   onRegisterTask,
+  onResolveIdentityConflict,
   onOpenProjectSettings,
   onReviewTask,
   onDeliverRun,
@@ -334,7 +336,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             }}
             className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
           >
-            {isRegisteringTask ? 'Registering...' : 'Register in Authoritative Store'}
+            {isRegisteringTask ? 'Registering...' : 'Register and Return to To Do'}
           </button>
         )}
         {registrationCode === 'REPOSITORY_CONFIGURATION_REQUIRED' && onOpenProjectSettings && (
@@ -533,6 +535,52 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             </div>
           </div>
 
+          {/* Task Identity Conflict Recovery */}
+          {task.identityConflict && (
+            <div
+              data-testid="task-identity-conflict-banner"
+              className="p-3.5 rounded-xl border bg-amber-950/45 border-amber-700/70 text-amber-100 text-xs space-y-2"
+            >
+              <div className="font-bold uppercase tracking-wider text-amber-300">
+                Identity Conflict Detected ({task.identityConflict.variantCount} variants for {task.key})
+              </div>
+              <p className="text-[11px] text-amber-100/90 leading-relaxed">
+                Multiple conflicting board copies share ID <span className="font-mono">{task.id}</span>. Choose which
+                preserved variant to keep before registering or transitioning this task.
+              </p>
+              <div className="space-y-2">
+                {task.identityConflict.variants.map((variant, idx) => (
+                  <div
+                    key={idx}
+                    className="p-2.5 rounded-lg bg-slate-950/80 border border-amber-800/50 flex flex-wrap items-center justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="font-semibold text-slate-100">
+                        Variant {idx + 1}: {String(variant.title || task.title)} ({String(variant.status || 'unknown')})
+                      </div>
+                      {variant.description ? (
+                        <div className="text-[11px] text-slate-400 truncate">
+                          {String(variant.description)}
+                        </div>
+                      ) : null}
+                    </div>
+                    {onResolveIdentityConflict && (
+                      <button
+                        type="button"
+                        data-testid={`resolve-conflict-variant-${idx}`}
+                        disabled={isRegisteringTask}
+                        onClick={() => void onResolveIdentityConflict(task.id, idx)}
+                        className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold"
+                      >
+                        Use Variant {idx + 1}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Persistent Authoritative Transition Refusal */}
           {transitionFeedback && (
             <div
@@ -554,9 +602,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
               {transitionFeedback.reason === 'unregistered-task' ? (
                 <div className="pt-1.5 space-y-2">
                   <p className="text-[11px] text-rose-200/90">
-                    Authoritative status cannot advance because this task only exists in projected board state.
-                    Registering creates an authoritative <span className="font-mono font-semibold">todo</span> record
-                    without granting verification or approval.
+                    This task has no authoritative execution record. Registering will move it to To Do. Fresh
+                    execution and verification are required before Review.
                   </p>
                   {renderRegistrationControl('register-authoritative-task-btn')}
                 </div>
@@ -1066,9 +1113,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                     Unregistered Board Task (Missing Authoritative Record)
                   </p>
                   <p className="text-[11px] text-amber-100/90 leading-relaxed">
-                    This task exists only in projected board state and cannot enter Review or Done. Register it in the
-                    authoritative store as <span className="font-mono">todo</span> (without granting verification or
-                    approval), then run <span className="font-semibold">Execute Agent Step</span>.
+                    This task has no authoritative execution record. Registering will move it to To Do. Fresh
+                    execution and verification are required before Review.
                   </p>
                   {renderRegistrationControl('runs-register-authoritative-task-btn')}
                 </div>

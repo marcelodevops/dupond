@@ -576,6 +576,44 @@ function AppWorkspace() {
     }
   };
 
+  const handleResolveIdentityConflict = async (
+    taskId: string,
+    variantIndex: number,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const capturedProjectId = currentProject?.id || getActiveProjectId();
+    try {
+      const res = await apiFetch(`/api/orchestrate/tasks/${encodeURIComponent(taskId)}/resolve-conflict`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {}),
+        },
+        body: JSON.stringify({ variantIndex }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (capturedProjectId !== activeProjectIdRef.current) {
+        return { ok: false, error: 'Project switched during conflict resolution.' };
+      }
+      if (!res.ok || !data.success) {
+        const msg = data.error || `Conflict resolution failed (HTTP ${res.status})`;
+        showToast('Conflict Resolution Failed', msg, 'alert');
+        return { ok: false, error: msg };
+      }
+      if (data.task) {
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+        setSelectedTaskForModal((prev) => (prev && prev.id === taskId ? data.task : prev));
+      }
+      setTransitionFeedback((prev) => (prev?.taskId === taskId ? null : prev));
+      setRunRefreshKey((k) => k + 1);
+      showToast('Identity Conflict Resolved', `${data.task?.key || taskId} consolidated to chosen variant.`, 'success');
+      return { ok: true };
+    } catch (err: any) {
+      const msg = err?.message || 'Conflict resolution failed';
+      showToast('Conflict Resolution Failed', msg, 'alert');
+      return { ok: false, error: msg };
+    }
+  };
+
   const handleRegisterTask = async (
     taskId: string,
   ): Promise<{ ok: boolean; code?: string; nextAction?: string; error?: string }> => {
@@ -1150,6 +1188,7 @@ function AppWorkspace() {
         onExecuteAgentOnTask={executeAgentStep}
         isExecutingStep={isProcessingStep}
         onRegisterTask={handleRegisterTask}
+        onResolveIdentityConflict={handleResolveIdentityConflict}
         onOpenProjectSettings={() => {
           setSettingsInitialTab('repository');
           setIsSettingsModalOpen(true);
