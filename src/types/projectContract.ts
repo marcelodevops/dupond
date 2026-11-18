@@ -145,8 +145,10 @@ export interface AdoptPlanResponse {
   epics: any[];
 }
 
-export type GeminiCredentialSource = 'environment' | 'saved' | 'none';
-export type GeminiTestOutcome = 'passed' | 'failed';
+export type CredentialSource = 'environment' | 'saved' | 'none';
+export type CredentialTestOutcome = 'passed' | 'failed';
+export type GeminiCredentialSource = CredentialSource;
+export type GeminiTestOutcome = CredentialTestOutcome;
 
 export interface GeminiCredentialStatus {
   provider: 'gemini';
@@ -172,6 +174,47 @@ export interface GeminiTestResult {
   reason?: 'timeout' | 'cancelled' | 'auth' | 'error' | 'stale' | null;
   timeoutMs?: number;
   source: GeminiCredentialSource;
+  model: string;
+  testedAt: string;
+  error?: string;
+}
+
+export interface OpenAICredentialStatus {
+  provider: 'openai';
+  model: string;
+  supportedModels: string[];
+  source: CredentialSource;
+  configured: boolean;
+  ready: boolean;
+  hasSavedKey: boolean;
+  environmentControlled: boolean;
+  scope: 'application';
+  lastTestedAt: string | null;
+  lastTestOutcome: CredentialTestOutcome | null;
+  lastTestError: string | null;
+  lastTestModel: string | null;
+  error?: string;
+}
+
+export type OpenAITestFailureReason =
+  | 'timeout'
+  | 'cancelled'
+  | 'auth'
+  | 'quota'
+  | 'model_access'
+  | 'transient'
+  | 'error'
+  | 'stale';
+
+export interface OpenAITestResult {
+  ok: boolean;
+  stale?: boolean;
+  inconclusive?: boolean;
+  cancelled?: boolean;
+  outcome?: 'passed' | 'failed' | 'inconclusive' | 'cancelled' | 'stale';
+  reason?: OpenAITestFailureReason | null;
+  timeoutMs?: number;
+  source: CredentialSource;
   model: string;
   testedAt: string;
   error?: string;

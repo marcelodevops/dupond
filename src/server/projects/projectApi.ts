@@ -7,6 +7,7 @@ import { JiraProvisioner, defaultJiraProvisioner } from './jiraProvisioner.js';
 import { PROJECT_CONTEXT_HEADER, DEFAULT_PROJECT_ID } from '../../types/projectContract.js';
 import { getPlanningReadiness, parsePlan } from '../planning/planBreakdown.js';
 import { getGeminiCredentialStatus, invalidateGeminiClientCache, testGeminiConnection } from '../gemini.js';
+import { getOpenAICredentialStatus, invalidateOpenAIClientCache, testOpenAIConnection } from '../openai.js';
 
 const RepositorySchema = z
   .object({
@@ -398,6 +399,69 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
       res.json({
         ...result,
         status: getGeminiCredentialStatus(),
+      });
+    } catch (err) {
+      if (!res.writableEnded && !res.destroyed) {
+        fail(res, err);
+      }
+    } finally {
+      res.off('close', onClose);
+    }
+  });
+
+  router.get('/credentials/openai', (req: Request, res: Response) => {
+    try {
+      const model = typeof req.query.model === 'string' ? req.query.model.trim() : undefined;
+      res.json(getOpenAICredentialStatus(defaultAppCredentialStore, { model }));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.put('/credentials/openai', (req: Request, res: Response) => {
+    try {
+      const parsed = z.object({ apiKey: z.string() }).strict().parse(req.body ?? {});
+      defaultAppCredentialStore.saveOpenAIKey(parsed.apiKey);
+      invalidateOpenAIClientCache();
+      res.json(getOpenAICredentialStatus());
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.delete('/credentials/openai', (_req: Request, res: Response) => {
+    try {
+      defaultAppCredentialStore.deleteOpenAIKey();
+      invalidateOpenAIClientCache();
+      res.json(getOpenAICredentialStatus());
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.post('/credentials/openai/test', async (req: Request, res: Response) => {
+    const ac = new AbortController();
+    const onClose = () => {
+      if (!res.writableFinished) {
+        ac.abort();
+      }
+    };
+    res.on('close', onClose);
+    try {
+      const parsed = z
+        .object({ model: z.string().trim().min(1).optional() })
+        .strict()
+        .parse(req.body ?? {});
+      const result = await testOpenAIConnection({
+        model: parsed.model,
+        signal: ac.signal,
+      });
+      if (res.writableEnded || res.destroyed) {
+        return;
+      }
+      res.json({
+        ...result,
+        status: getOpenAICredentialStatus(defaultAppCredentialStore, { model: parsed.model }),
       });
     } catch (err) {
       if (!res.writableEnded && !res.destroyed) {
