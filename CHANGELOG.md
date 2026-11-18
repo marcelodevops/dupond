@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.13.0](https://github.com/marcelodevops/dupond/compare/v0.12.0...v0.13.0) (2026-11-18)
+
+
+### Features
+
+* **delivery:** review delivery and state sync ([4077de8](https://github.com/marcelodevops/dupond/commit/4077de8894479ef495f0eac260ac5dbef4a72b87))
+* **ui:** surface Project Settings action when registration lacks repository ([b48510e](https://github.com/marcelodevops/dupond/commit/b48510e9cd08ce336ea0e78501c4a6254a483f00))
+* **ui:** surface unregistered task recovery and next-action guidance ([84a757b](https://github.com/marcelodevops/dupond/commit/84a757b0322de26a07015123e837e7df148ff194))
+
+
+### Bug Fixes
+
+* block unregistered board tasks cleanly and add safe authoritative registration ([d3d1297](https://github.com/marcelodevops/dupond/commit/d3d129707a1cfac21545c80b27ce757e188c2168))
+* replace legacy artifact fallback with authoritative task registration ([1781783](https://github.com/marcelodevops/dupond/commit/178178339d22f34c9ac6fe84e009e118b27b5e53))
+* require explicit target repository during task registration ([8f69832](https://github.com/marcelodevops/dupond/commit/8f69832458cdbdaab088b099ea110d4e8a0dc628))
+
 ## [0.12.0](https://github.com/marcelodevops/dupond/compare/v0.11.0...v0.12.0) (2026-11-16)
 
 
