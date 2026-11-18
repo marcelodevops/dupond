@@ -11,6 +11,7 @@ import {
   DeliveryRecord,
   AuditEventRecord,
   ReviewDecisionRecord,
+  TaskIdentityRecoveryRecord,
   DDL_SCHEMA,
 } from './schema.js';
 import {
@@ -112,6 +113,7 @@ export class TaskStore {
         'ALTER TABLE verification_records ADD COLUMN revoked_at TEXT;',
         'ALTER TABLE verification_records ADD COLUMN revoked_reason TEXT;',
         "CREATE TABLE IF NOT EXISTS review_decisions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, run_id TEXT NOT NULL, verification_id TEXT NOT NULL, revision_sha TEXT NOT NULL, requirements_fingerprint TEXT NOT NULL, verification_config_fingerprint TEXT NOT NULL, evidence_binding_version TEXT NOT NULL, decision TEXT NOT NULL CHECK (decision IN ('approved', 'changes_requested')), comment TEXT, actor TEXT NOT NULL, resolved_by_run_id TEXT, created_at TEXT NOT NULL);",
+        "CREATE TABLE IF NOT EXISTS task_identity_recoveries (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, task_key TEXT NOT NULL, chosen_variant_index INTEGER NOT NULL, chosen_variant_json TEXT NOT NULL, variants_json TEXT NOT NULL, actor TEXT NOT NULL, detected_at TEXT NOT NULL, resolved_at TEXT NOT NULL);",
       ]) {
         try {
           this.db.exec(ddl);
@@ -128,6 +130,7 @@ export class TaskStore {
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_source_plans_project ON project_source_plans(project_id);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_review_decisions_task ON review_decisions(task_id, created_at);');
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_review_decisions_run ON review_decisions(run_id, created_at);');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_identity_recoveries_project_task ON task_identity_recoveries(project_id, task_id, resolved_at);');
       const now = new Date().toISOString();
       this.db.prepare(`
         INSERT OR IGNORE INTO projects
@@ -1183,6 +1186,90 @@ export class TaskStore {
     }
     const stmt = this.db.prepare('SELECT * FROM audit_events ORDER BY timestamp DESC LIMIT 100');
     return (stmt.all() as any[]).map(this.mapAuditRow);
+  }
+
+  public recordIdentityRecovery(params: {
+    projectId: string;
+    taskId: string;
+    taskKey: string;
+    chosenVariantIndex: number;
+    chosenVariant: Record<string, unknown>;
+    variants: Array<Record<string, unknown>>;
+    actor: string;
+    detectedAt: string;
+  }): TaskIdentityRecoveryRecord {
+    return this.transaction(() => {
+      const id = `idrec-${crypto.randomUUID()}`;
+      const resolvedAt = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO task_identity_recoveries (
+            id, project_id, task_id, task_key, chosen_variant_index,
+            chosen_variant_json, variants_json, actor, detected_at, resolved_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          params.projectId,
+          params.taskId,
+          params.taskKey,
+          params.chosenVariantIndex,
+          JSON.stringify(params.chosenVariant),
+          JSON.stringify(params.variants),
+          params.actor,
+          params.detectedAt,
+          resolvedAt,
+        );
+
+      this.recordAudit({
+        taskId: params.taskId,
+        projectId: params.projectId,
+        eventType: 'TASK_IDENTITY_CONFLICT_RESOLVED',
+        actor: params.actor,
+        details: {
+          recoveryId: id,
+          taskKey: params.taskKey,
+          chosenVariantIndex: params.chosenVariantIndex,
+          variantCount: params.variants.length,
+          resolvedStatus: params.chosenVariant.status,
+        },
+      });
+
+      return {
+        id,
+        projectId: params.projectId,
+        taskId: params.taskId,
+        taskKey: params.taskKey,
+        chosenVariantIndex: params.chosenVariantIndex,
+        chosenVariant: params.chosenVariant,
+        variants: params.variants,
+        actor: params.actor,
+        detectedAt: params.detectedAt,
+        resolvedAt,
+      };
+    });
+  }
+
+  public listIdentityRecoveries(taskId: string, projectId: string): TaskIdentityRecoveryRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM task_identity_recoveries
+         WHERE task_id = ? AND project_id = ?
+         ORDER BY resolved_at DESC, rowid DESC`,
+      )
+      .all(taskId, projectId) as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      taskKey: row.task_key,
+      chosenVariantIndex: row.chosen_variant_index,
+      chosenVariant: JSON.parse(row.chosen_variant_json),
+      variants: JSON.parse(row.variants_json),
+      actor: row.actor,
+      detectedAt: row.detected_at,
+      resolvedAt: row.resolved_at,
+    }));
   }
 
   /**

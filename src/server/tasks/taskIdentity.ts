@@ -114,3 +114,25 @@ export function reconcileProjectTaskIdentity(tasks: Task[]): TaskIdentityReconci
 
   return { tasks: resultTasks, consolidated, conflicts, changed };
 }
+
+const SECRET_KEY_RE = /^(api_?key|api_?token|token|secret|password|webhook_?url|authorization)$/i;
+
+function sanitizeValue(val: unknown): unknown {
+  if (Array.isArray(val)) return val.map(sanitizeValue);
+  if (val && typeof val === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      if (SECRET_KEY_RE.test(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = sanitizeValue(v);
+      }
+    }
+    return out;
+  }
+  return val;
+}
+
+export function sanitizeVariantForRecovery(variant: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeValue(variant) as Record<string, unknown>;
+}

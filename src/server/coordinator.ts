@@ -25,7 +25,11 @@ import { defaultProjectStore } from './projects/projectStore.js';
 import type { TaskRecord } from './db/schema.js';
 import { mergePostedCriteria, promoteChecklistItems } from '../services/acceptanceMapping.js';
 import { defaultLifecycleService } from './lifecycle/lifecycleService.js';
-import { reconcileProjectTaskIdentity, TaskIdentityReconciliationResult } from './tasks/taskIdentity.js';
+import {
+  reconcileProjectTaskIdentity,
+  sanitizeVariantForRecovery,
+  TaskIdentityReconciliationResult,
+} from './tasks/taskIdentity.js';
 import { defaultRepairCoordinator } from './coordinator/repairCoordinator.js';
 import { WorkspaceManager } from './workspace/workspaceManager.js';
 import { resolveTargetRepository, orchestratorRepoSlug, isOrchestratorSelfTarget } from './workspace/targetRepositoryResolver.js';
@@ -1004,7 +1008,7 @@ export class CoordinatorEngine {
     taskId: string,
     variantIndex: number,
     projectId?: string,
-  ): { success: boolean; status?: number; task?: Task; error?: string } {
+  ): { success: boolean; status?: number; code?: string; task?: Task; recoveryId?: string; error?: string } {
     const effectiveProjectId = projectId || this.activeProjectId;
     const projectState = this.getState(effectiveProjectId);
     const task = projectState.tasks.find((t) => t.id === taskId || t.key === taskId);
@@ -1035,6 +1039,33 @@ export class CoordinatorEngine {
     };
     delete resolvedTask.identityConflict;
 
+    const sanitizedVariants = conflict.variants.map((v) => sanitizeVariantForRecovery(v));
+    const sanitizedChosen = sanitizeVariantForRecovery({
+      ...(resolvedTask as unknown as Record<string, unknown>),
+    });
+
+    let recoveryId: string;
+    try {
+      const recovery = taskStore.recordIdentityRecovery({
+        projectId: effectiveProjectId,
+        taskId: task.id,
+        taskKey: resolvedTask.key || task.key,
+        chosenVariantIndex: variantIndex,
+        chosenVariant: sanitizedChosen,
+        variants: sanitizedVariants,
+        actor: 'operator',
+        detectedAt: conflict.detectedAt || new Date().toISOString(),
+      });
+      recoveryId = recovery.id;
+    } catch (err: any) {
+      return {
+        success: false,
+        status: 500,
+        code: 'RECOVERY_PRESERVATION_FAILED',
+        error: `Failed to durably preserve conflicting variants before resolution: ${err?.message || 'Unknown error'}`,
+      };
+    }
+
     if (effectiveProjectId === this.activeProjectId) {
       this.state.tasks = this.state.tasks.map((t) => (t.id === task.id ? resolvedTask : t));
       this.saveStateToDisk();
@@ -1044,22 +1075,7 @@ export class CoordinatorEngine {
       defaultProjectStore.saveProjectState(effectiveProjectId, latestState);
     }
 
-    try {
-      taskStore.recordAudit({
-        taskId: task.id,
-        projectId: effectiveProjectId,
-        eventType: 'TASK_IDENTITY_CONFLICT_RESOLVED',
-        actor: 'operator',
-        details: {
-          taskKey: resolvedTask.key,
-          chosenVariantIndex: variantIndex,
-          variantCount: conflict.variants.length,
-          resolvedStatus: resolvedTask.status,
-        },
-      });
-    } catch {}
-
-    return { success: true, task: resolvedTask };
+    return { success: true, task: resolvedTask, recoveryId };
   }
 
   /**

@@ -196,6 +196,19 @@ export interface JiraOperationRecord {
   updatedAt: string;
 }
 
+export interface TaskIdentityRecoveryRecord {
+  id: string;
+  projectId: string;
+  taskId: string;
+  taskKey: string;
+  chosenVariantIndex: number;
+  chosenVariant: Record<string, unknown>;
+  variants: Array<Record<string, unknown>>;
+  actor: string;
+  detectedAt: string;
+  resolvedAt: string;
+}
+
 export const DDL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -384,6 +397,19 @@ CREATE TABLE IF NOT EXISTS app_credentials (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS task_identity_recoveries (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  task_key TEXT NOT NULL,
+  chosen_variant_index INTEGER NOT NULL,
+  chosen_variant_json TEXT NOT NULL,
+  variants_json TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  detected_at TEXT NOT NULL,
+  resolved_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_run_attempts_run_id ON run_attempts(run_id);
@@ -392,4 +418,5 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_run_id ON delivery_records(run_id);
 CREATE INDEX IF NOT EXISTS idx_jira_connections_project ON jira_connections(project_id);
 CREATE INDEX IF NOT EXISTS idx_jira_operations_project ON jira_operations(project_id);
 CREATE INDEX IF NOT EXISTS idx_source_plans_project ON project_source_plans(project_id);
+CREATE INDEX IF NOT EXISTS idx_identity_recoveries_project_task ON task_identity_recoveries(project_id, task_id, resolved_at);
 `;
