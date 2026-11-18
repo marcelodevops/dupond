@@ -252,7 +252,8 @@ export async function testGeminiConnection(options?: {
   timeoutMs?: number;
 }): Promise<GeminiTestResult> {
   const store = options?.store ?? defaultAppCredentialStore;
-  const seq = ++nextTestSeq;
+  nextTestSeq = Math.max(nextTestSeq, store.getMaxTestSeq(), envTestState?.seq ?? 0) + 1;
+  const seq = nextTestSeq;
   const modelToTest = activeModelName();
   const timeoutMs = resolveGeminiTestTimeoutMs(options?.timeoutMs);
   const snapshot = resolveGeminiCredential(store);

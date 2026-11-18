@@ -11,6 +11,7 @@ import type {
 } from '../db/schema.js';
 import { isSafeGitRef } from '../utils/gitRefs.js';
 import { sanitizeGeminiError } from '../gemini.js';
+import { sanitizeOpenAIError } from '../openai.js';
 import { verifiedRefForRun } from '../verification/evidenceBinding.js';
 
 export const MAX_DIFF_CHARS = 64 * 1024;
@@ -59,7 +60,7 @@ export interface CandidateEvidencePayload {
 
 export function sanitizeEvidenceText(raw: string | null | undefined): string {
   if (!raw) return '';
-  let text = sanitizeGeminiError(raw);
+  let text = sanitizeOpenAIError(sanitizeGeminiError(raw));
 
   const envSecrets = [
     process.env.GEMINI_API_KEY,

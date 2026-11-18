@@ -48,6 +48,7 @@ interface TaskDetailModalProps {
   ) => Promise<{ ok: boolean; code?: string; nextAction?: string; error?: string }>;
   onResolveIdentityConflict?: (taskId: string, variantIndex: number) => Promise<{ ok: boolean; error?: string }>;
   onOpenProjectSettings?: () => void;
+  onOpenAppSettings?: () => void;
   onReviewTask?: (
     taskId: string,
     decision: 'approve' | 'request_changes',
@@ -107,11 +108,32 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   onRegisterTask,
   onResolveIdentityConflict,
   onOpenProjectSettings,
+  onOpenAppSettings,
   onReviewTask,
   onDeliverRun,
 }) => {
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
   const [newCriterionTitle, setNewCriterionTitle] = useState('');
+  const [openAIConfigured, setOpenAIConfigured] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (task.workerConfig?.provider !== 'openai') {
+      setOpenAIConfigured(null);
+      return;
+    }
+    let cancelled = false;
+    projectApi
+      .getOpenAICredentialStatus()
+      .then((status) => {
+        if (!cancelled) setOpenAIConfigured(status.configured);
+      })
+      .catch(() => {
+        if (!cancelled) setOpenAIConfigured(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.workerConfig?.provider, runRefreshKey]);
   const [newCriterionCommand, setNewCriterionCommand] = useState('');
   const [isTransitioningStatus, setIsTransitioningStatus] = useState(false);
 
@@ -535,6 +557,26 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             </div>
           </div>
 
+          {task.workerConfig?.provider === 'openai' && openAIConfigured === false && onOpenAppSettings && (
+            <div
+              data-testid="openai-worker-credential-warning"
+              className="p-3 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2"
+            >
+              <span>No OpenAI API key is configured on this server for OpenAI coding workers.</span>
+              <button
+                type="button"
+                data-testid="open-app-settings-from-task-btn"
+                onClick={() => {
+                  onClose();
+                  onOpenAppSettings();
+                }}
+                className="px-2.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-semibold"
+              >
+                Configure OpenAI in Application Settings
+              </button>
+            </div>
+          )}
+
           {/* Task Identity Conflict Recovery */}
           {task.identityConflict && (
             <div
@@ -649,6 +691,23 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 )}
               </div>
               <p className="text-[11px]">{lastExecutionInfo.message}</p>
+              {onOpenAppSettings &&
+                task.workerConfig?.provider === 'openai' &&
+                /No OpenAI API key|OPENAI_API_KEY|OpenAI.*not configured/i.test(lastExecutionInfo.message) && (
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      data-testid="open-app-settings-from-task-btn"
+                      onClick={() => {
+                        onClose();
+                        onOpenAppSettings();
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-semibold"
+                    >
+                      Configure OpenAI in Application Settings
+                    </button>
+                  </div>
+                )}
             </div>
           )}
 

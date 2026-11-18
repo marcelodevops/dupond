@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { projectApi } from '../lib/projectApi';
-import { PlanningReadiness, GeminiCredentialStatus } from '../types/projectContract';
+import {
+  PlanningReadiness,
+  GeminiCredentialStatus,
+  OpenAICredentialStatus,
+  CredentialSource,
+  CredentialTestOutcome,
+} from '../types/projectContract';
 import {
   X,
   KeyRound,
@@ -18,34 +24,108 @@ interface ApplicationSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onGeminiCredentialChanged?: () => void;
+  onOpenAICredentialChanged?: () => void;
 }
 
-export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> = ({
-  isOpen,
-  onClose,
-  onGeminiCredentialChanged,
-}) => {
-  const [planningReadiness, setPlanningReadiness] = useState<PlanningReadiness | null>(null);
-  const [geminiStatus, setGeminiStatus] = useState<GeminiCredentialStatus | null>(null);
-  const [isLoadingReadiness, setIsLoadingReadiness] = useState(false);
-  const [readinessLoadError, setReadinessLoadError] = useState<string | null>(null);
-  const [geminiKeyInput, setGeminiKeyInput] = useState('');
-  const [isSavingGemini, setIsSavingGemini] = useState(false);
-  const [isDeletingGemini, setIsDeletingGemini] = useState(false);
-  const [isTestingGemini, setIsTestingGemini] = useState(false);
-  const [testElapsedSeconds, setTestElapsedSeconds] = useState(0);
-  const [geminiError, setGeminiError] = useState<string | null>(null);
-  const [geminiInconclusive, setGeminiInconclusive] = useState<string | null>(null);
-  const [geminiSuccess, setGeminiSuccess] = useState<string | null>(null);
-  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+interface ProviderCardStatus {
+  source: CredentialSource;
+  configured: boolean;
+  hasSavedKey: boolean;
+  environmentControlled: boolean;
+  lastTestedAt: string | null;
+  lastTestOutcome: CredentialTestOutcome | null;
+  lastTestError: string | null;
+  lastTestModel?: string | null;
+}
 
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+interface ProviderTestOutcome {
+  ok: boolean;
+  stale?: boolean;
+  inconclusive?: boolean;
+  cancelled?: boolean;
+  outcome?: 'passed' | 'failed' | 'inconclusive' | 'cancelled' | 'stale';
+  source: CredentialSource;
+  model: string;
+  error?: string;
+}
+
+interface ProviderCredentialCardProps {
+  provider: 'gemini' | 'openai';
+  title: string;
+  envVarName: string;
+  placeholder: string;
+  scopeDescription: string;
+  paidNotice: string;
+  status: ProviderCardStatus | null;
+  isLoading: boolean;
+  loadError: string | null;
+  keyInput: string;
+  onKeyInputChange: (value: string) => void;
+  inputRef?: React.RefObject<HTMLInputElement | null>;
+  isOpen: boolean;
+  globalBusy: boolean;
+  onBusyChange: (provider: 'gemini' | 'openai', busy: boolean) => void;
+  onSaveKey: (apiKey: string) => Promise<void>;
+  onDeleteKey: () => Promise<void>;
+  onTestConnection: (model: string | undefined, signal: AbortSignal) => Promise<ProviderTestOutcome>;
+  onRefreshAfterCancel: () => Promise<void>;
+  models?: string[];
+  selectedModel?: string;
+  onSelectModel?: (model: string) => void;
+}
+
+const ProviderCredentialCard: React.FC<ProviderCredentialCardProps> = ({
+  provider,
+  title,
+  envVarName,
+  placeholder,
+  scopeDescription,
+  paidNotice,
+  status,
+  isLoading,
+  loadError,
+  keyInput,
+  onKeyInputChange,
+  inputRef,
+  isOpen,
+  globalBusy,
+  onBusyChange,
+  onSaveKey,
+  onDeleteKey,
+  onTestConnection,
+  onRefreshAfterCancel,
+  models,
+  selectedModel,
+  onSelectModel,
+}) => {
+  const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testElapsedSeconds, setTestElapsedSeconds] = useState(0);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [inconclusiveBanner, setInconclusiveBanner] = useState<string | null>(null);
+  const [successBanner, setSuccessBanner] = useState<string | null>(null);
+
   const testAbortControllerRef = useRef<AbortController | null>(null);
   const testTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const testRunIdRef = useRef(0);
   const mountedRef = useRef(true);
+  const selectedModelRef = useRef(selectedModel);
+  selectedModelRef.current = selectedModel;
+
+  const isCustomModelPreset = Boolean(
+    models && models.length > 0 && selectedModel !== undefined && !models.includes(selectedModel),
+  );
+  const [customMode, setCustomMode] = useState(isCustomModelPreset);
+  useEffect(() => {
+    if (isCustomModelPreset) setCustomMode(true);
+  }, [isCustomModelPreset]);
+
+  const hasModelSelector = Boolean(models && models.length > 0 && onSelectModel);
+  const effectiveSelectedModel = hasModelSelector ? (selectedModel || models![0]) : undefined;
+  const testedModelMatchesSelected =
+    !hasModelSelector || !status?.lastTestModel || status.lastTestModel === effectiveSelectedModel;
+  const displayedTestOutcome = testedModelMatchesSelected ? status?.lastTestOutcome ?? null : null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -59,8 +139,449 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     };
   }, []);
 
-  const isDirty = geminiKeyInput.trim().length > 0;
-  const isBusy = isSavingGemini || isDeletingGemini || isTestingGemini;
+  useEffect(() => {
+    if (!isOpen) return;
+    setErrorBanner(null);
+    setInconclusiveBanner(null);
+    setSuccessBanner(null);
+    setTestElapsedSeconds(0);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (loadError && !status) {
+      setErrorBanner(loadError);
+    }
+  }, [loadError, status]);
+
+  useEffect(() => {
+    onBusyChange(provider, isSaving || isDeleting || isTesting);
+  }, [provider, isSaving, isDeleting, isTesting, onBusyChange]);
+
+  const inputId = `${provider}-api-key-input`;
+  const modelSelectId = `${provider}-test-model-select`;
+  const label = provider === 'gemini' ? 'Gemini' : 'OpenAI';
+
+  return (
+    <div
+      className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl space-y-3"
+      data-testid={`${provider}-credential-section`}
+    >
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <KeyRound className="w-4 h-4 text-indigo-400" />
+          <span className="font-semibold text-white">{title}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {isLoading || (!status && !loadError) ? (
+            <span
+              data-testid={`${provider}-saved-badge`}
+              className="px-2 py-0.5 rounded text-[10px] font-bold border bg-slate-800/80 text-slate-300 border-slate-700 inline-flex items-center gap-1"
+            >
+              <RotateCw className="w-3 h-3 animate-spin text-slate-400" />
+              <span>Loading...</span>
+            </span>
+          ) : loadError && !status ? (
+            <span
+              data-testid={`${provider}-saved-badge`}
+              className="px-2 py-0.5 rounded text-[10px] font-bold border bg-rose-500/20 text-rose-300 border-rose-500/30"
+            >
+              Status Unavailable
+            </span>
+          ) : (
+            <>
+              <span
+                data-testid={`${provider}-saved-badge`}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                  status?.configured
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                    : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                }`}
+              >
+                {status?.source === 'environment'
+                  ? 'Env Active'
+                  : status?.source === 'saved'
+                    ? 'Saved'
+                    : 'Not Configured'}
+              </span>
+              {status?.configured && (
+                <span
+                  data-testid={`${provider}-verified-badge`}
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                    displayedTestOutcome === 'passed'
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
+                      : displayedTestOutcome === 'failed'
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                        : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  }`}
+                >
+                  {displayedTestOutcome === 'passed'
+                    ? hasModelSelector && status.lastTestModel
+                      ? `Verified (${status.lastTestModel})`
+                      : 'Verified'
+                    : displayedTestOutcome === 'failed'
+                      ? hasModelSelector && status.lastTestModel
+                        ? `Verification Failed (${status.lastTestModel})`
+                        : 'Verification Failed'
+                      : 'Unverified'}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      <p
+        className="text-[11px] text-slate-400"
+        data-testid={provider === 'openai' ? 'openai-worker-scope-notice' : undefined}
+      >
+        {scopeDescription}
+      </p>
+
+      {status?.environmentControlled && (
+        <div
+          data-testid={`${provider}-env-precedence-notice`}
+          className="p-2.5 rounded-lg bg-indigo-950/40 border border-indigo-800/60 text-indigo-200 text-[11px] flex items-start gap-2"
+        >
+          <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+          <span>
+            Server environment variable <code>{envVarName}</code> currently controls the active credential and takes precedence over any saved key. Saving or removing a key below cannot overwrite or unset the server environment variable.
+          </span>
+        </div>
+      )}
+
+      {errorBanner && (
+        <div
+          data-testid={`${provider}-error-banner`}
+          className="p-2.5 rounded-lg bg-rose-950/50 border border-rose-800/70 text-rose-200 text-[11px] flex items-start gap-2"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+          <span>{errorBanner}</span>
+        </div>
+      )}
+
+      {inconclusiveBanner && (
+        <div
+          data-testid={`${provider}-inconclusive-banner`}
+          className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-700/60 text-amber-200 text-[11px] flex items-start gap-2"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+          <span>{inconclusiveBanner}</span>
+        </div>
+      )}
+
+      {successBanner && (
+        <div
+          data-testid={`${provider}-success-banner`}
+          className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-200 text-[11px] flex items-start gap-2"
+        >
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+          <span>{successBanner}</span>
+        </div>
+      )}
+
+      {isTesting && (
+        <div
+          data-testid={`${provider}-test-pending`}
+          className="p-2.5 rounded-lg bg-cyan-950/30 border border-cyan-800/60 text-cyan-100 text-[11px] space-y-1"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 font-medium">
+              <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+              <span>Testing {label} connection...</span>
+            </span>
+            <span data-testid={`${provider}-test-elapsed`} className="font-mono text-cyan-300">
+              Elapsed: {testElapsedSeconds}s
+            </span>
+          </div>
+          <p className="text-[10px] text-slate-400">
+            Cancelling aborts the local request, but cannot guarantee the provider incurs no usage.
+          </p>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <label className="block text-[11px] font-medium text-slate-300" htmlFor={inputId}>
+          {status?.hasSavedKey ? `Replace Saved ${label} API Key` : `Enter ${label} API Key`}
+        </label>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            ref={inputRef}
+            id={inputId}
+            data-testid={inputId}
+            type="password"
+            autoComplete="off"
+            value={keyInput}
+            onChange={(e) => onKeyInputChange(e.target.value)}
+            placeholder={placeholder}
+            disabled={globalBusy}
+            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
+          />
+          <button
+            type="button"
+            data-testid={`save-${provider}-key-btn`}
+            disabled={globalBusy}
+            onClick={async () => {
+              setErrorBanner(null);
+              setInconclusiveBanner(null);
+              setSuccessBanner(null);
+              if (!keyInput.trim()) {
+                setErrorBanner(`${label} API key cannot be blank.`);
+                return;
+              }
+              setIsSaving(true);
+              try {
+                await onSaveKey(keyInput);
+                setSuccessBanner(
+                  status?.environmentControlled
+                    ? `Saved application key encrypted on server (server ${envVarName} still takes precedence).`
+                    : `${label} API key saved securely on server and active immediately. Click Test Connection to verify it.`,
+                );
+              } catch (err: any) {
+                setErrorBanner(err?.message || `Failed to save ${label} API key.`);
+              } finally {
+                setIsSaving(false);
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
+          >
+            {isSaving ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            <span>{status?.hasSavedKey ? 'Replace Key' : 'Save Key'}</span>
+          </button>
+        </div>
+      </div>
+
+      {hasModelSelector && (
+        <div className="space-y-1.5 pt-1">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <label htmlFor={modelSelectId} className="text-[11px] text-slate-400 shrink-0">
+              Test Model:
+            </label>
+            <select
+              id={modelSelectId}
+              data-testid={modelSelectId}
+              value={customMode ? '__custom__' : effectiveSelectedModel}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === '__custom__') {
+                  setCustomMode(true);
+                  if (models!.includes(effectiveSelectedModel || '')) {
+                    onSelectModel!('');
+                  }
+                } else {
+                  setCustomMode(false);
+                  onSelectModel!(val);
+                }
+              }}
+              disabled={isSaving || isDeleting}
+              className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
+            >
+              {models!.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+              <option value="__custom__">Custom model...</option>
+            </select>
+            {customMode && (
+              <input
+                type="text"
+                data-testid={`${provider}-custom-model-input`}
+                value={selectedModel ?? ''}
+                onChange={(e) => onSelectModel!(e.target.value)}
+                placeholder="e.g. gpt-4.1-mini"
+                disabled={isSaving || isDeleting}
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
+              />
+            )}
+          </div>
+          {status?.lastTestOutcome && status?.lastTestModel && !testedModelMatchesSelected && (
+            <p
+              data-testid={`${provider}-different-model-verified-note`}
+              className="text-[10px] text-amber-300/90"
+            >
+              Last {status.lastTestOutcome} verification was for <code>{status.lastTestModel}</code>;{' '}
+              <code>{effectiveSelectedModel || 'current model'}</code> is unverified.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid={`test-${provider}-key-btn`}
+            disabled={!status?.configured || globalBusy}
+            onClick={async () => {
+              const testedModelSnapshot = effectiveSelectedModel;
+              if (hasModelSelector && (!testedModelSnapshot || !testedModelSnapshot.trim())) {
+                setErrorBanner('Enter a valid OpenAI model identifier before testing.');
+                return;
+              }
+              const runId = ++testRunIdRef.current;
+              const controller = new AbortController();
+              testAbortControllerRef.current = controller;
+              const startedAt = Date.now();
+
+              setErrorBanner(null);
+              setInconclusiveBanner(null);
+              setSuccessBanner(null);
+              setTestElapsedSeconds(0);
+              setIsTesting(true);
+
+              if (testTimerRef.current) {
+                clearInterval(testTimerRef.current);
+              }
+              testTimerRef.current = setInterval(() => {
+                if (mountedRef.current && testRunIdRef.current === runId) {
+                  setTestElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+                }
+              }, 250);
+
+              try {
+                const res = await onTestConnection(testedModelSnapshot, controller.signal);
+                if (!mountedRef.current || testRunIdRef.current !== runId) return;
+                const modelChangedDuringTest =
+                  hasModelSelector && selectedModelRef.current !== testedModelSnapshot;
+                if (res.stale || res.outcome === 'stale') {
+                  setErrorBanner(res.error || 'Connection test result was superseded by a newer credential change.');
+                } else if (res.inconclusive || res.outcome === 'inconclusive' || res.outcome === 'cancelled') {
+                  setInconclusiveBanner(
+                    res.error ||
+                      'Connection test was inconclusive. Previous verification history was preserved.',
+                  );
+                } else if (modelChangedDuringTest) {
+                  setInconclusiveBanner(
+                    `Completed test (${res.ok ? 'passed' : 'failed'}) for ${res.model}, while selected model changed to ${selectedModelRef.current || '(blank)'}.`,
+                  );
+                } else if (res.ok) {
+                  setSuccessBanner(`Connection verified (${res.source} credential, model ${res.model}).`);
+                } else {
+                  setErrorBanner(res.error || 'Connection test failed.');
+                }
+              } catch (err: any) {
+                if (!mountedRef.current || testRunIdRef.current !== runId) return;
+                if (err?.name === 'AbortError' || controller.signal.aborted) {
+                  setInconclusiveBanner(
+                    'Connection test was cancelled. Previous verification history was preserved, and cancelling cannot guarantee the provider incurred no usage.',
+                  );
+                  await onRefreshAfterCancel();
+                } else {
+                  setErrorBanner(err?.message || 'Connection test failed.');
+                }
+              } finally {
+                if (testTimerRef.current) {
+                  clearInterval(testTimerRef.current);
+                  testTimerRef.current = null;
+                }
+                if (testAbortControllerRef.current === controller) {
+                  testAbortControllerRef.current = null;
+                }
+                if (mountedRef.current && testRunIdRef.current === runId) {
+                  setIsTesting(false);
+                }
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
+          >
+            {isTesting ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+            <span>{isTesting ? 'Testing...' : 'Test Connection'}</span>
+          </button>
+
+          {isTesting && (
+            <button
+              type="button"
+              data-testid={`cancel-${provider}-test-btn`}
+              onClick={() => {
+                testAbortControllerRef.current?.abort();
+              }}
+              className="px-3 py-1.5 rounded-lg border border-amber-500/50 bg-amber-950/40 hover:bg-amber-900/50 text-amber-200 text-xs font-semibold flex items-center gap-1.5"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Cancel</span>
+            </button>
+          )}
+
+          {status?.hasSavedKey && (
+            <button
+              type="button"
+              data-testid={`delete-${provider}-key-btn`}
+              disabled={globalBusy}
+              onClick={async () => {
+                setErrorBanner(null);
+                setInconclusiveBanner(null);
+                setSuccessBanner(null);
+                setIsDeleting(true);
+                try {
+                  await onDeleteKey();
+                  setSuccessBanner(`Saved ${label} API key removed immediately.`);
+                } catch (err: any) {
+                  setErrorBanner(err?.message || `Failed to remove saved ${label} API key.`);
+                } finally {
+                  setIsDeleting(false);
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg border border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/40 text-rose-300 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
+            >
+              {isDeleting ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              <span>Remove Saved Key</span>
+            </button>
+          )}
+        </div>
+        <span className="text-[10px] text-slate-500">{paidNotice}</span>
+      </div>
+
+      {(status?.lastTestedAt || status?.lastTestError) && (
+        <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-800/80 space-y-1">
+          {status.lastTestedAt && (
+            <div className="flex justify-between gap-2">
+              <span>Last Tested{status.lastTestModel ? ` (${status.lastTestModel})` : ''}:</span>
+              <span className="font-mono text-slate-300">{new Date(status.lastTestedAt).toLocaleString()}</span>
+            </div>
+          )}
+          {status.lastTestError && (
+            <p className="text-rose-300 text-[11px]" data-testid={`${provider}-last-test-error`}>
+              Last Test Error: {status.lastTestError}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> = ({
+  isOpen,
+  onClose,
+  onGeminiCredentialChanged,
+  onOpenAICredentialChanged,
+}) => {
+  const [planningReadiness, setPlanningReadiness] = useState<PlanningReadiness | null>(null);
+  const [geminiStatus, setGeminiStatus] = useState<GeminiCredentialStatus | null>(null);
+  const [openaiStatus, setOpenaiStatus] = useState<OpenAICredentialStatus | null>(null);
+  const [isLoadingGemini, setIsLoadingGemini] = useState(false);
+  const [isLoadingOpenAI, setIsLoadingOpenAI] = useState(false);
+  const [geminiLoadError, setGeminiLoadError] = useState<string | null>(null);
+  const [openaiLoadError, setOpenaiLoadError] = useState<string | null>(null);
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [openaiKeyInput, setOpenaiKeyInput] = useState('');
+  const [selectedOpenAIModel, setSelectedOpenAIModel] = useState('gpt-4o-mini');
+  const [busyByProvider, setBusyByProvider] = useState<{ gemini: boolean; openai: boolean }>({
+    gemini: false,
+    openai: false,
+  });
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const isDirty = geminiKeyInput.trim().length > 0 || openaiKeyInput.trim().length > 0;
+  const isBusy = busyByProvider.gemini || busyByProvider.openai;
+
+  const handleBusyChange = useCallback((provider: 'gemini' | 'openai', busy: boolean) => {
+    setBusyByProvider((prev) => (prev[provider] === busy ? prev : { ...prev, [provider]: busy }));
+  }, []);
 
   const handleRequestClose = useCallback(() => {
     if (isBusy) return;
@@ -74,6 +595,7 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
 
   const handleConfirmDiscard = () => {
     setGeminiKeyInput('');
+    setOpenaiKeyInput('');
     setShowDiscardConfirm(false);
     onClose();
   };
@@ -81,7 +603,6 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
   const handleRequestCloseRef = useRef(handleRequestClose);
   handleRequestCloseRef.current = handleRequestClose;
 
-  // Initial focus & focus restoration (runs only on open/close transitions)
   useEffect(() => {
     if (!isOpen) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
@@ -94,7 +615,6 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     };
   }, [isOpen]);
 
-  // Escape key handler (uses ref so dirty/busy changes never steal focus)
   useEffect(() => {
     if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -109,48 +629,62 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     };
   }, [isOpen]);
 
-  // Reset transient banners & load status on open
   useEffect(() => {
     if (!isOpen) {
       setPlanningReadiness(null);
       setGeminiStatus(null);
-      setReadinessLoadError(null);
+      setOpenaiStatus(null);
+      setGeminiLoadError(null);
+      setOpenaiLoadError(null);
       setShowDiscardConfirm(false);
       return;
     }
     setGeminiKeyInput('');
-    setGeminiError(null);
-    setGeminiInconclusive(null);
-    setGeminiSuccess(null);
-    setTestElapsedSeconds(0);
+    setOpenaiKeyInput('');
     setShowDiscardConfirm(false);
 
     let mounted = true;
-    setIsLoadingReadiness(true);
-    setReadinessLoadError(null);
+    setIsLoadingGemini(true);
+    setIsLoadingOpenAI(true);
+    setGeminiLoadError(null);
+    setOpenaiLoadError(null);
     setPlanningReadiness(null);
     setGeminiStatus(null);
+    setOpenaiStatus(null);
 
-    Promise.all([
-      projectApi.getPlanningReadiness(),
-      projectApi.getGeminiCredentialStatus(),
-    ])
+    Promise.all([projectApi.getPlanningReadiness(), projectApi.getGeminiCredentialStatus()])
       .then(([readinessRes, credRes]) => {
         if (mounted) {
           setPlanningReadiness(readinessRes);
           setGeminiStatus(credRes);
-          setReadinessLoadError(null);
+          setGeminiLoadError(null);
         }
       })
       .catch((err) => {
         if (mounted) {
-          const msg = err?.message || 'Failed to load Gemini credential status.';
-          setReadinessLoadError(msg);
-          setGeminiError(msg);
+          setGeminiLoadError(err?.message || 'Failed to load Gemini credential status.');
         }
       })
       .finally(() => {
-        if (mounted) setIsLoadingReadiness(false);
+        if (mounted) setIsLoadingGemini(false);
+      });
+
+    projectApi
+      .getOpenAICredentialStatus()
+      .then((credRes) => {
+        if (mounted) {
+          setOpenaiStatus(credRes);
+          if (credRes.model) setSelectedOpenAIModel(credRes.model);
+          setOpenaiLoadError(null);
+        }
+      })
+      .catch((err) => {
+        if (mounted) {
+          setOpenaiLoadError(err?.message || 'Failed to load OpenAI credential status.');
+        }
+      })
+      .finally(() => {
+        if (mounted) setIsLoadingOpenAI(false);
       });
 
     return () => {
@@ -212,7 +746,7 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
             >
               <div className="flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <span>You have entered an unsaved Gemini API key. Discard it and close?</span>
+                <span>You have entered an unsaved API key. Discard it and close?</span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <button
@@ -236,345 +770,112 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
           )}
 
           {/* Gemini Credential Management Card */}
-          <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl space-y-3" data-testid="gemini-credential-section">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-indigo-400" />
-                <span className="font-semibold text-white">Gemini API Credential</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                {isLoadingReadiness || (!geminiStatus && !readinessLoadError) ? (
-                  <span
-                    data-testid="gemini-saved-badge"
-                    className="px-2 py-0.5 rounded text-[10px] font-bold border bg-slate-800/80 text-slate-300 border-slate-700 inline-flex items-center gap-1"
-                  >
-                    <RotateCw className="w-3 h-3 animate-spin text-slate-400" />
-                    <span>Loading...</span>
-                  </span>
-                ) : readinessLoadError && !geminiStatus ? (
-                  <span
-                    data-testid="gemini-saved-badge"
-                    className="px-2 py-0.5 rounded text-[10px] font-bold border bg-rose-500/20 text-rose-300 border-rose-500/30"
-                  >
-                    Status Unavailable
-                  </span>
-                ) : (
-                  <>
-                    <span
-                      data-testid="gemini-saved-badge"
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                        geminiStatus?.configured
-                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                          : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-                      }`}
-                    >
-                      {geminiStatus?.source === 'environment'
-                        ? 'Env Active'
-                        : geminiStatus?.source === 'saved'
-                          ? 'Saved'
-                          : 'Not Configured'}
-                    </span>
-                    {geminiStatus?.configured && (
-                      <span
-                        data-testid="gemini-verified-badge"
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                          geminiStatus.lastTestOutcome === 'passed'
-                            ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
-                            : geminiStatus.lastTestOutcome === 'failed'
-                              ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-                              : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-                        }`}
-                      >
-                        {geminiStatus.lastTestOutcome === 'passed'
-                          ? 'Verified'
-                          : geminiStatus.lastTestOutcome === 'failed'
-                            ? 'Verification Failed'
-                            : 'Unverified'}
-                      </span>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
+          <ProviderCredentialCard
+            provider="gemini"
+            title="Gemini API Credential"
+            envVarName="GEMINI_API_KEY"
+            placeholder="AIza..."
+            scopeDescription="Saved Gemini credentials are application-scoped and apply to every project on this server instance. Keys are encrypted on the server, never returned to the browser, and credential actions take effect immediately."
+            paidNotice="Test sends a minimal Gemini request (may incur API usage)."
+            status={geminiStatus}
+            isLoading={isLoadingGemini}
+            loadError={geminiLoadError}
+            keyInput={geminiKeyInput}
+            onKeyInputChange={setGeminiKeyInput}
+            inputRef={inputRef}
+            isOpen={isOpen}
+            globalBusy={isBusy}
+            onBusyChange={handleBusyChange}
+            onSaveKey={async (apiKey) => {
+              const updated = await projectApi.saveGeminiCredential(apiKey);
+              setGeminiStatus(updated);
+              setGeminiKeyInput('');
+              setShowDiscardConfirm(false);
+              const refreshed = await projectApi.getPlanningReadiness();
+              setPlanningReadiness(refreshed);
+              onGeminiCredentialChanged?.();
+            }}
+            onDeleteKey={async () => {
+              const updated = await projectApi.deleteGeminiCredential();
+              setGeminiStatus(updated);
+              setGeminiKeyInput('');
+              setShowDiscardConfirm(false);
+              const refreshed = await projectApi.getPlanningReadiness();
+              setPlanningReadiness(refreshed);
+              onGeminiCredentialChanged?.();
+            }}
+            onTestConnection={async (_model, signal) => {
+              const res = await projectApi.testGeminiCredential(signal);
+              setGeminiStatus(res.status);
+              const refreshed = await projectApi.getPlanningReadiness();
+              setPlanningReadiness(refreshed);
+              onGeminiCredentialChanged?.();
+              return res;
+            }}
+            onRefreshAfterCancel={async () => {
+              try {
+                const [credRes, readinessRes] = await Promise.all([
+                  projectApi.getGeminiCredentialStatus(),
+                  projectApi.getPlanningReadiness(),
+                ]);
+                setGeminiStatus(credRes);
+                setPlanningReadiness(readinessRes);
+              } catch {
+                // Preserve current status if background refresh fails after cancel
+              }
+              onGeminiCredentialChanged?.();
+            }}
+          />
 
-            <p className="text-[11px] text-slate-400">
-              Saved Gemini credentials are <strong className="text-slate-200">application-scoped</strong> and apply to every project on this server instance. Keys are encrypted on the server, never returned to the browser, and credential actions take effect immediately.
-            </p>
-
-            {geminiStatus?.environmentControlled && (
-              <div
-                data-testid="gemini-env-precedence-notice"
-                className="p-2.5 rounded-lg bg-indigo-950/40 border border-indigo-800/60 text-indigo-200 text-[11px] flex items-start gap-2"
-              >
-                <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
-                <span>
-                  Server environment variable <code>GEMINI_API_KEY</code> currently controls the active credential and takes precedence over any saved key. Saving or removing a key below cannot overwrite or unset the server environment variable.
-                </span>
-              </div>
-            )}
-
-            {geminiError && (
-              <div
-                data-testid="gemini-error-banner"
-                className="p-2.5 rounded-lg bg-rose-950/50 border border-rose-800/70 text-rose-200 text-[11px] flex items-start gap-2"
-              >
-                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                <span>{geminiError}</span>
-              </div>
-            )}
-
-            {geminiInconclusive && (
-              <div
-                data-testid="gemini-inconclusive-banner"
-                className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-700/60 text-amber-200 text-[11px] flex items-start gap-2"
-              >
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                <span>{geminiInconclusive}</span>
-              </div>
-            )}
-
-            {geminiSuccess && (
-              <div
-                data-testid="gemini-success-banner"
-                className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-200 text-[11px] flex items-start gap-2"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                <span>{geminiSuccess}</span>
-              </div>
-            )}
-
-            {isTestingGemini && (
-              <div
-                data-testid="gemini-test-pending"
-                className="p-2.5 rounded-lg bg-cyan-950/30 border border-cyan-800/60 text-cyan-100 text-[11px] space-y-1"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="inline-flex items-center gap-1.5 font-medium">
-                    <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
-                    <span>Testing Gemini connection...</span>
-                  </span>
-                  <span data-testid="gemini-test-elapsed" className="font-mono text-cyan-300">
-                    Elapsed: {testElapsedSeconds}s
-                  </span>
-                </div>
-                <p className="text-[10px] text-slate-400">
-                  Cancelling aborts the local request, but cannot guarantee the provider incurs no usage.
-                </p>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <label className="block text-[11px] font-medium text-slate-300" htmlFor="gemini-api-key-input">
-                {geminiStatus?.hasSavedKey ? 'Replace Saved Gemini API Key' : 'Enter Gemini API Key'}
-              </label>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  ref={inputRef}
-                  id="gemini-api-key-input"
-                  data-testid="gemini-api-key-input"
-                  type="password"
-                  autoComplete="off"
-                  value={geminiKeyInput}
-                  onChange={(e) => setGeminiKeyInput(e.target.value)}
-                  placeholder="AIza..."
-                  disabled={isBusy}
-                  className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
-                />
-                <button
-                  type="button"
-                  data-testid="save-gemini-key-btn"
-                  disabled={isBusy}
-                  onClick={async () => {
-                    setGeminiError(null);
-                    setGeminiInconclusive(null);
-                    setGeminiSuccess(null);
-                    if (!geminiKeyInput.trim()) {
-                      setGeminiError('Gemini API key cannot be blank.');
-                      return;
-                    }
-                    setIsSavingGemini(true);
-                    try {
-                      const updated = await projectApi.saveGeminiCredential(geminiKeyInput);
-                      setGeminiStatus(updated);
-                      setGeminiKeyInput('');
-                      setShowDiscardConfirm(false);
-                      setGeminiSuccess(
-                        updated.environmentControlled
-                          ? 'Saved application key encrypted on server (server GEMINI_API_KEY still takes precedence).'
-                          : 'Gemini API key saved securely on server and active immediately. Click Test Connection to verify it.',
-                      );
-                      const refreshed = await projectApi.getPlanningReadiness();
-                      setPlanningReadiness(refreshed);
-                      onGeminiCredentialChanged?.();
-                    } catch (err: any) {
-                      setGeminiError(err?.message || 'Failed to save Gemini API key.');
-                    } finally {
-                      setIsSavingGemini(false);
-                    }
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
-                >
-                  {isSavingGemini ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                  <span>{geminiStatus?.hasSavedKey ? 'Replace Key' : 'Save Key'}</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  data-testid="test-gemini-key-btn"
-                  disabled={!geminiStatus?.configured || isBusy}
-                  onClick={async () => {
-                    const runId = ++testRunIdRef.current;
-                    const controller = new AbortController();
-                    testAbortControllerRef.current = controller;
-                    const startedAt = Date.now();
-
-                    setGeminiError(null);
-                    setGeminiInconclusive(null);
-                    setGeminiSuccess(null);
-                    setTestElapsedSeconds(0);
-                    setIsTestingGemini(true);
-
-                    if (testTimerRef.current) {
-                      clearInterval(testTimerRef.current);
-                    }
-                    testTimerRef.current = setInterval(() => {
-                      if (mountedRef.current && testRunIdRef.current === runId) {
-                        setTestElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
-                      }
-                    }, 250);
-
-                    try {
-                      const res = await projectApi.testGeminiCredential(controller.signal);
-                      if (!mountedRef.current || testRunIdRef.current !== runId) return;
-                      setGeminiStatus(res.status);
-                      const refreshed = await projectApi.getPlanningReadiness();
-                      if (!mountedRef.current || testRunIdRef.current !== runId) return;
-                      setPlanningReadiness(refreshed);
-                      if (res.stale || res.outcome === 'stale') {
-                        setGeminiError(res.error || 'Connection test result was superseded by a newer credential change.');
-                      } else if (res.inconclusive || res.outcome === 'inconclusive' || res.outcome === 'cancelled') {
-                        setGeminiInconclusive(
-                          res.error ||
-                            'Connection test was inconclusive. Previous verification history was preserved.',
-                        );
-                      } else if (res.ok) {
-                        setGeminiSuccess(`Connection verified (${res.source} credential, model ${res.model}).`);
-                      } else {
-                        setGeminiError(res.error || 'Connection test failed.');
-                      }
-                      onGeminiCredentialChanged?.();
-                    } catch (err: any) {
-                      if (!mountedRef.current || testRunIdRef.current !== runId) return;
-                      if (err?.name === 'AbortError' || controller.signal.aborted) {
-                        setGeminiInconclusive(
-                          'Connection test was cancelled. Previous verification history was preserved, and cancelling cannot guarantee the provider incurred no usage.',
-                        );
-                        try {
-                          const [credRes, readinessRes] = await Promise.all([
-                            projectApi.getGeminiCredentialStatus(),
-                            projectApi.getPlanningReadiness(),
-                          ]);
-                          if (mountedRef.current && testRunIdRef.current === runId) {
-                            setGeminiStatus(credRes);
-                            setPlanningReadiness(readinessRes);
-                          }
-                        } catch {
-                          // Preserve current status if background refresh fails after cancel
-                        }
-                        onGeminiCredentialChanged?.();
-                      } else {
-                        setGeminiError(err?.message || 'Connection test failed.');
-                      }
-                    } finally {
-                      if (testTimerRef.current) {
-                        clearInterval(testTimerRef.current);
-                        testTimerRef.current = null;
-                      }
-                      if (testAbortControllerRef.current === controller) {
-                        testAbortControllerRef.current = null;
-                      }
-                      if (mountedRef.current && testRunIdRef.current === runId) {
-                        setIsTestingGemini(false);
-                      }
-                    }
-                  }}
-                  className="px-3 py-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
-                >
-                  {isTestingGemini ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-                  <span>{isTestingGemini ? 'Testing...' : 'Test Connection'}</span>
-                </button>
-
-                {isTestingGemini && (
-                  <button
-                    type="button"
-                    data-testid="cancel-gemini-test-btn"
-                    onClick={() => {
-                      testAbortControllerRef.current?.abort();
-                    }}
-                    className="px-3 py-1.5 rounded-lg border border-amber-500/50 bg-amber-950/40 hover:bg-amber-900/50 text-amber-200 text-xs font-semibold flex items-center gap-1.5"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                    <span>Cancel</span>
-                  </button>
-                )}
-
-                {geminiStatus?.hasSavedKey && (
-                  <button
-                    type="button"
-                    data-testid="delete-gemini-key-btn"
-                    disabled={isBusy}
-                    onClick={async () => {
-                      setGeminiError(null);
-                      setGeminiInconclusive(null);
-                      setGeminiSuccess(null);
-                      setIsDeletingGemini(true);
-                      try {
-                        const updated = await projectApi.deleteGeminiCredential();
-                        setGeminiStatus(updated);
-                        setGeminiKeyInput('');
-                        setShowDiscardConfirm(false);
-                        setGeminiSuccess('Saved Gemini API key removed immediately.');
-                        const refreshed = await projectApi.getPlanningReadiness();
-                        setPlanningReadiness(refreshed);
-                        onGeminiCredentialChanged?.();
-                      } catch (err: any) {
-                        setGeminiError(err?.message || 'Failed to remove saved Gemini API key.');
-                      } finally {
-                        setIsDeletingGemini(false);
-                      }
-                    }}
-                    className="px-3 py-1.5 rounded-lg border border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/40 text-rose-300 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
-                  >
-                    {isDeletingGemini ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                    <span>Remove Saved Key</span>
-                  </button>
-                )}
-              </div>
-              <span className="text-[10px] text-slate-500">
-                Test sends a minimal Gemini request (may incur API usage).
-              </span>
-            </div>
-
-            {(geminiStatus?.lastTestedAt || geminiStatus?.lastTestError) && (
-              <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-800/80 space-y-1">
-                {geminiStatus.lastTestedAt && (
-                  <div className="flex justify-between gap-2">
-                    <span>Last Tested:</span>
-                    <span className="font-mono text-slate-300">{new Date(geminiStatus.lastTestedAt).toLocaleString()}</span>
-                  </div>
-                )}
-                {geminiStatus.lastTestError && (
-                  <p className="text-rose-300 text-[11px]" data-testid="gemini-last-test-error">
-                    Last Test Error: {geminiStatus.lastTestError}
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
+          {/* OpenAI Credential Management Card (Coding Workers) */}
+          <ProviderCredentialCard
+            provider="openai"
+            title="OpenAI API Credential (Coding Workers)"
+            envVarName="OPENAI_API_KEY"
+            placeholder="sk-..."
+            scopeDescription="Saved OpenAI credentials are application-scoped and configure OpenAI coding workers across every project on this server instance (AI planning still uses Gemini). Keys are encrypted on the server, never returned to the browser, and credential actions take effect immediately."
+            paidNotice="Test sends a minimal OpenAI Responses API request (may incur API usage)."
+            status={openaiStatus}
+            isLoading={isLoadingOpenAI}
+            loadError={openaiLoadError}
+            keyInput={openaiKeyInput}
+            onKeyInputChange={setOpenaiKeyInput}
+            isOpen={isOpen}
+            globalBusy={isBusy}
+            onBusyChange={handleBusyChange}
+            models={openaiStatus?.supportedModels || ['gpt-4o-mini', 'gpt-4o', 'o3-mini', 'o1', 'gpt-4.5-preview']}
+            selectedModel={selectedOpenAIModel}
+            onSelectModel={setSelectedOpenAIModel}
+            onSaveKey={async (apiKey) => {
+              const updated = await projectApi.saveOpenAICredential(apiKey);
+              setOpenaiStatus(updated);
+              setOpenaiKeyInput('');
+              setShowDiscardConfirm(false);
+              onOpenAICredentialChanged?.();
+            }}
+            onDeleteKey={async () => {
+              const updated = await projectApi.deleteOpenAICredential();
+              setOpenaiStatus(updated);
+              setOpenaiKeyInput('');
+              setShowDiscardConfirm(false);
+              onOpenAICredentialChanged?.();
+            }}
+            onTestConnection={async (model, signal) => {
+              const res = await projectApi.testOpenAICredential(model, signal);
+              setOpenaiStatus(res.status);
+              onOpenAICredentialChanged?.();
+              return res;
+            }}
+            onRefreshAfterCancel={async () => {
+              try {
+                const credRes = await projectApi.getOpenAICredentialStatus();
+                setOpenaiStatus(credRes);
+              } catch {
+                // Preserve current status if background refresh fails after cancel
+              }
+              onOpenAICredentialChanged?.();
+            }}
+          />
 
           {/* Effective Runtime AI Planning Readiness */}
           <div className="p-3.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2" data-testid="app-planning-readiness-card">
@@ -583,12 +884,12 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                 <Cpu className="w-4 h-4 text-indigo-400" />
                 <span className="font-semibold text-white">Effective AI Planning Runtime</span>
               </div>
-              {isLoadingReadiness || (!planningReadiness && !readinessLoadError) ? (
+              {isLoadingGemini || (!planningReadiness && !geminiLoadError) ? (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700 inline-flex items-center gap-1">
                   <RotateCw className="w-3 h-3 animate-spin text-slate-400" />
                   <span>Checking...</span>
                 </span>
-              ) : readinessLoadError && !planningReadiness ? (
+              ) : geminiLoadError && !planningReadiness ? (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">
                   Error
                 </span>

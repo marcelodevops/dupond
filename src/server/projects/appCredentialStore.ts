@@ -3,23 +3,31 @@ import type { DatabaseSync } from 'node:sqlite';
 import { taskStore, TaskStore } from '../db/database.js';
 import { encryptSecret, decryptSecret, withSecretLease } from './secretCrypto.js';
 
-export type GeminiTestOutcome = 'passed' | 'failed';
+export type AppCredentialProvider = 'gemini' | 'openai';
+export type CredentialTestOutcome = 'passed' | 'failed';
+export type GeminiTestOutcome = CredentialTestOutcome;
 
-export interface GeminiCredentialMetadata {
+export interface ProviderCredentialMetadata {
   hasSavedKey: boolean;
   lastTestedAt: string | null;
-  lastTestOutcome: GeminiTestOutcome | null;
+  lastTestOutcome: CredentialTestOutcome | null;
   lastTestError: string | null;
   lastTestModel: string | null;
   credentialVersion: string | null;
   updatedAt: string | null;
 }
 
-export interface StoredGeminiKeySnapshot {
+export type GeminiCredentialMetadata = ProviderCredentialMetadata;
+export type OpenAICredentialMetadata = ProviderCredentialMetadata;
+
+export interface StoredProviderKeySnapshot {
   apiKey: string;
   credentialVersion: string;
   keyFingerprint: string;
 }
+
+export type StoredGeminiKeySnapshot = StoredProviderKeySnapshot;
+export type StoredOpenAIKeySnapshot = StoredProviderKeySnapshot;
 
 export class AppCredentialValidationError extends Error {
   readonly httpStatus = 400;
@@ -30,7 +38,13 @@ export class AppCredentialValidationError extends Error {
   }
 }
 
-const GEMINI_PROVIDER = 'gemini';
+const GEMINI_PROVIDER: AppCredentialProvider = 'gemini';
+const OPENAI_PROVIDER: AppCredentialProvider = 'openai';
+
+const PROVIDER_LABELS: Record<AppCredentialProvider, string> = {
+  gemini: 'Gemini',
+  openai: 'OpenAI',
+};
 
 function sha256Hex(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -43,9 +57,9 @@ export class AppCredentialStore {
     this.db = db || store.getRawDb();
   }
 
-  saveGeminiKey(rawKey: string): GeminiCredentialMetadata {
+  saveKey(provider: AppCredentialProvider, rawKey: string): ProviderCredentialMetadata {
     if (typeof rawKey !== 'string' || !rawKey.trim()) {
-      throw new AppCredentialValidationError('Gemini API key must be a non-empty string.');
+      throw new AppCredentialValidationError(`${PROVIDER_LABELS[provider]} API key must be a non-empty string.`);
     }
     const trimmed = rawKey.trim();
     const now = new Date().toISOString();
@@ -72,28 +86,28 @@ export class AppCredentialStore {
              last_test_seq = NULL,
              updated_at = excluded.updated_at`,
         )
-        .run(GEMINI_PROVIDER, encrypted, credentialVersion, keyFingerprint, now, now);
+        .run(provider, encrypted, credentialVersion, keyFingerprint, now, now);
 
-      return this.getGeminiMetadata();
+      return this.getMetadata(provider);
     });
   }
 
-  deleteGeminiKey(): GeminiCredentialMetadata {
+  deleteKey(provider: AppCredentialProvider): ProviderCredentialMetadata {
     return withSecretLease(() => {
-      this.db.prepare('DELETE FROM app_credentials WHERE provider = ?').run(GEMINI_PROVIDER);
-      return this.getGeminiMetadata();
+      this.db.prepare('DELETE FROM app_credentials WHERE provider = ?').run(provider);
+      return this.getMetadata(provider);
     });
   }
 
-  getGeminiKey(): string | null {
-    return this.getGeminiKeySnapshot()?.apiKey ?? null;
+  getKey(provider: AppCredentialProvider): string | null {
+    return this.getKeySnapshot(provider)?.apiKey ?? null;
   }
 
-  getGeminiKeySnapshot(): StoredGeminiKeySnapshot | null {
+  getKeySnapshot(provider: AppCredentialProvider): StoredProviderKeySnapshot | null {
     return withSecretLease(() => {
       const row = this.db
         .prepare('SELECT api_key_enc, credential_version, key_fingerprint, updated_at FROM app_credentials WHERE provider = ?')
-        .get(GEMINI_PROVIDER) as
+        .get(provider) as
         | {
             api_key_enc: string;
             credential_version: string | null;
@@ -111,13 +125,13 @@ export class AppCredentialStore {
     });
   }
 
-  getGeminiMetadata(): GeminiCredentialMetadata {
+  getMetadata(provider: AppCredentialProvider): ProviderCredentialMetadata {
     const row = this.db
       .prepare(
         `SELECT credential_version, last_tested_at, last_test_outcome, last_test_error, last_test_model, updated_at
          FROM app_credentials WHERE provider = ?`,
       )
-      .get(GEMINI_PROVIDER) as
+      .get(provider) as
       | {
           credential_version: string | null;
           last_tested_at: string | null;
@@ -156,6 +170,76 @@ export class AppCredentialStore {
     };
   }
 
+  getMaxTestSeq(): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(last_test_seq), 0) AS max_seq FROM app_credentials')
+      .get() as { max_seq: number | null } | undefined;
+    return Number(row?.max_seq ?? 0);
+  }
+
+  recordTestResultIfCurrent(
+    provider: AppCredentialProvider,
+    params: {
+      expectedVersion: string;
+      expectedFingerprint: string;
+      expectedModel: string;
+      testSeq: number;
+      outcome: CredentialTestOutcome;
+      error?: string | null;
+      testedAt?: string;
+    },
+  ): boolean {
+    const now = params.testedAt || new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE app_credentials
+         SET last_tested_at = ?,
+             last_test_outcome = ?,
+             last_test_error = ?,
+             last_test_model = ?,
+             last_test_seq = ?,
+             updated_at = ?
+         WHERE provider = ?
+           AND (credential_version = ? OR (credential_version IS NULL AND updated_at = ?))
+           AND (key_fingerprint IS NULL OR key_fingerprint = ?)
+           AND (last_test_seq IS NULL OR last_test_seq < ?)`,
+      )
+      .run(
+        now,
+        params.outcome,
+        params.error ?? null,
+        params.expectedModel,
+        params.testSeq,
+        now,
+        provider,
+        params.expectedVersion,
+        params.expectedVersion,
+        params.expectedFingerprint,
+        params.testSeq,
+      );
+    return Number(result.changes) > 0;
+  }
+
+  saveGeminiKey(rawKey: string): GeminiCredentialMetadata {
+    return this.saveKey(GEMINI_PROVIDER, rawKey);
+  }
+
+  deleteGeminiKey(): GeminiCredentialMetadata {
+    return this.deleteKey(GEMINI_PROVIDER);
+  }
+
+  getGeminiKey(): string | null {
+    return this.getKey(GEMINI_PROVIDER);
+  }
+
+  getGeminiKeySnapshot(): StoredGeminiKeySnapshot | null {
+    return this.getKeySnapshot(GEMINI_PROVIDER);
+  }
+
+  getGeminiMetadata(): GeminiCredentialMetadata {
+    return this.getMetadata(GEMINI_PROVIDER);
+  }
+
   recordGeminiTestResult(outcome: GeminiTestOutcome, error?: string | null): void {
     const now = new Date().toISOString();
     this.db
@@ -176,33 +260,39 @@ export class AppCredentialStore {
     error?: string | null;
     testedAt?: string;
   }): boolean {
-    const now = params.testedAt || new Date().toISOString();
-    const result = this.db
-      .prepare(
-        `UPDATE app_credentials
-         SET last_tested_at = ?,
-             last_test_outcome = ?,
-             last_test_error = ?,
-             last_test_model = ?,
-             last_test_seq = ?,
-             updated_at = ?
-         WHERE provider = ?
-           AND (credential_version = ? OR (credential_version IS NULL AND updated_at = ?))
-           AND (key_fingerprint IS NULL OR key_fingerprint = ?)`,
-      )
-      .run(
-        now,
-        params.outcome,
-        params.error ?? null,
-        params.expectedModel,
-        params.testSeq,
-        now,
-        GEMINI_PROVIDER,
-        params.expectedVersion,
-        params.expectedVersion,
-        params.expectedFingerprint,
-      );
-    return Number(result.changes) > 0;
+    return this.recordTestResultIfCurrent(GEMINI_PROVIDER, params);
+  }
+
+  saveOpenAIKey(rawKey: string): OpenAICredentialMetadata {
+    return this.saveKey(OPENAI_PROVIDER, rawKey);
+  }
+
+  deleteOpenAIKey(): OpenAICredentialMetadata {
+    return this.deleteKey(OPENAI_PROVIDER);
+  }
+
+  getOpenAIKey(): string | null {
+    return this.getKey(OPENAI_PROVIDER);
+  }
+
+  getOpenAIKeySnapshot(): StoredOpenAIKeySnapshot | null {
+    return this.getKeySnapshot(OPENAI_PROVIDER);
+  }
+
+  getOpenAIMetadata(): OpenAICredentialMetadata {
+    return this.getMetadata(OPENAI_PROVIDER);
+  }
+
+  recordOpenAITestResultIfCurrent(params: {
+    expectedVersion: string;
+    expectedFingerprint: string;
+    expectedModel: string;
+    testSeq: number;
+    outcome: CredentialTestOutcome;
+    error?: string | null;
+    testedAt?: string;
+  }): boolean {
+    return this.recordTestResultIfCurrent(OPENAI_PROVIDER, params);
   }
 }
 

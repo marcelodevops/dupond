@@ -7,14 +7,14 @@ import {
   ProviderToolCall,
 } from '../types.js';
 import { getOpenAIToolDeclarations } from '../tools.js';
+import {
+  getOpenAIClient,
+  resolveOpenAICredential,
+  sanitizeOpenAIError,
+  SUPPORTED_OPENAI_MODELS,
+} from '../../openai.js';
 
-export const SUPPORTED_OPENAI_MODELS = [
-  'gpt-4o',
-  'gpt-4o-mini',
-  'o1',
-  'o3-mini',
-  'gpt-4.5-preview',
-] as const;
+export { SUPPORTED_OPENAI_MODELS };
 
 export class OpenAIProviderAdapter implements ModelProviderAdapter {
   readonly provider = 'openai' as const;
@@ -27,24 +27,24 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
   }
 
   private getClient(): OpenAI {
-    if (!this.client) {
-      const apiKey = (process.env.OPENAI_API_KEY || '').trim();
-      this.client = new OpenAI({
-        apiKey,
-        defaultHeaders: {
-          'User-Agent': 'dupond-coding-worker-openai',
-        },
-      });
+    if (this.client) return this.client;
+    const resolved = getOpenAIClient({ userAgent: 'dupond-coding-worker-openai' });
+    if (!resolved) {
+      throw new DomainError(
+        'Prerequisite missing: OPENAI_API_KEY is not set on the server and no saved application OpenAI API key is configured in Application Settings.',
+      );
     }
-    return this.client;
+    return resolved;
   }
 
   public async isAvailable(): Promise<{ available: boolean; error?: string }> {
-    const key = process.env.OPENAI_API_KEY;
-    if (!key || !key.trim()) {
+    if (this.client) return { available: true };
+    const resolved = resolveOpenAICredential();
+    if (!resolved.apiKey) {
       return {
         available: false,
-        error: 'Prerequisite missing: OPENAI_API_KEY is not set in environment or .env. A valid OpenAI API key is required.',
+        error:
+          'Prerequisite missing: OPENAI_API_KEY is not set on the server and no saved application OpenAI API key is configured in Application Settings.',
       };
     }
     return { available: true };
@@ -99,8 +99,11 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
           callErr?.code === 'credit_balance_exhausted' ||
           (callErr?.message && callErr.message.includes('credit_balance_exhausted'));
 
+        const activeKey = this.client ? null : resolveOpenAICredential().apiKey;
+        const safeMessage = sanitizeOpenAIError(callErr?.message || String(callErr), activeKey);
+
         if (isQuotaExhausted) {
-          throw new DomainError(`OpenAI account credit balance exhausted (429 insufficient_quota): ${callErr.message}`);
+          throw new DomainError(`OpenAI account credit balance exhausted (429 insufficient_quota): ${safeMessage}`);
         }
 
         if (
@@ -113,7 +116,7 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
           callErr instanceof OpenAI.NotFoundError ||
           callErr?.status === 404
         ) {
-          throw new DomainError(`OpenAI API error (${callErr.status || 'client'}): ${callErr.message || 'Invalid request or credentials'}`);
+          throw new DomainError(`OpenAI API error (${callErr.status || 'client'}): ${safeMessage || 'Invalid request or credentials'}`);
         }
 
         const isRateLimit = callErr instanceof OpenAI.RateLimitError || callErr?.status === 429;
@@ -128,7 +131,7 @@ export class OpenAIProviderAdapter implements ModelProviderAdapter {
           const waitSec = retryAfterHeader ? Math.ceil(parseFloat(retryAfterHeader)) + 1 : Math.min(callAttempts * 5, 20);
           await new Promise((r) => setTimeout(r, waitSec * 1000));
         } else {
-          throw callErr;
+          throw new DomainError(safeMessage);
         }
       }
     }

@@ -27,6 +27,8 @@ import {
   PlanningReadiness,
   GeminiCredentialStatus,
   GeminiTestResult,
+  OpenAICredentialStatus,
+  OpenAITestResult,
   ProjectSourcePlan,
   ParsePlanRequest,
   AdoptPlanRequest,
@@ -357,6 +359,59 @@ export const projectApi = {
     return callProjectApi<GeminiTestResult & { status: GeminiCredentialStatus }>(
       '/api/credentials/gemini/test',
       { method: 'POST' },
+      signal
+    );
+  },
+
+  /**
+   * Check application-level OpenAI API key metadata (never returns raw key)
+   */
+  async getOpenAICredentialStatus(model?: string, signal?: AbortSignal): Promise<OpenAICredentialStatus> {
+    const query = model ? `?model=${encodeURIComponent(model)}` : '';
+    return callProjectApi<OpenAICredentialStatus>(
+      `/api/credentials/openai${query}`,
+      { method: 'GET' },
+      signal
+    );
+  },
+
+  /**
+   * Save or replace application-level OpenAI API key
+   */
+  async saveOpenAICredential(apiKey: string, signal?: AbortSignal): Promise<OpenAICredentialStatus> {
+    return callProjectApi<OpenAICredentialStatus>(
+      '/api/credentials/openai',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey }),
+      },
+      signal
+    );
+  },
+
+  /**
+   * Remove saved application-level OpenAI API key
+   */
+  async deleteOpenAICredential(signal?: AbortSignal): Promise<OpenAICredentialStatus> {
+    return callProjectApi<OpenAICredentialStatus>(
+      '/api/credentials/openai',
+      { method: 'DELETE' },
+      signal
+    );
+  },
+
+  /**
+   * Test the currently active OpenAI credential against the Responses API
+   */
+  async testOpenAICredential(model?: string, signal?: AbortSignal): Promise<OpenAITestResult & { status: OpenAICredentialStatus }> {
+    return callProjectApi<OpenAITestResult & { status: OpenAITestResult & { status: OpenAICredentialStatus } } extends never ? never : OpenAITestResult & { status: OpenAICredentialStatus }>(
+      '/api/credentials/openai/test',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(model ? { model } : {}),
+      },
       signal
     );
   },

@@ -1222,6 +1222,7 @@ function AppWorkspace() {
           setSettingsInitialTab('repository');
           setIsSettingsModalOpen(true);
         }}
+        onOpenAppSettings={() => setIsAppSettingsModalOpen(true)}
         onReviewTask={handleReviewTask}
         onDeliverRun={handleDeliverRun}
       />
