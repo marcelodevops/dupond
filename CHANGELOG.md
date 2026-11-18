@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.15.0](https://github.com/marcelodevops/dupond/compare/v0.14.1...v0.15.0) (2026-11-18)
+
+
+### Features
+
+* **credentials:** add application-scoped OpenAI credential store, resolver, and Responses API test ([74df6c5](https://github.com/marcelodevops/dupond/commit/74df6c53c2dcf86efde076f039c29cbd4d9fb94d))
+* **settings:** add application-scoped OpenAI credential onboarding ([5b57e2b](https://github.com/marcelodevops/dupond/commit/5b57e2bde0e8185b6e7077a3a610f8b904802a5c))
+* **ui:** add OpenAI credential onboarding section in Application Settings and task configuration link ([07ed571](https://github.com/marcelodevops/dupond/commit/07ed57182792a7bc46516a26c26a642bf98c8f3b))
+* **ui:** support custom OpenAI test models and model-bound verification badges ([ffdec1e](https://github.com/marcelodevops/dupond/commit/ffdec1ef5283a65e62026d10099605aef855bf64))
+* **worker:** wire OpenAIProviderAdapter to unified credential resolver and sanitize OpenAI secrets ([413519f](https://github.com/marcelodevops/dupond/commit/413519fee021f8b686908c359b980b9afbd6e93a))
+
+
+### Bug Fixes
+
+* **credentials:** enforce atomic provider-level test ordering and custom OpenAI model validation ([6def0e8](https://github.com/marcelodevops/dupond/commit/6def0e801b3972cb0deaa507c9aadbc217480606))
+
 ## [0.14.1](https://github.com/marcelodevops/dupond/compare/v0.14.0...v0.14.1) (2026-11-18)
 
 
