@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.1](https://github.com/marcelodevops/dupond/compare/v0.14.0...v0.14.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **coordinator:** centralize authoritative-to-board blocked status projection ([8b3303f](https://github.com/marcelodevops/dupond/commit/8b3303f34da5cdddd7081a5290009fa0cecf9d31))
+* **kanban:** keep blocked and unexpected-status tasks visible and ignore worktrees in Vite dev watch ([1ccfcc3](https://github.com/marcelodevops/dupond/commit/1ccfcc352814d9886941a73f1d637b0a90eebc42))
+* **server:** project agent-step outcomes and ignore worktrees in Vite dev watch ([2c681d8](https://github.com/marcelodevops/dupond/commit/2c681d8204ff97feb71f123015f3df37e9f082a9))
+* **ui:** render blocked and unexpected-status tasks visibly and reconcile on failed execution ([894660e](https://github.com/marcelodevops/dupond/commit/894660e5f931644e044edcad46d9aa192630cd06))
+
 ## [0.14.0](https://github.com/marcelodevops/dupond/compare/v0.13.0...v0.14.0) (2026-11-18)
 
 
