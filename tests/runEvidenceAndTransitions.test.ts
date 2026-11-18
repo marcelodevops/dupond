@@ -1181,4 +1181,157 @@ describe('Authoritative task transitions & read-only run evidence', () => {
 
     store.getRawDb().close();
   }, 25000);
+
+  it('deduplicates identical task IDs, blocks conflicting duplicates, audits refusals with correlationId, and isolates projects', async () => {
+    const store = new TaskStore(dbPath);
+    const projectStore = new ProjectStore(store);
+    const projA = projectStore.createProject({
+      name: 'Identity Proj A',
+      actor: 'test-actor',
+      repository: { repoUrl: 'org/app-a', defaultBranch: 'main' },
+    });
+    const projB = projectStore.createProject({
+      name: 'Identity Proj B',
+      actor: 'test-actor',
+      repository: { repoUrl: 'org/app-b', defaultBranch: 'main' },
+    });
+
+    const makeCard = (id: string, key: string, status: string, title: string) => ({
+      id,
+      key,
+      title,
+      description: 'Board task',
+      status,
+      priority: 'high',
+      epicId: 'EPIC-1',
+      assignedAgentId: 'agent-dev',
+      estimatedHours: 2,
+      spentHours: 0,
+      subtasks: [],
+      deliverables: [],
+      dependencies: [],
+      tags: [],
+      lastUpdated: 'Just now',
+    });
+
+    // Seed identical duplicates of 'dup-same', conflicting duplicates of 'dup-conflict', and an unrelated Review card
+    const identicalCard = makeCard('dup-same', 'DUP-1', 'review', 'Identical Duplicate');
+    const unrelatedCard = makeCard('other-rev', 'OTH-1', 'review', 'Unrelated Review Task');
+    const conflictV1 = makeCard('dup-conflict', 'CON-1', 'review', 'Variant One Title');
+    const conflictV2 = makeCard('dup-conflict', 'CON-1', 'in_progress', 'Variant Two Title');
+
+    const projAState = projectStore.getProjectState<Record<string, any>>(projA.id, {});
+    projectStore.saveProjectState(projA.id, {
+      ...projAState,
+      tasks: [identicalCard, identicalCard, identicalCard, unrelatedCard, conflictV1, conflictV2],
+    });
+    // Overlapping IDs/keys in projB must remain completely isolated
+    const projBState = projectStore.getProjectState<Record<string, any>>(projB.id, {});
+    projectStore.saveProjectState(projB.id, {
+      ...projBState,
+      tasks: [makeCard('dup-same', 'DUP-1', 'review', 'Proj B Task')],
+    });
+
+    const authToken = 'test-auth-token';
+    const port = await getFreePort();
+    serverProc = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PORT: String(port),
+        DUPOND_DB_PATH: dbPath,
+        DUPOND_STATE_FILE: statePath,
+        DUPOND_CONN_KEY_PATH: keyPath,
+        DUPOND_AUTH_TOKEN: authToken,
+      },
+      detached: true,
+      stdio: 'ignore',
+    });
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 40; i++) {
+      try {
+        const r = await fetch(`${baseUrl}/api/health`);
+        if (r.ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    const headers = (pid: string) => ({
+      Authorization: `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+      'X-Dupond-Project-Id': pid,
+    });
+
+    // 1. Repeated GET/sync consolidates identical duplicates to 1 card and preserves conflicting variants
+    const state1Res = await fetch(`${baseUrl}/api/orchestrate/state`, { headers: headers(projA.id) });
+    assert.strictEqual(state1Res.status, 200);
+    const state1 = (await state1Res.json()) as any;
+    assert.strictEqual(state1.tasks.filter((t: any) => t.id === 'dup-same').length, 1);
+    assert.strictEqual(state1.tasks.filter((t: any) => t.id === 'dup-conflict').length, 1);
+    const conflictCard = state1.tasks.find((t: any) => t.id === 'dup-conflict');
+    assert.ok(conflictCard.identityConflict);
+    assert.strictEqual(conflictCard.identityConflict.variantCount, 2);
+
+    // 2. Refused Done on 'dup-same' records TRANSITION_REFUSED_UNREGISTERED with correlationId and changes NO statuses
+    const refuseDoneRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-same/transition`, {
+      method: 'POST',
+      headers: headers(projA.id),
+      body: JSON.stringify({ status: 'done' }),
+    });
+    assert.strictEqual(refuseDoneRes.status, 422);
+    const refuseDoneJson = (await refuseDoneRes.json()) as any;
+    assert.strictEqual(refuseDoneJson.reason, 'unregistered-task');
+    assert.ok(refuseDoneJson.correlationId);
+
+    const auditsA = store.listAuditEvents('dup-same', projA.id);
+    const refusalAudit = auditsA.find((a) => a.eventType === 'TRANSITION_REFUSED_UNREGISTERED');
+    assert.ok(refusalAudit);
+    assert.strictEqual(refusalAudit.details.correlationId, refuseDoneJson.correlationId);
+    assert.strictEqual(refusalAudit.details.requestedStatus, 'done');
+    assert.ok(auditsA.some((a) => a.eventType === 'TASK_DUPLICATE_CONSOLIDATED'));
+
+    // 3. Conflicting duplicate refuses transition and registration until resolved
+    const conflictTransitionRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-conflict/transition`, {
+      method: 'POST',
+      headers: headers(projA.id),
+      body: JSON.stringify({ status: 'done' }),
+    });
+    assert.strictEqual(conflictTransitionRes.status, 422);
+    assert.strictEqual(((await conflictTransitionRes.json()) as any).reason, 'identity-conflict');
+
+    const conflictRegRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-conflict/register`, {
+      method: 'POST',
+      headers: headers(projA.id),
+    });
+    assert.strictEqual(conflictRegRes.status, 409);
+    assert.strictEqual(((await conflictRegRes.json()) as any).code, 'TASK_IDENTITY_CONFLICT');
+
+    // Resolve conflict explicitly by choosing variant 1 (index 0)
+    const resolveRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-conflict/resolve-conflict`, {
+      method: 'POST',
+      headers: headers(projA.id),
+      body: JSON.stringify({ variantIndex: 0 }),
+    });
+    assert.strictEqual(resolveRes.status, 200);
+    const resolveJson = (await resolveRes.json()) as any;
+    assert.strictEqual(resolveJson.task.title, 'Variant One Title');
+    assert.strictEqual(resolveJson.task.identityConflict, undefined);
+
+    // 4. Registering 'dup-same' moves ONLY 'dup-same' in projA to todo; unrelated 'other-rev' and projB 'dup-same' remain review
+    const regRes = await fetch(`${baseUrl}/api/orchestrate/tasks/dup-same/register`, {
+      method: 'POST',
+      headers: headers(projA.id),
+    });
+    assert.strictEqual(regRes.status, 200);
+
+    const stateAfterA = (await (await fetch(`${baseUrl}/api/orchestrate/state`, { headers: headers(projA.id) })).json()) as any;
+    const stateAfterB = (await (await fetch(`${baseUrl}/api/orchestrate/state`, { headers: headers(projB.id) })).json()) as any;
+    assert.strictEqual(stateAfterA.tasks.find((t: any) => t.id === 'dup-same').status, 'todo');
+    assert.strictEqual(stateAfterA.tasks.find((t: any) => t.id === 'other-rev').status, 'review');
+    assert.strictEqual(stateAfterB.tasks.find((t: any) => t.id === 'dup-same').status, 'review');
+    assert.strictEqual(store.getTaskScoped('dup-same', projB.id), null);
+
+    store.getRawDb().close();
+  }, 25000);
 });
