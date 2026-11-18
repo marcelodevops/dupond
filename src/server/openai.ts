@@ -62,11 +62,24 @@ interface EnvTestState {
   error: string | null;
 }
 
+export const OPENAI_MODEL_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export function isValidOpenAIModelId(model: string): boolean {
+  return OPENAI_MODEL_ID_REGEX.test(model);
+}
+
 const cachedClients = new Map<string, { fingerprint: string; client: OpenAI }>();
-const latestCompletedTestSeqByKey = new Map<string, number>();
+const latestCompletedTestSeqByVersion = new Map<string, number>();
 let testClientOverride: any = null;
 let envTestState: EnvTestState | null = null;
 let nextTestSeq = 0;
+
+function allocateTestSeq(store: AppCredentialStore): number {
+  const dbMax = store.getMaxTestSeq();
+  const envMax = envTestState?.seq ?? 0;
+  nextTestSeq = Math.max(nextTestSeq, dbMax, envMax) + 1;
+  return nextTestSeq;
+}
 
 function fingerprintSecret(secret: string): string {
   return crypto.createHash('sha256').update(secret).digest('hex');
@@ -180,12 +193,9 @@ export function getOpenAICredentialStatus(
 
   if (envKey) {
     const envFp = fingerprintSecret(envKey);
+    const matchesRequested = !requestedModel || (envTestState && envTestState.model === requestedModel);
     const currentEnvTest =
-      envTestState &&
-      envTestState.fingerprint === envFp &&
-      (!requestedModel || envTestState.model === requestedModel)
-        ? envTestState
-        : null;
+      envTestState && envTestState.fingerprint === envFp ? envTestState : null;
     return {
       provider: 'openai',
       model: requestedModel || currentEnvTest?.model || defaultModel,
@@ -196,9 +206,9 @@ export function getOpenAICredentialStatus(
       hasSavedKey: meta.hasSavedKey,
       environmentControlled: true,
       scope: 'application',
-      lastTestedAt: currentEnvTest?.testedAt ?? null,
-      lastTestOutcome: currentEnvTest?.outcome ?? null,
-      lastTestError: currentEnvTest?.error ?? null,
+      lastTestedAt: matchesRequested ? (currentEnvTest?.testedAt ?? null) : null,
+      lastTestOutcome: matchesRequested ? (currentEnvTest?.outcome ?? null) : null,
+      lastTestError: matchesRequested ? (currentEnvTest?.error ?? null) : null,
       lastTestModel: currentEnvTest?.model ?? null,
     };
   }
@@ -218,7 +228,7 @@ export function getOpenAICredentialStatus(
       lastTestedAt: modelMatches ? meta.lastTestedAt : null,
       lastTestOutcome: modelMatches ? meta.lastTestOutcome : null,
       lastTestError: modelMatches ? meta.lastTestError : null,
-      lastTestModel: modelMatches ? meta.lastTestModel : null,
+      lastTestModel: meta.lastTestModel ?? null,
     };
   }
 
@@ -325,24 +335,24 @@ export async function testOpenAIConnection(options?: {
   model?: string;
 }): Promise<OpenAITestResult> {
   const store = options?.store ?? defaultAppCredentialStore;
-  const seq = ++nextTestSeq;
   const requestedModel = options?.model?.trim();
   const modelToTest = requestedModel || activeModelName();
   const timeoutMs = resolveOpenAITestTimeoutMs(options?.timeoutMs);
 
-  if (requestedModel && !(SUPPORTED_OPENAI_MODELS as readonly string[]).includes(requestedModel)) {
+  if (requestedModel !== undefined && (!requestedModel || !isValidOpenAIModelId(requestedModel))) {
     return {
       ok: false,
       outcome: 'failed',
       reason: 'model_access',
       timeoutMs,
       source: resolveOpenAICredential(store).source,
-      model: requestedModel,
+      model: requestedModel || activeModelName(),
       testedAt: new Date().toISOString(),
-      error: `Unsupported OpenAI model "${requestedModel}". Choose one of: ${SUPPORTED_OPENAI_MODELS.join(', ')}.`,
+      error: 'Invalid OpenAI model identifier. Use 1-128 characters matching [A-Za-z0-9._:-].',
     };
   }
 
+  const seq = allocateTestSeq(store);
   const snapshot = resolveOpenAICredential(store);
   if (!snapshot.apiKey || snapshot.source === 'none' || !snapshot.version || !snapshot.fingerprint) {
     return {
@@ -438,8 +448,7 @@ export async function testOpenAIConnection(options?: {
 
   if (testStatus === 'timeout' || testStatus === 'cancelled') {
     if (snapshot.source === 'saved') {
-      const completionKey = `${snapshot.version}|${modelToTest}`;
-      const prevCompletedSeq = latestCompletedTestSeqByKey.get(completionKey) ?? 0;
+      const prevCompletedSeq = latestCompletedTestSeqByVersion.get(snapshot.version) ?? 0;
       if (prevCompletedSeq >= seq) {
         return {
           ok: false,
@@ -456,7 +465,6 @@ export async function testOpenAIConnection(options?: {
     } else if (
       envTestState &&
       envTestState.fingerprint === snapshot.fingerprint &&
-      envTestState.model === modelToTest &&
       envTestState.seq >= seq
     ) {
       return {
@@ -504,8 +512,7 @@ export async function testOpenAIConnection(options?: {
   const outcome: CredentialTestOutcome = testStatus === 'passed' ? 'passed' : 'failed';
 
   if (snapshot.source === 'saved') {
-    const completionKey = `${snapshot.version}|${modelToTest}`;
-    const prevCompletedSeq = latestCompletedTestSeqByKey.get(completionKey) ?? 0;
+    const prevCompletedSeq = latestCompletedTestSeqByVersion.get(snapshot.version) ?? 0;
     if (prevCompletedSeq >= seq) {
       return {
         ok: false,
@@ -542,12 +549,11 @@ export async function testOpenAIConnection(options?: {
         error: 'Credential test result was superseded by a newer credential change or overlapping test.',
       };
     }
-    latestCompletedTestSeqByKey.set(completionKey, seq);
+    latestCompletedTestSeqByVersion.set(snapshot.version, seq);
   } else {
     if (
       envTestState &&
       envTestState.fingerprint === snapshot.fingerprint &&
-      envTestState.model === modelToTest &&
       envTestState.seq >= seq
     ) {
       return {

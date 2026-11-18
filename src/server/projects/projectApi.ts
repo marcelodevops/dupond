@@ -7,7 +7,12 @@ import { JiraProvisioner, defaultJiraProvisioner } from './jiraProvisioner.js';
 import { PROJECT_CONTEXT_HEADER, DEFAULT_PROJECT_ID } from '../../types/projectContract.js';
 import { getPlanningReadiness, parsePlan } from '../planning/planBreakdown.js';
 import { getGeminiCredentialStatus, invalidateGeminiClientCache, testGeminiConnection } from '../gemini.js';
-import { getOpenAICredentialStatus, invalidateOpenAIClientCache, testOpenAIConnection } from '../openai.js';
+import {
+  getOpenAICredentialStatus,
+  invalidateOpenAIClientCache,
+  OPENAI_MODEL_ID_REGEX,
+  testOpenAIConnection,
+} from '../openai.js';
 
 const RepositorySchema = z
   .object({
@@ -449,7 +454,15 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
     res.on('close', onClose);
     try {
       const parsed = z
-        .object({ model: z.string().trim().min(1).optional() })
+        .object({
+          model: z
+            .string()
+            .trim()
+            .min(1)
+            .max(128)
+            .regex(OPENAI_MODEL_ID_REGEX, 'Invalid OpenAI model identifier')
+            .optional(),
+        })
         .strict()
         .parse(req.body ?? {});
       const result = await testOpenAIConnection({

@@ -170,6 +170,13 @@ export class AppCredentialStore {
     };
   }
 
+  getMaxTestSeq(): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(last_test_seq), 0) AS max_seq FROM app_credentials')
+      .get() as { max_seq: number | null } | undefined;
+    return Number(row?.max_seq ?? 0);
+  }
+
   recordTestResultIfCurrent(
     provider: AppCredentialProvider,
     params: {
@@ -194,7 +201,8 @@ export class AppCredentialStore {
              updated_at = ?
          WHERE provider = ?
            AND (credential_version = ? OR (credential_version IS NULL AND updated_at = ?))
-           AND (key_fingerprint IS NULL OR key_fingerprint = ?)`,
+           AND (key_fingerprint IS NULL OR key_fingerprint = ?)
+           AND (last_test_seq IS NULL OR last_test_seq < ?)`,
       )
       .run(
         now,
@@ -207,6 +215,7 @@ export class AppCredentialStore {
         params.expectedVersion,
         params.expectedVersion,
         params.expectedFingerprint,
+        params.testSeq,
       );
     return Number(result.changes) > 0;
   }
