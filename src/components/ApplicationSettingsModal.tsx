@@ -110,6 +110,22 @@ const ProviderCredentialCard: React.FC<ProviderCredentialCardProps> = ({
   const testTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const testRunIdRef = useRef(0);
   const mountedRef = useRef(true);
+  const selectedModelRef = useRef(selectedModel);
+  selectedModelRef.current = selectedModel;
+
+  const isCustomModelPreset = Boolean(
+    models && models.length > 0 && selectedModel !== undefined && !models.includes(selectedModel),
+  );
+  const [customMode, setCustomMode] = useState(isCustomModelPreset);
+  useEffect(() => {
+    if (isCustomModelPreset) setCustomMode(true);
+  }, [isCustomModelPreset]);
+
+  const hasModelSelector = Boolean(models && models.length > 0 && onSelectModel);
+  const effectiveSelectedModel = hasModelSelector ? (selectedModel || models![0]) : undefined;
+  const testedModelMatchesSelected =
+    !hasModelSelector || !status?.lastTestModel || status.lastTestModel === effectiveSelectedModel;
+  const displayedTestOutcome = testedModelMatchesSelected ? status?.lastTestOutcome ?? null : null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -191,17 +207,21 @@ const ProviderCredentialCard: React.FC<ProviderCredentialCardProps> = ({
                 <span
                   data-testid={`${provider}-verified-badge`}
                   className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                    status.lastTestOutcome === 'passed'
+                    displayedTestOutcome === 'passed'
                       ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
-                      : status.lastTestOutcome === 'failed'
+                      : displayedTestOutcome === 'failed'
                         ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
                         : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
                   }`}
                 >
-                  {status.lastTestOutcome === 'passed'
-                    ? 'Verified'
-                    : status.lastTestOutcome === 'failed'
-                      ? 'Verification Failed'
+                  {displayedTestOutcome === 'passed'
+                    ? hasModelSelector && status.lastTestModel
+                      ? `Verified (${status.lastTestModel})`
+                      : 'Verified'
+                    : displayedTestOutcome === 'failed'
+                      ? hasModelSelector && status.lastTestModel
+                        ? `Verification Failed (${status.lastTestModel})`
+                        : 'Verification Failed'
                       : 'Unverified'}
                 </span>
               )}
@@ -330,25 +350,59 @@ const ProviderCredentialCard: React.FC<ProviderCredentialCardProps> = ({
         </div>
       </div>
 
-      {models && models.length > 0 && onSelectModel && (
-        <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
-          <label htmlFor={modelSelectId} className="text-[11px] text-slate-400 shrink-0">
-            Test Model:
-          </label>
-          <select
-            id={modelSelectId}
-            data-testid={modelSelectId}
-            value={selectedModel || models[0]}
-            onChange={(e) => onSelectModel(e.target.value)}
-            disabled={globalBusy}
-            className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
-          >
-            {models.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
+      {hasModelSelector && (
+        <div className="space-y-1.5 pt-1">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <label htmlFor={modelSelectId} className="text-[11px] text-slate-400 shrink-0">
+              Test Model:
+            </label>
+            <select
+              id={modelSelectId}
+              data-testid={modelSelectId}
+              value={customMode ? '__custom__' : effectiveSelectedModel}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === '__custom__') {
+                  setCustomMode(true);
+                  if (models!.includes(effectiveSelectedModel || '')) {
+                    onSelectModel!('');
+                  }
+                } else {
+                  setCustomMode(false);
+                  onSelectModel!(val);
+                }
+              }}
+              disabled={isSaving || isDeleting}
+              className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
+            >
+              {models!.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+              <option value="__custom__">Custom model...</option>
+            </select>
+            {customMode && (
+              <input
+                type="text"
+                data-testid={`${provider}-custom-model-input`}
+                value={selectedModel ?? ''}
+                onChange={(e) => onSelectModel!(e.target.value)}
+                placeholder="e.g. gpt-4.1-mini"
+                disabled={isSaving || isDeleting}
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-60"
+              />
+            )}
+          </div>
+          {status?.lastTestOutcome && status?.lastTestModel && !testedModelMatchesSelected && (
+            <p
+              data-testid={`${provider}-different-model-verified-note`}
+              className="text-[10px] text-amber-300/90"
+            >
+              Last {status.lastTestOutcome} verification was for <code>{status.lastTestModel}</code>;{' '}
+              <code>{effectiveSelectedModel || 'current model'}</code> is unverified.
+            </p>
+          )}
         </div>
       )}
 
@@ -359,6 +413,11 @@ const ProviderCredentialCard: React.FC<ProviderCredentialCardProps> = ({
             data-testid={`test-${provider}-key-btn`}
             disabled={!status?.configured || globalBusy}
             onClick={async () => {
+              const testedModelSnapshot = effectiveSelectedModel;
+              if (hasModelSelector && (!testedModelSnapshot || !testedModelSnapshot.trim())) {
+                setErrorBanner('Enter a valid OpenAI model identifier before testing.');
+                return;
+              }
               const runId = ++testRunIdRef.current;
               const controller = new AbortController();
               testAbortControllerRef.current = controller;
@@ -380,14 +439,20 @@ const ProviderCredentialCard: React.FC<ProviderCredentialCardProps> = ({
               }, 250);
 
               try {
-                const res = await onTestConnection(selectedModel, controller.signal);
+                const res = await onTestConnection(testedModelSnapshot, controller.signal);
                 if (!mountedRef.current || testRunIdRef.current !== runId) return;
+                const modelChangedDuringTest =
+                  hasModelSelector && selectedModelRef.current !== testedModelSnapshot;
                 if (res.stale || res.outcome === 'stale') {
                   setErrorBanner(res.error || 'Connection test result was superseded by a newer credential change.');
                 } else if (res.inconclusive || res.outcome === 'inconclusive' || res.outcome === 'cancelled') {
                   setInconclusiveBanner(
                     res.error ||
                       'Connection test was inconclusive. Previous verification history was preserved.',
+                  );
+                } else if (modelChangedDuringTest) {
+                  setInconclusiveBanner(
+                    `Completed test (${res.ok ? 'passed' : 'failed'}) for ${res.model}, while selected model changed to ${selectedModelRef.current || '(blank)'}.`,
                   );
                 } else if (res.ok) {
                   setSuccessBanner(`Connection verified (${res.source} credential, model ${res.model}).`);
