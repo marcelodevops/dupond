@@ -48,7 +48,7 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
   let serverUrl: string;
   let mockGeminiPort: number;
   let mockGeminiServer: http.Server;
-  let mockWorkerMode: 'pass' | 'fail' = 'pass';
+  let mockWorkerMode: 'pass' | 'fail' | '503' = 'pass';
   let lastWorkerPrompt = '';
   let serverProc: ChildProcess | null = null;
   let serverLogs = '';
@@ -177,6 +177,20 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
           });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: textPayload }], role: 'model' } }] }));
+          return;
+        }
+
+        if (mockWorkerMode === '503') {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: {
+                code: 503,
+                message: 'This model is currently experiencing high demand. Please try again later.',
+                status: 'UNAVAILABLE',
+              },
+            }),
+          );
           return;
         }
 
@@ -598,4 +612,224 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await context.close();
     }
   }, 240000);
+
+  it('keeps blocked tasks visible with BLOCKED badge, handles unexpected statuses and interrupted requests, and ignores worktree file changes in Vite dev mode', async () => {
+    const headers = (projectId?: string) => ({
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`,
+      ...(projectId ? { 'X-Dupond-Project-Id': projectId } : {}),
+    });
+
+    // Create a dedicated project with an in_progress task (AEG-101) and an unexpected-status task (AEG-ODD)
+    const projRes = await fetch(`${serverUrl}/api/projects`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        name: 'AEG-101 Visibility Project',
+        description: 'Visibility regression project',
+        repository: { repoUrl: remoteDir, localPath: targetRepoDir, defaultBranch: 'main' },
+      }),
+    });
+    assert.strictEqual(projRes.status, 201);
+    const proj = (await projRes.json()) as any;
+
+    const stateSeedRes = await fetch(`${serverUrl}/api/orchestrate/state`, {
+      method: 'POST',
+      headers: headers(proj.id),
+      body: JSON.stringify({
+        tasks: [
+          {
+            id: 'AEG-101',
+            key: 'AEG-101',
+            epicId: 'EPIC-1',
+            assignedAgentId: 'agent-dev',
+            title: 'AEG-101 blocked visibility regression',
+            description: 'Must remain visible in To Do when Gemini returns 503',
+            status: 'todo',
+            priority: 'high',
+            tags: [],
+            subtasks: [],
+            deliverables: [],
+            estimatedHours: 2,
+            spentHours: 0,
+          },
+        ],
+        agents: [
+          {
+            id: 'agent-dev',
+            name: 'Dev Worker',
+            role: 'Developer',
+            baseRole: 'Developer',
+            avatar: 'D',
+            model: 'gemini-3-flash-preview',
+            status: 'idle',
+            completedTasksCount: 0,
+            velocity: 1,
+            skills: ['ts'],
+            communicationCount: 0,
+            providerType: 'gemini',
+          },
+        ],
+        epics: [],
+        communications: [],
+      }),
+    });
+    assert.strictEqual(stateSeedRes.status, 200);
+
+    // Register AEG-101 and set it in_progress in SQLite
+    const regRes = await fetch(`${serverUrl}/api/orchestrate/tasks/AEG-101/register`, {
+      method: 'POST',
+      headers: headers(proj.id),
+    });
+    assert.strictEqual(regRes.status, 200);
+    const toInProg = await fetch(`${serverUrl}/api/orchestrate/tasks/AEG-101/transition`, {
+      method: 'POST',
+      headers: headers(proj.id),
+      body: JSON.stringify({ status: 'in_progress' }),
+    });
+    assert.strictEqual(toInProg.status, 200);
+
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.addInitScript((token) => {
+      window.localStorage.setItem('dupond_api_token', token);
+    }, SYNTH_AUTH_TOKEN);
+    try {
+      const page = await context.newPage();
+      await page.goto(serverUrl, { waitUntil: 'networkidle' });
+      await page.route('**/api/orchestrate/state', async (route, request) => {
+        if (request.method() === 'GET') {
+          const resp = await route.fetch();
+          const json = (await resp.json()) as any;
+          if (Array.isArray(json.tasks) && json.tasks.some((t: any) => t.id === 'AEG-101')) {
+            json.tasks = [
+              ...json.tasks,
+              {
+                id: 'AEG-ODD',
+                key: 'AEG-ODD',
+                title: 'AEG-ODD unexpected status fallback',
+                description: 'Task with unexpected status should render in To Do fallback',
+                status: 'weird_status',
+                priority: 'low',
+                tags: [],
+                subtasks: [],
+                deliverables: [],
+                estimatedHours: 1,
+                spentHours: 0,
+              },
+            ];
+          }
+          await route.fulfill({ response: resp, json });
+          return;
+        }
+        await route.continue();
+      });
+      const switcherBtn = page.getByRole('button', { name: 'Switch Dupond Project' });
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /AEG-101 Visibility Project/i }).click();
+
+      // Unexpected-status card is visible in To Do fallback with explicit status badge
+      await pwExpect(page.getByTestId('kanban-card-AEG-ODD')).toBeVisible();
+      await pwExpect(page.getByTestId('task-unexpected-status-badge-AEG-ODD')).toContainText('WEIRD_STATUS');
+      await page.unroute('**/api/orchestrate/state');
+
+      // Open AEG-101, attempt Review -> refused NO_EVIDENCE
+      await page.getByTestId('kanban-card-AEG-101').click();
+      await page.getByTestId('task-detail-status-select').selectOption('review');
+      await pwExpect(page.getByTestId('task-transition-refusal')).toBeVisible();
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('in_progress');
+
+      // Execute Agent Step against 503 provider -> task stays visible once in To Do with BLOCKED badge & reason
+      mockWorkerMode = '503';
+      await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Blocked / Failed', { timeout: 30000 });
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('503');
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(250);
+      if (await page.getByTestId('task-detail-status-select').isVisible().catch(() => false)) {
+        await page.locator('button').filter({ has: page.locator('svg') }).first().click().catch(() => {});
+      }
+
+      await pwExpect(page.getByTestId('kanban-card-AEG-101')).toHaveCount(1);
+      await pwExpect(page.getByTestId('task-blocked-badge-AEG-101')).toBeVisible();
+      await pwExpect(page.getByTestId('task-blocked-reason-AEG-101')).toBeVisible();
+
+      // Reload page & restart server -> blocked presentation persists
+      await page.reload({ waitUntil: 'networkidle' });
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /AEG-101 Visibility Project/i }).click();
+      await pwExpect(page.getByTestId('kanban-card-AEG-101')).toHaveCount(1);
+      await pwExpect(page.getByTestId('task-blocked-badge-AEG-101')).toBeVisible();
+
+      // Interrupted client request during Execute Agent Step preserves task visibility
+      await page.getByTestId('kanban-card-AEG-101').click();
+      await page.route('**/api/orchestrate/agent-step', (route) => route.abort('failed'));
+      await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
+      await page.waitForTimeout(600);
+      await page.unroute('**/api/orchestrate/agent-step');
+      await page.keyboard.press('Escape');
+      await pwExpect(page.getByTestId('kanban-card-AEG-101')).toHaveCount(1);
+    } finally {
+      await context.close();
+    }
+
+    // Verify Vite middleware dev mode ignores .dupond_worktrees/**/tsconfig.json without reloading the browser
+    const devPort = await getFreePort();
+    const devUrl = `http://127.0.0.1:${devPort}`;
+    const tsxBin = path.resolve(
+      process.cwd(),
+      'node_modules',
+      '.bin',
+      process.platform === 'win32' ? 'tsx.cmd' : 'tsx',
+    );
+    const devLogs: string[] = [];
+    const devProc = spawn(tsxBin, ['server.ts'], {
+      cwd: process.cwd(),
+      detached: process.platform !== 'win32',
+      env: {
+        ...(process.env as Record<string, string>),
+        PORT: String(devPort),
+        DUPOND_BIND_HOST: '127.0.0.1',
+        NODE_ENV: 'development',
+        DUPOND_AUTH_TOKEN: SYNTH_AUTH_TOKEN,
+        DUPOND_DB_PATH: dbPath,
+        DUPOND_STATE_FILE: statePath,
+        DUPOND_CONN_KEY_PATH: keyPath,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    devProc.stdout?.on('data', (d) => devLogs.push(d.toString()));
+    devProc.stderr?.on('data', (d) => devLogs.push(d.toString()));
+
+    const wtTestDir = path.join(process.cwd(), '.dupond_worktrees', 'e2e-watch-test');
+    const devCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await devCtx.addInitScript((token) => {
+      window.localStorage.setItem('dupond_api_token', token);
+    }, SYNTH_AUTH_TOKEN);
+    try {
+      await waitForHealthy(devUrl, devProc, () => devLogs.join(''));
+      const devPage = await devCtx.newPage();
+      await devPage.goto(devUrl, { waitUntil: 'networkidle' });
+      await devPage.evaluate(() => {
+        (window as any).__dupondNoReloadMarker = 'alive';
+      });
+      let navCount = 0;
+      devPage.on('framenavigated', (frame) => {
+        if (frame === devPage.mainFrame()) navCount += 1;
+      });
+
+      fs.mkdirSync(wtTestDir, { recursive: true });
+      fs.writeFileSync(path.join(wtTestDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }));
+      await devPage.waitForTimeout(1500);
+
+      const marker = await devPage.evaluate(() => (window as any).__dupondNoReloadMarker);
+      assert.strictEqual(marker, 'alive', 'Worktree tsconfig.json creation must not reload Vite dev browser');
+      assert.strictEqual(navCount, 0, 'Worktree tsconfig.json creation must not trigger main-frame navigation');
+    } finally {
+      fs.rmSync(wtTestDir, { recursive: true, force: true });
+      await devCtx.close();
+      try {
+        if (devProc.pid) process.kill(-devProc.pid, 'SIGTERM');
+      } catch {}
+    }
+  }, 180000);
 });

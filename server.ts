@@ -154,14 +154,15 @@ app.post('/api/orchestrate/state', (req: Request, res: Response) => {
 
 function resolveCoordinatorTaskProjectId(req: Request, taskId: string): string | null {
   const requestedProjectId = parseProjectContextHeader(req) || undefined;
-  const dbProjectId =
-    (requestedProjectId ? taskStore.getTaskScoped(taskId, requestedProjectId)?.projectId : undefined) ||
-    taskStore.getProjectIdForTask(taskId);
-  const inRequestedCoordinator = requestedProjectId
-    ? coordinator.getState(requestedProjectId).tasks.some((t) => t.id === taskId || t.key === taskId)
-    : false;
+  if (requestedProjectId) {
+    const scoped = taskStore.getTaskScoped(taskId, requestedProjectId);
+    if (scoped) return scoped.projectId;
+    const inRequestedCoordinator = coordinator.getState(requestedProjectId).tasks.some((t) => t.id === taskId || t.key === taskId);
+    if (inRequestedCoordinator) return requestedProjectId;
+  }
+  const dbProjectId = taskStore.getProjectIdForTask(taskId);
   const inDefaultCoordinator = coordinator.getState('default').tasks.some((t) => t.id === taskId || t.key === taskId);
-  return dbProjectId || (inRequestedCoordinator ? requestedProjectId! : inDefaultCoordinator ? 'default' : null);
+  return dbProjectId || (inDefaultCoordinator ? 'default' : null);
 }
 
 // Endpoint: Centralized Task Status Transition with Quality Gate Enforcement
@@ -424,7 +425,6 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
         const projectState = coordinator.getState(projectId);
         const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
         if (stateTask) {
-          stateTask.status = nextStatus as any;
           if (workerResult.deliverableContent) {
             stateTask.deliverables = [...(stateTask.deliverables || []), workerResult.deliverableContent];
           }
@@ -436,6 +436,7 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
           stateTask.lastUpdated = 'Just now';
           coordinator.saveStateToDisk(projectState, projectId);
         }
+        coordinator.projectAuthoritativeStatuses(projectId);
         return res.json({
           success: true,
           runId: workerResult.runId,
@@ -500,18 +501,15 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
       const dbTask = taskStore.getTask(task.id || '', projectId) || taskStore.getTask(task.key || '', projectId);
       const latestRun = dbTask ? taskStore.getLatestRunForTask(dbTask.id, projectId) : null;
       if (dbTask) {
-        const projectState = coordinator.getState(projectId);
-        const stateTask = projectState.tasks.find((t) => t.id === dbTask.id || t.key === dbTask.key);
-        if (stateTask && stateTask.status !== dbTask.status) {
-          stateTask.status = dbTask.status as any;
-          stateTask.lastUpdated = 'Just now';
-          coordinator.saveStateToDisk(projectState, projectId);
-        }
+        coordinator.projectAuthoritativeStatuses(projectId);
       }
+      const freshDbTask = dbTask ? taskStore.getTask(dbTask.id, projectId) : null;
       return res.status(400).json({
         success: false,
         blocked: true,
         runId: latestRun?.id,
+        authoritativeStatus: freshDbTask?.status ?? dbTask?.status,
+        blockedReason: freshDbTask?.blockedReason ?? dbTask?.blockedReason ?? workerErr.message,
         error: workerErr.message || `No capable worker or verified code for ${task.key}`,
       });
     }
@@ -959,6 +957,9 @@ if (!isProduction) {
   const vite = await createViteServer({
     server: {
       middlewareMode: true,
+      watch: {
+        ignored: ['**/.dupond_worktrees/**', '**/data/**'],
+      },
       ws: {
         server: httpServer,
       },
