@@ -1448,4 +1448,253 @@ describe('Authoritative task transitions & read-only run evidence', () => {
       fs.rmSync(sentinelDir, { recursive: true, force: true });
     }
   }, 120000);
+
+  it('AEG-101: keeps blocked task visible in To Do after refused Review and Gemini 503 failure, survives restart, and isolates overlapping project tasks', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-aeg101-backend-'));
+    const dbPath = path.join(tmpRoot, 'dupond.db');
+    const statePath = path.join(tmpRoot, 'dupond_state.json');
+    const keyPath = path.join(tmpRoot, '.dupond_conn_key');
+    const repoA = path.join(tmpRoot, 'repoA');
+    const repoB = path.join(tmpRoot, 'repoB');
+    const authToken = 'test_auth_token_aeg101_01';
+
+    fs.writeFileSync(keyPath, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
+    for (const dir of [repoA, repoB]) {
+      fs.mkdirSync(dir, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: dir });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+      fs.writeFileSync(path.join(dir, 'README.md'), 'init\n');
+      execFileSync('git', ['add', '.'], { cwd: dir });
+      execFileSync('git', ['commit', '-m', 'init'], { cwd: dir });
+    }
+
+    const mockGemini = http.createServer((_req, res) => {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: {
+            code: 503,
+            message: 'This model is currently experiencing high demand. Please try again later.',
+            status: 'UNAVAILABLE',
+          },
+        }),
+      );
+    });
+    await new Promise<void>((resolve) => mockGemini.listen(0, '127.0.0.1', resolve));
+    const mockGeminiPort = (mockGemini.address() as any).port;
+
+    const getFreePort = async (): Promise<number> => {
+      const s = http.createServer();
+      await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
+      const p = (s.address() as any).port;
+      await new Promise<void>((r) => s.close(() => r()));
+      return p;
+    };
+
+    const makeHeaders = (projectId?: string) => ({
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${authToken}`,
+      ...(projectId ? { 'X-Dupond-Project-Id': projectId } : {}),
+    });
+
+    const spawnApp = async (port: number) => {
+      const proc = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PORT: String(port),
+          DUPOND_DB_PATH: dbPath,
+          DUPOND_STATE_FILE: statePath,
+          DUPOND_CONN_KEY_PATH: keyPath,
+          DUPOND_AUTH_TOKEN: authToken,
+          GEMINI_API_KEY: 'test_gemini_key_aeg101',
+          DUPOND_ALLOW_TEST_GEMINI_ENDPOINT: '1',
+          DUPOND_GEMINI_TEST_BASE_URL: `http://127.0.0.1:${mockGeminiPort}`,
+        },
+        detached: true,
+        stdio: 'ignore',
+      });
+      const baseUrl = `http://127.0.0.1:${port}`;
+      for (let i = 0; i < 40; i++) {
+        try {
+          const r = await fetch(`${baseUrl}/api/health`);
+          if (r.ok) return { proc, baseUrl };
+        } catch {}
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      throw new Error('Server failed to start');
+    };
+
+    const killProc = async (proc: ChildProcess | null) => {
+      if (!proc) return;
+      try {
+        process.kill(-proc.pid!, 'SIGTERM');
+      } catch {}
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 1500);
+        proc.once('exit', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+    };
+
+    let serverProc: ChildProcess | null = null;
+    try {
+      const port1 = await getFreePort();
+      const s1 = await spawnApp(port1);
+      serverProc = s1.proc;
+
+      const projARes = await fetch(`${s1.baseUrl}/api/projects`, {
+        method: 'POST',
+        headers: makeHeaders(),
+        body: JSON.stringify({
+          name: 'Project A',
+          description: 'AEG-101 Project A',
+          repository: { repoUrl: 'org/repo-a', localPath: repoA, defaultBranch: 'main' },
+        }),
+      });
+      assert.strictEqual(projARes.status, 201);
+      const projA = (await projARes.json()) as any;
+
+      const projBRes = await fetch(`${s1.baseUrl}/api/projects`, {
+        method: 'POST',
+        headers: makeHeaders(),
+        body: JSON.stringify({
+          name: 'Project B',
+          description: 'AEG-101 Project B',
+          repository: { repoUrl: 'org/repo-b', localPath: repoB, defaultBranch: 'main' },
+        }),
+      });
+      assert.strictEqual(projBRes.status, 201);
+      const projB = (await projBRes.json()) as any;
+
+      // Seed both boards with overlapping key AEG-101, register them, and move both to in_progress
+      for (const [proj, taskId] of [
+        [projA, 'task-aeg101-a'],
+        [projB, 'task-aeg101-b'],
+      ] as const) {
+        const postRes = await fetch(`${s1.baseUrl}/api/orchestrate/state`, {
+          method: 'POST',
+          headers: makeHeaders(proj.id),
+          body: JSON.stringify({
+            tasks: [
+              {
+                id: taskId,
+                key: 'AEG-101',
+                epicId: 'EPIC-1',
+                title: `AEG-101 in ${proj.name}`,
+                description: 'Implement feature',
+                status: 'todo',
+                priority: 'high',
+                tags: [],
+                subtasks: [],
+                deliverables: [],
+                estimatedHours: 2,
+                spentHours: 0,
+              },
+            ],
+            agents: [
+              {
+                id: 'agent-1',
+                name: 'Worker',
+                role: 'Developer',
+                baseRole: 'Developer',
+                avatar: 'W',
+                model: 'gemini-3-flash-preview',
+                status: 'idle',
+                completedTasksCount: 0,
+                velocity: 1,
+                skills: ['ts'],
+                communicationCount: 0,
+                providerType: 'gemini',
+              },
+            ],
+            epics: [],
+            communications: [],
+          }),
+        });
+        assert.strictEqual(postRes.status, 200);
+        const regRes = await fetch(`${s1.baseUrl}/api/orchestrate/tasks/${taskId}/register`, {
+          method: 'POST',
+          headers: makeHeaders(proj.id),
+        });
+        assert.strictEqual(regRes.status, 200);
+        const toInProg = await fetch(`${s1.baseUrl}/api/orchestrate/tasks/${taskId}/transition`, {
+          method: 'POST',
+          headers: makeHeaders(proj.id),
+          body: JSON.stringify({ status: 'in_progress' }),
+        });
+        assert.strictEqual(toInProg.status, 200);
+      }
+
+      // 1. Transition to review is refused with NO_EVIDENCE
+      const reviewRefusal = await fetch(`${s1.baseUrl}/api/orchestrate/tasks/task-aeg101-a/transition`, {
+        method: 'POST',
+        headers: makeHeaders(projA.id),
+        body: JSON.stringify({ status: 'review' }),
+      });
+      assert.strictEqual(reviewRefusal.status, 422);
+      const refusalJson = (await reviewRefusal.json()) as any;
+      assert.strictEqual(refusalJson.reason, 'no-evidence');
+
+      // 2. Execute agent step hits controlled Gemini 503 -> returns 400 blocked, projects todo + blockedReason
+      const stepRes = await fetch(`${s1.baseUrl}/api/orchestrate/agent-step`, {
+        method: 'POST',
+        headers: makeHeaders(projA.id),
+        body: JSON.stringify({
+          task: { id: 'task-aeg101-a', key: 'AEG-101', title: 'AEG-101 in Project A', description: 'Implement feature', status: 'in_progress' },
+          agent: { id: 'agent-1', name: 'Worker', role: 'Developer', providerType: 'gemini', model: 'gemini-3-flash-preview' },
+          orchestratorConfig: { personaName: 'Test', systemPrompt: '', autonomyMode: 'supervised', model: 'gemini-3-flash-preview', temperature: 0.2 },
+          communicationHistory: [],
+        }),
+      });
+      assert.strictEqual(stepRes.status, 400);
+      const stepJson = (await stepRes.json()) as any;
+      assert.strictEqual(stepJson.blocked, true);
+      assert.strictEqual(stepJson.authoritativeStatus, 'blocked');
+      assert.ok(stepJson.runId);
+      assert.ok(String(stepJson.blockedReason || '').includes('503') || String(stepJson.error || '').includes('503'));
+
+      // 3. Projected board state in projA shows AEG-101 once in 'todo' with authoritativeStatus: 'blocked'
+      const stateA = (await (await fetch(`${s1.baseUrl}/api/orchestrate/state`, { headers: makeHeaders(projA.id) })).json()) as any;
+      const aegMatches = stateA.tasks.filter((t: any) => t.key === 'AEG-101');
+      assert.strictEqual(aegMatches.length, 1);
+      assert.strictEqual(aegMatches[0].status, 'todo');
+      assert.strictEqual(aegMatches[0].authoritativeStatus, 'blocked');
+      assert.ok(aegMatches[0].blockedReason);
+
+      // 4. Overlapping AEG-101 in projB remains unaffected (still in_progress)
+      const stateB = (await (await fetch(`${s1.baseUrl}/api/orchestrate/state`, { headers: makeHeaders(projB.id) })).json()) as any;
+      const bMatches = stateB.tasks.filter((t: any) => t.key === 'AEG-101');
+      assert.strictEqual(bMatches.length, 1);
+      assert.strictEqual(bMatches[0].status, 'in_progress');
+      assert.strictEqual(bMatches[0].authoritativeStatus, 'in_progress');
+
+      // 5. Run history recorded for failed run
+      const runsRes = await fetch(`${s1.baseUrl}/api/tasks/task-aeg101-a/runs`, { headers: makeHeaders(projA.id) });
+      assert.strictEqual(runsRes.status, 200);
+      const runsJson = (await runsRes.json()) as any;
+      assert.ok(runsJson.runs.some((r: any) => r.id === stepJson.runId && r.status === 'failed'));
+
+      // 6. Restart server -> blocked projection & SQLite record survive
+      await killProc(serverProc);
+      serverProc = null;
+      const port2 = await getFreePort();
+      const s2 = await spawnApp(port2);
+      serverProc = s2.proc;
+
+      const stateAAfterRestart = (await (await fetch(`${s2.baseUrl}/api/orchestrate/state`, { headers: makeHeaders(projA.id) })).json()) as any;
+      const restartedMatches = stateAAfterRestart.tasks.filter((t: any) => t.key === 'AEG-101');
+      assert.strictEqual(restartedMatches.length, 1);
+      assert.strictEqual(restartedMatches[0].status, 'todo');
+      assert.strictEqual(restartedMatches[0].authoritativeStatus, 'blocked');
+      assert.ok(restartedMatches[0].blockedReason);
+    } finally {
+      await killProc(serverProc);
+      await new Promise<void>((r) => mockGemini.close(() => r()));
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  }, 60000);
 });
