@@ -56,6 +56,7 @@ describe('OpenAI credential onboarding browser E2E', () => {
   let mockMode: 'normal' | 'hang' | 'delay-gpt-4o-mini' = 'normal';
   let releaseDelayedModel!: () => void;
   let mockAbortedCount = 0;
+  let mockHangingReceivedCount = 0;
   const openMockResponses = new Set<http.ServerResponse>();
   let serverProc: ChildProcess | null = null;
   let serverPort: number;
@@ -139,6 +140,7 @@ describe('OpenAI credential onboarding browser E2E', () => {
       req.on('data', (chunk) => (body += chunk.toString()));
       req.on('end', () => {
         if (mockMode === 'hang') {
+          mockHangingReceivedCount += 1;
           openMockResponses.add(res);
           res.on('close', () => {
             openMockResponses.delete(res);
@@ -327,10 +329,15 @@ describe('OpenAI credential onboarding browser E2E', () => {
 
       // Changing selected model during a pending test never shows the newly selected model as verified
       mockMode = 'delay-gpt-4o-mini';
+      releaseDelayedModel = undefined as any;
       await page.getByTestId('openai-test-model-select').selectOption('gpt-4o-mini');
       await page.getByTestId('test-openai-key-btn').click();
       await pwExpect(page.getByTestId('openai-test-pending')).toBeVisible();
       await page.getByTestId('openai-test-model-select').selectOption('gpt-4o');
+      for (let i = 0; i < 40 && typeof releaseDelayedModel !== 'function'; i++) {
+        await page.waitForTimeout(50);
+      }
+      assert.strictEqual(typeof releaseDelayedModel, 'function');
       releaseDelayedModel();
       await pwExpect(page.getByTestId('openai-test-pending')).toBeHidden({ timeout: 10000 });
       await pwExpect(page.getByTestId('openai-verified-badge')).toHaveText('Unverified');
@@ -339,6 +346,7 @@ describe('OpenAI credential onboarding browser E2E', () => {
 
       // Cross-model API ordering race: Model A (gpt-4o-mini) starts first, Model B (gpt-4.1-mini) finishes first, then A completes -> B retained across restart
       mockMode = 'delay-gpt-4o-mini';
+      releaseDelayedModel = undefined as any;
       const reqAPromise = fetch(`${serverUrl}/api/credentials/openai/test`, {
         method: 'POST',
         headers: {
@@ -347,7 +355,10 @@ describe('OpenAI credential onboarding browser E2E', () => {
         },
         body: JSON.stringify({ model: 'gpt-4o-mini' }),
       });
-      await new Promise((r) => setTimeout(r, 80));
+      for (let i = 0; i < 40 && typeof releaseDelayedModel !== 'function'; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.strictEqual(typeof releaseDelayedModel, 'function');
       const reqBRes = await fetch(`${serverUrl}/api/credentials/openai/test`, {
         method: 'POST',
         headers: {
@@ -384,13 +395,20 @@ describe('OpenAI credential onboarding browser E2E', () => {
 
       // Cancel during hanging provider preserves Verified
       mockMode = 'hang';
+      const receivedBeforeCancel = mockHangingReceivedCount;
       const abortedBeforeCancel = mockAbortedCount;
       await page.getByTestId('test-openai-key-btn').click();
       await pwExpect(page.getByTestId('openai-test-pending')).toBeVisible();
+      for (let i = 0; i < 40 && mockHangingReceivedCount === receivedBeforeCancel; i++) {
+        await page.waitForTimeout(50);
+      }
+      assert.ok(mockHangingReceivedCount > receivedBeforeCancel, 'Expected mock OpenAI server to receive hanging request');
       await page.getByTestId('cancel-openai-test-btn').click();
       await pwExpect(page.getByTestId('openai-inconclusive-banner')).toContainText('cancelled');
       await pwExpect(page.getByTestId('openai-verified-badge')).toContainText('Verified (gpt-4.1-mini)');
-      await page.waitForTimeout(100);
+      for (let i = 0; i < 40 && mockAbortedCount === abortedBeforeCancel; i++) {
+        await page.waitForTimeout(50);
+      }
       assert.ok(mockAbortedCount > abortedBeforeCancel);
 
       // Clean up open mock responses and delete saved key -> Not Configured
