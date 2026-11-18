@@ -271,7 +271,7 @@ ${networkRule}
 
     if (customEnv) {
       // Never allow host secrets even if accidentally passed in customEnv
-      const forbiddenPatterns = [/key/i, /token/i, /secret/i, /passwd/i, /credential/i, /gemini/i, /jira/i, /slack/i, /gh_/i, /github_/i];
+      const forbiddenPatterns = [/key/i, /token/i, /secret/i, /passwd/i, /credential/i, /gemini/i, /openai/i, /jira/i, /slack/i, /gh_/i, /github_/i];
       for (const [k, v] of Object.entries(customEnv)) {
         if (!forbiddenPatterns.some((pattern) => pattern.test(k))) {
           cleanEnv[k] = v;
