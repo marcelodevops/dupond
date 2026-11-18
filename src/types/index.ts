@@ -48,6 +48,8 @@ export interface Task {
   workerConfig?: { provider: string; model: string };
   maxAttempts?: number;
   timeoutSeconds?: number;
+  authoritativeStatus?: string;
+  blockedReason?: string;
   identityConflict?: {
     taskId: string;
     taskKey: string;

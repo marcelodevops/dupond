@@ -174,8 +174,9 @@ export class CoordinatorEngine {
   public projectAuthoritativeStatuses(projectId = 'default'): number {
     const previousState = this.state;
     const previousProjectId = this.activeProjectId;
+    const targetState = this.getState(projectId);
     this.activeProjectId = projectId;
-    this.state = this.getState(projectId);
+    this.state = targetState;
     try {
       return this.projectAuthoritativeStatusesInternal();
     } finally {
@@ -229,18 +230,39 @@ export class CoordinatorEngine {
       const dbTask = taskStore.getTask(task.id, this.activeProjectId) || taskStore.getTask(task.key, this.activeProjectId);
       if (!dbTask) return task;
       const projected = this.toUiStatus(dbTask.status);
+      const authoritativeStatus = dbTask.status;
+      const blockedReason = dbTask.status === 'blocked' ? (dbTask.blockedReason || undefined) : undefined;
       const specMirrored = this.mirrorAuthoritativeSpec(task, dbTask);
-      if (projected === task.status) {
+      const statusMatches =
+        projected === task.status &&
+        task.authoritativeStatus === authoritativeStatus &&
+        task.blockedReason === blockedReason;
+      if (statusMatches) {
         if (specMirrored !== task) changed += 1;
         return specMirrored;
       }
       changed += 1;
-      return {
+      const statusChanged = projected !== task.status;
+      const updatedTask: Task = {
         ...specMirrored,
         status: projected,
-        lastAgentComment: `Authoritative lifecycle: status projected from persisted record "${dbTask.status}".`,
-        lastUpdated: 'Just now',
+        authoritativeStatus,
+        ...(statusChanged
+          ? {
+              lastAgentComment:
+                authoritativeStatus === 'blocked' && blockedReason
+                  ? `Blocked: ${blockedReason}`
+                  : `Authoritative lifecycle: status projected from persisted record "${dbTask.status}".`,
+              lastUpdated: 'Just now',
+            }
+          : {}),
       };
+      if (blockedReason) {
+        updatedTask.blockedReason = blockedReason;
+      } else {
+        delete updatedTask.blockedReason;
+      }
+      return updatedTask;
     });
     if (changed > 0) {
       this.state.tasks = nextTasks;
@@ -445,8 +467,9 @@ export class CoordinatorEngine {
     const projectId = context?.projectId || 'default';
     const previousState = this.state;
     const previousProjectId = this.activeProjectId;
+    const targetState = this.getState(projectId);
     this.activeProjectId = projectId;
-    this.state = this.getState(projectId);
+    this.state = targetState;
     try {
       return this.updateStateInternal(partial, context);
     } finally {
@@ -733,8 +756,10 @@ export class CoordinatorEngine {
       const projected: Task = {
         ...task,
         status: targetStatus,
+        authoritativeStatus: targetStatus,
         lastUpdated: 'Just now',
       };
+      delete projected.blockedReason;
       saveProjectTasks(projected);
       return { success: true, task: projected };
     }
