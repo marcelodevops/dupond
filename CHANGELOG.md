@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.14.0](https://github.com/marcelodevops/dupond/compare/v0.13.0...v0.14.0) (2026-11-18)
+
+
+### Features
+
+* **identity:** enforce project-scoped task identity deduplication and conflict recovery ([ae89e88](https://github.com/marcelodevops/dupond/commit/ae89e88b9307790d540b40db7403483b81be2f46))
+* **ui:** surface identity conflicts and explicit registration consequence ([88c3db2](https://github.com/marcelodevops/dupond/commit/88c3db2566849cac5efa2aeabc0999c2754e6f09))
+
+
+### Bug Fixes
+
+* enforce project-scoped task identity, explicit registration copy, and refusal audits ([a2679de](https://github.com/marcelodevops/dupond/commit/a2679dee487accd3a9c493247b8311873442a8ef))
+* **identity:** durably preserve all conflict variants before resolution ([4154241](https://github.com/marcelodevops/dupond/commit/415424164354161d4141492e4e3c41a471cc1bc7))
+
 ## [0.13.0](https://github.com/marcelodevops/dupond/compare/v0.12.0...v0.13.0) (2026-11-18)
 
 
