@@ -348,6 +348,15 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             <span className="font-mono text-[11px] font-bold text-indigo-400">
                               {task.key}
                             </span>
+                            {task.identityConflict && (
+                              <span
+                                data-testid={`identity-conflict-badge-${task.key}`}
+                                title="Conflicting duplicate task entries detected"
+                                className="flex items-center text-[10px] font-bold text-amber-300 bg-amber-950/70 px-1.5 py-0.5 rounded border border-amber-700/60"
+                              >
+                                IDENTITY CONFLICT
+                              </span>
+                            )}
                             {task.jiraSynced && (
                               <span
                                 title="Synced with Jira"

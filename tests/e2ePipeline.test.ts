@@ -4,17 +4,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'node:child_process';
-import { TaskStore } from '../src/server/db/database.ts';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
-import { SandboxExecutor } from '../src/server/sandbox/sandboxExecutor.ts';
-import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
-import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.ts';
-import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.ts';
-import { computeEvidenceBinding } from '../src/server/verification/evidenceBinding.ts';
-import { CodingWorkerAdapter, WorkerExecutionContext, WorkerExecutionResult } from '../src/server/worker/types.ts';
-import { coordinator, isMaskedSecret } from '../src/server/coordinator.ts';
-import { validateAuthToken, getExpectedToken } from '../src/server/auth.ts';
-import { logger } from '../src/server/utils/logger.ts';
+import type { CodingWorkerAdapter, WorkerExecutionContext, WorkerExecutionResult } from '../src/server/worker/types.ts';
+
+const isolatedE2eDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-e2e-pipe-'));
+process.env.DUPOND_STATE_FILE = path.join(isolatedE2eDir, 'dupond_state.json');
+process.env.DUPOND_DB_PATH = path.join(isolatedE2eDir, 'dupond.db');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedE2eDir, '.dupond_conn_key');
 
 console.log('===============================================================');
 console.log('=== RUNNING FULL DUPOND TASK-TO-PR ACCEPTANCE SCENARIO SUITE ===');
@@ -27,6 +22,16 @@ function passScenario(num: number, desc: string) {
 }
 
 async function runAcceptanceSuite() {
+  const { TaskStore } = await import('../src/server/db/database.ts');
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.ts');
+  const { SandboxExecutor } = await import('../src/server/sandbox/sandboxExecutor.ts');
+  const { AuthoritativeVerifier } = await import('../src/server/verification/authoritativeVerifier.ts');
+  const { RepairCoordinator } = await import('../src/server/coordinator/repairCoordinator.ts');
+  const { GitHubDeliveryService } = await import('../src/server/delivery/githubDelivery.ts');
+  const { computeEvidenceBinding } = await import('../src/server/verification/evidenceBinding.ts');
+  const { validateAuthToken, getExpectedToken } = await import('../src/server/auth.ts');
+  const { logger } = await import('../src/server/utils/logger.ts');
+  const { coordinator, isMaskedSecret } = await import('../src/server/coordinator.ts');
   const store = new TaskStore(':memory:');
   const workspaceManager = new WorkspaceManager(process.cwd());
   const sandbox = new SandboxExecutor();
@@ -631,6 +636,9 @@ async function runAcceptanceSuite() {
   } finally {
     if (fs.existsSync(disposableRemote)) {
       fs.rmSync(disposableRemote, { recursive: true, force: true });
+    }
+    if (fs.existsSync(isolatedE2eDir)) {
+      fs.rmSync(isolatedE2eDir, { recursive: true, force: true });
     }
   }
 }

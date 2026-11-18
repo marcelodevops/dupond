@@ -422,15 +422,42 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
         tags: [],
         lastUpdated: 'Just now',
       };
+      const conflictTaskV1 = {
+        ...legacyBoardTask,
+        id: 'task-conflict-e2e',
+        key: 'CON-404',
+        title: 'Conflict Variant One',
+        status: 'review',
+      };
+      const conflictTaskV2 = {
+        ...legacyBoardTask,
+        id: 'task-conflict-e2e',
+        key: 'CON-404',
+        title: 'Conflict Variant Two',
+        status: 'in_progress',
+      };
       const putBoardRes = await page.request.post(`${serverUrl}/api/orchestrate/state`, {
         headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': secondaryProjectId },
-        data: { ...secState, tasks: [...(secState.tasks || []), legacyBoardTask] },
+        data: {
+          ...secState,
+          tasks: [...(secState.tasks || []), legacyBoardTask, legacyBoardTask, conflictTaskV1, conflictTaskV2],
+        },
       });
       assert.strictEqual(putBoardRes.status(), 200);
 
       await page.reload({ waitUntil: 'networkidle' });
       await pwExpect(switcherBtn).toContainText('Secondary');
-      await pwExpect(page.getByText('LEG-404').first()).toBeVisible();
+      await pwExpect(page.getByText('LEG-404')).toHaveCount(1);
+      await pwExpect(page.getByTestId('identity-conflict-badge-CON-404')).toBeVisible();
+
+      // Resolve conflicting duplicate via modal
+      await page.getByText('CON-404').first().click();
+      await pwExpect(page.getByTestId('task-identity-conflict-banner')).toBeVisible();
+      await pwExpect(page.getByTestId('resolve-conflict-variant-0')).toBeVisible();
+      await page.getByTestId('resolve-conflict-variant-0').click();
+      await pwExpect(page.getByTestId('task-identity-conflict-banner')).toBeHidden();
+      await page.keyboard.press('Escape');
+      await pwExpect(page.getByTestId('identity-conflict-badge-CON-404')).toBeHidden();
 
       // Click Kanban forward arrow on LEG-404 (attempting review -> done)
       const legCard = page.locator('div.group', { hasText: 'LEG-404' }).first();
@@ -450,7 +477,10 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       // Inspect & Resolve -> Register before repository is configured must fail with REPOSITORY_CONFIGURATION_REQUIRED and expose Project Settings action
       await page.getByTestId('inspect-blocked-task-btn').click();
       await pwExpect(page.getByTestId('task-transition-refusal')).toContainText('unregistered-task');
-      await pwExpect(page.getByTestId('register-authoritative-task-btn')).toBeVisible();
+      await pwExpect(page.getByTestId('task-transition-refusal')).toContainText(
+        'This task has no authoritative execution record. Registering will move it to To Do. Fresh execution and verification are required before Review.',
+      );
+      await pwExpect(page.getByTestId('register-authoritative-task-btn')).toHaveText('Register and Return to To Do');
       await page.getByTestId('register-authoritative-task-btn').click();
 
       const refusalBanner = page.getByTestId('task-transition-refusal');
