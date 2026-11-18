@@ -286,6 +286,26 @@ function AppWorkspace() {
     setIsProcessingStep(true);
     setActiveProcessingTaskId(targetTask.id);
 
+    const reconcileProjectStateAfterFailure = async () => {
+      if (capturedProjectId !== activeProjectIdRef.current) return;
+      try {
+        const stateRes = await apiFetch('/api/orchestrate/state', {
+          headers: capturedProjectId ? { [PROJECT_HEADER]: capturedProjectId } : {},
+        });
+        if (!stateRes.ok || capturedProjectId !== activeProjectIdRef.current) return;
+        const stateData = await stateRes.json();
+        if (Array.isArray(stateData.tasks)) {
+          setTasks(stateData.tasks);
+          const refreshedTarget = stateData.tasks.find((t: Task) => t.id === targetTask.id);
+          if (refreshedTarget && selectedTaskForModal && selectedTaskForModal.id === targetTask.id) {
+            setSelectedTaskForModal(refreshedTarget);
+          }
+        }
+      } catch {
+        // Best-effort reconciliation; existing tasks remain visible if state refresh also fails.
+      }
+    };
+
     try {
       const response = await apiFetch('/api/orchestrate/agent-step', {
         method: 'POST',
@@ -319,6 +339,7 @@ function AppWorkspace() {
           }));
           setRunRefreshKey((k) => k + 1);
           showToast('Execution Blocked', blockedMsg, 'alert');
+          await reconcileProjectStateAfterFailure();
         }
         return;
       }
@@ -435,7 +456,15 @@ function AppWorkspace() {
       }
     } catch (err: any) {
       console.error('Agent step execution error:', err);
-      showToast('Orchestration Warning', 'Autonomous step fallback triggered.', 'alert');
+      if (capturedProjectId === activeProjectIdRef.current) {
+        setRunRefreshKey((k) => k + 1);
+        showToast(
+          'Execution Interrupted',
+          err?.message || `Agent step for ${targetTask.key} was interrupted. Reconciling board state.`,
+          'alert'
+        );
+        await reconcileProjectStateAfterFailure();
+      }
     } finally {
       setIsProcessingStep(false);
       setActiveProcessingTaskId(undefined);

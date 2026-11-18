@@ -54,6 +54,8 @@ const COLUMNS: { id: TaskStatus; label: string; color: string; badgeBg: string }
   { id: 'done', label: 'Done', color: 'border-emerald-800', badgeBg: 'bg-emerald-900/50 text-emerald-300 border border-emerald-700/50' },
 ];
 
+const KNOWN_COLUMN_STATUSES = new Set<string>(COLUMNS.map((c) => c.id));
+
 export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   tasks,
   agents,
@@ -282,7 +284,11 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3.5 items-start">
           {COLUMNS.map((col) => {
-          const colTasks = filteredTasks.filter((t) => t.status === col.id);
+          const colTasks = filteredTasks.filter((t) =>
+            col.id === 'todo'
+              ? t.status === 'todo' || !KNOWN_COLUMN_STATUSES.has(t.status)
+              : t.status === col.id
+          );
           const totalColHours = colTasks.reduce((sum, t) => sum + (t.estimatedHours || 0), 0);
 
           return (
@@ -318,14 +324,20 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                     const { satisfied, blockingKeys } = checkDependenciesSatisfied(task);
                     const completedSubtasks = task.subtasks.filter((s) => s.completed).length;
                     const isProcessing = activeProcessingTaskId === task.id;
+                    const isBlocked = task.authoritativeStatus === 'blocked' || (task.status as string) === 'blocked';
+                    const isUnexpectedStatus =
+                      !KNOWN_COLUMN_STATUSES.has(task.status) && (task.status as string) !== 'blocked';
 
                     return (
                       <div
                         key={task.id}
+                        data-testid={`kanban-card-${task.key}`}
                         onClick={() => onTaskClick(task)}
                         className={`group relative bg-slate-950/90 hover:bg-slate-900 border rounded-xl p-3 cursor-pointer transition-all duration-200 shadow-sm hover:shadow-md hover:border-indigo-500/50 ${
                           isProcessing
                             ? 'border-indigo-500 ring-2 ring-indigo-500/30 bg-indigo-950/20'
+                            : isBlocked
+                            ? 'border-rose-700/70'
                             : !satisfied
                             ? 'border-amber-900/40'
                             : 'border-slate-800/90'
@@ -344,10 +356,28 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
                         {/* Top Row: Key, Priority, Jira & Epic */}
                         <div className="flex items-center justify-between gap-1 mb-1.5">
-                          <div className="flex items-center space-x-1.5">
+                          <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
                             <span className="font-mono text-[11px] font-bold text-indigo-400">
                               {task.key}
                             </span>
+                            {isBlocked && (
+                              <span
+                                data-testid={`task-blocked-badge-${task.key}`}
+                                title={task.blockedReason || 'Execution blocked — inspect Runs & Evidence'}
+                                className="flex items-center text-[10px] font-bold text-rose-200 bg-rose-950/80 px-1.5 py-0.5 rounded border border-rose-700/70"
+                              >
+                                BLOCKED
+                              </span>
+                            )}
+                            {isUnexpectedStatus && (
+                              <span
+                                data-testid={`task-unexpected-status-badge-${task.key}`}
+                                title={`Unexpected persisted status "${task.status}" shown in To Do fallback`}
+                                className="flex items-center text-[10px] font-bold text-amber-200 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-700/70"
+                              >
+                                STATUS: {String(task.status).toUpperCase()}
+                              </span>
+                            )}
                             {task.identityConflict && (
                               <span
                                 data-testid={`identity-conflict-badge-${task.key}`}
@@ -379,6 +409,24 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                         <p className="text-[11px] text-slate-400 line-clamp-2 mb-2 leading-relaxed">
                           {task.description}
                         </p>
+
+                        {/* Execution Blocked Reason */}
+                        {isBlocked && (
+                          <div
+                            data-testid={`task-blocked-reason-${task.key}`}
+                            className="mb-2 text-[10px] text-rose-200 bg-rose-950/50 border border-rose-800/60 px-2 py-1 rounded space-y-0.5"
+                          >
+                            <div className="flex items-center space-x-1 font-semibold text-rose-300">
+                              <AlertCircle className="w-3 h-3 text-rose-400 shrink-0" />
+                              <span>Execution Blocked — Open Runs &amp; Evidence</span>
+                            </div>
+                            {task.blockedReason && (
+                              <p className="text-rose-200/90 line-clamp-2 leading-snug">
+                                {task.blockedReason}
+                              </p>
+                            )}
+                          </div>
+                        )}
 
                         {/* Epic Label */}
                         {epic && (
