@@ -210,6 +210,123 @@ export class SandboxExecutor {
     return `(${action} ${op} (literal "${escaped}"))\n(${action} ${op} (subpath "${escaped}"))`;
   }
 
+  private escapePosixRegex(literal: string): string {
+    return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private globToPosixRegexBody(glob: string): string {
+    let out = '';
+    for (let i = 0; i < glob.length; i++) {
+      const ch = glob[i];
+      if (ch === '*') {
+        if (glob[i + 1] === '*') {
+          if (glob[i + 2] === '/') {
+            out += '(.*/)?';
+            i += 2;
+          } else {
+            out += '.*';
+            i += 1;
+          }
+        } else {
+          out += '[^/]*';
+        }
+      } else if (ch === '?') {
+        out += '[^/]';
+      } else {
+        out += this.escapePosixRegex(ch);
+      }
+    }
+    return out;
+  }
+
+  private resolveProtectedPathRules(
+    realWorktree: string,
+    patterns: string[],
+    platform: 'darwin' | 'container'
+  ): { seatbeltRules: string[]; containerReadOnlyPaths: string[] } {
+    const seatbeltRules: string[] = [];
+    const containerReadOnlyPaths: string[] = [];
+
+    for (const raw of patterns) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+
+      if (/[{}\[\]]|[!@+*?]\(/.test(trimmed)) {
+        throw new DomainError(
+          `Unsupported protected-path pattern "${raw}": brace expansions, character classes, and extglobs cannot be enforced by the OS sandbox.`
+        );
+      }
+
+      const normalized = trimmed.replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
+      if (!normalized || normalized.split('/').includes('..')) {
+        throw new DomainError(
+          `Unsafe protected-path pattern "${raw}": empty or path-traversal segments are not permitted.`
+        );
+      }
+
+      const isSubtreeStarStar = normalized.endsWith('/**');
+      const isSubtreeStar = normalized.endsWith('/*');
+      const subtreeBase = isSubtreeStarStar
+        ? normalized.slice(0, -3)
+        : isSubtreeStar
+          ? normalized.slice(0, -2)
+          : null;
+
+      if (subtreeBase !== null && !/[*?]/.test(subtreeBase)) {
+        const absDir = path.resolve(realWorktree, subtreeBase);
+        if (absDir !== realWorktree && !absDir.startsWith(`${realWorktree}${path.sep}`)) {
+          throw new DomainError(`Unsafe protected-path pattern "${raw}": resolves outside worktree.`);
+        }
+        const escaped = absDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        // Protect the directory itself as well as its entire subtree
+        seatbeltRules.push(`(deny file-write* (literal "${escaped}"))`);
+        seatbeltRules.push(`(deny file-write* (subpath "${escaped}"))`);
+
+        if (platform === 'container') {
+          if (!fs.existsSync(absDir)) {
+            throw new DomainError(
+              `Sandbox cannot enforce protected subtree pattern "${raw}" on Linux container runtime because "${subtreeBase}" does not exist to bind-mount read-only.`
+            );
+          }
+          containerReadOnlyPaths.push(fs.realpathSync(absDir));
+        }
+        continue;
+      }
+
+      if (!/[*?]/.test(normalized)) {
+        const absPath = path.resolve(realWorktree, normalized);
+        if (absPath !== realWorktree && !absPath.startsWith(`${realWorktree}${path.sep}`)) {
+          throw new DomainError(`Unsafe protected-path pattern "${raw}": resolves outside worktree.`);
+        }
+        seatbeltRules.push(this.formatSeatbeltPathRule('deny', 'file-write*', absPath));
+        if (platform === 'container') {
+          if (!fs.existsSync(absPath)) {
+            throw new DomainError(
+              `Sandbox cannot enforce protected path "${raw}" on Linux container runtime because "${normalized}" does not exist to bind-mount read-only.`
+            );
+          }
+          containerReadOnlyPaths.push(fs.realpathSync(absPath));
+        }
+        continue;
+      }
+
+      // Filename or path glob (e.g. .env*, *.key, config/*.secret)
+      if (platform === 'container') {
+        throw new DomainError(
+          `Sandbox cannot enforce protected-path glob "${raw}" on Linux container runtime: bind mounts cannot prevent creating new matching files inside a writable worktree.`
+        );
+      }
+      const worktreePrefix = this.escapePosixRegex(realWorktree);
+      const regexBody = normalized.includes('/')
+        ? this.globToPosixRegexBody(normalized)
+        : `(.*/)?${this.globToPosixRegexBody(normalized)}`;
+      const seatbeltRegex = `^${worktreePrefix}/${regexBody}$`.replace(/"/g, '\\"');
+      seatbeltRules.push(`(deny file-write* (regex #"${seatbeltRegex}"))`);
+    }
+
+    return { seatbeltRules, containerReadOnlyPaths };
+  }
+
   private generateSeatbeltProfile(
     realWorktree: string,
     realTmp: string,
@@ -243,19 +360,17 @@ export class SandboxExecutor {
       })
       .join('');
 
-    const denyWriteList: string[] = [];
+    const denyWriteRuleLines: string[] = [];
     if (extra?.gitReadOnly) {
-      denyWriteList.push(path.join(realWorktree, '.git'));
-      if (gitDir) denyWriteList.push(gitDir);
-      if (gitCommonDir) denyWriteList.push(gitCommonDir);
+      denyWriteRuleLines.push(this.formatSeatbeltPathRule('deny', 'file-write*', path.join(realWorktree, '.git')));
+      if (gitDir) denyWriteRuleLines.push(this.formatSeatbeltPathRule('deny', 'file-write*', gitDir));
+      if (gitCommonDir) denyWriteRuleLines.push(this.formatSeatbeltPathRule('deny', 'file-write*', gitCommonDir));
     }
-    for (const p of extra?.denyWritePaths ?? []) {
-      const abs = path.isAbsolute(p) ? p : path.resolve(realWorktree, p);
-      denyWriteList.push(abs);
+    if (extra?.denyWritePaths?.length) {
+      const translated = this.resolveProtectedPathRules(realWorktree, extra.denyWritePaths, 'darwin');
+      denyWriteRuleLines.push(...translated.seatbeltRules);
     }
-    const denyWriteRules = denyWriteList
-      .map((p) => `\n${this.formatSeatbeltPathRule('deny', 'file-write*', p)}`)
-      .join('');
+    const denyWriteRules = denyWriteRuleLines.map((r) => `\n${r}`).join('');
 
     return `(version 1)
 (allow default)
@@ -465,11 +580,10 @@ ${networkRule}
           containerMounts.push('-v', `${resolved}:${resolved}:ro`);
         }
       }
-      for (const p of options.denyWritePaths ?? []) {
-        const abs = path.isAbsolute(p) ? p : path.resolve(realWorktree, p);
-        if (fs.existsSync(abs)) {
-          const resolved = fs.realpathSync(abs);
-          containerMounts.push('-v', `${resolved}:${resolved}:ro`);
+      if (options.denyWritePaths?.length) {
+        const translated = this.resolveProtectedPathRules(realWorktree, options.denyWritePaths, 'container');
+        for (const roPath of translated.containerReadOnlyPaths) {
+          containerMounts.push('-v', `${roPath}:${roPath}:ro`);
         }
       }
 

@@ -181,14 +181,12 @@ function collectExtraReadPaths(binPath: string): string[] {
   return Array.from(candidates);
 }
 
-function collectDenyWritePaths(realWorktree: string, protectedPaths?: string[]): string[] {
+function collectDenyWritePaths(_realWorktree: string, protectedPaths?: string[]): string[] {
   const out: string[] = [];
   for (const p of protectedPaths || []) {
-    const clean = p.replace(/^\/+/, '').replace(/\/+$/, '');
-    if (!clean) continue;
-    const abs = path.resolve(realWorktree, clean);
-    if (abs === realWorktree || abs.startsWith(`${realWorktree}${path.sep}`)) {
-      out.push(abs);
+    const clean = p.trim().replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
+    if (clean) {
+      out.push(clean);
     }
   }
   return out;
