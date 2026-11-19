@@ -228,10 +228,27 @@ async function startServer(
   return managed;
 }
 
-async function stopChildServers(): Promise<void> {
-  for (const managed of children.splice(0)) {
-    const { child, exitInfo, exitPromise } = managed;
-    if (exitInfo || child.exitCode !== null || child.signalCode !== null) {
+function isChildTerminated(managed: ManagedChildServer): boolean {
+  return (
+    managed.exitInfo !== null ||
+    managed.child.exitCode !== null ||
+    managed.child.signalCode !== null
+  );
+}
+
+async function stopChildServers(options?: {
+  sigtermGraceMs?: number;
+  sigkillGraceMs?: number;
+}): Promise<void> {
+  const sigtermGraceMs = options?.sigtermGraceMs ?? SIGTERM_GRACE_MS;
+  const sigkillGraceMs = options?.sigkillGraceMs ?? SIGKILL_GRACE_MS;
+  const failures: string[] = [];
+
+  for (const managed of [...children]) {
+    const { child, exitPromise } = managed;
+    if (isChildTerminated(managed)) {
+      const idx = children.indexOf(managed);
+      if (idx !== -1) children.splice(idx, 1);
       continue;
     }
 
@@ -241,26 +258,47 @@ async function stopChildServers(): Promise<void> {
       // Child may have exited concurrently
     }
 
-    const exitedAfterTerm = await Promise.race([
+    await Promise.race([
       exitPromise.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), SIGTERM_GRACE_MS)),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), sigtermGraceMs)),
     ]);
 
-    if (!exitedAfterTerm && child.exitCode === null && child.signalCode === null) {
+    if (!isChildTerminated(managed)) {
       try {
         child.kill('SIGKILL');
       } catch {
         // Ignore if already exited
       }
       await Promise.race([
-        exitPromise.then(() => undefined),
-        new Promise<void>((resolve) => setTimeout(resolve, SIGKILL_GRACE_MS)),
+        exitPromise.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), sigkillGraceMs)),
       ]);
     }
+
+    if (isChildTerminated(managed)) {
+      const idx = children.indexOf(managed);
+      if (idx !== -1) children.splice(idx, 1);
+    } else {
+      // Retain tracking info in `children` when termination cannot be confirmed
+      const stdout = sanitizeDiagnosticOutput(managed.stdout.trim()) || '(empty)';
+      const stderr = sanitizeDiagnosticOutput(managed.stderr.trim()) || '(empty)';
+      failures.push(
+        `Failed to confirm termination of child pid=${child.pid ?? 'unknown'} after SIGTERM (${sigtermGraceMs}ms) and SIGKILL (${sigkillGraceMs}ms).\n--- child stdout (tail) ---\n${stdout}\n--- child stderr (tail) ---\n${stderr}`
+      );
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(failures.join('\n\n'));
   }
 }
 
 function cleanupTempDirs(): void {
+  if (children.length > 0) {
+    throw new Error(
+      `Refusing to delete ${tempDirs.length} temporary directory(s): ${children.length} child server(s) still have unconfirmed termination.`
+    );
+  }
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -923,5 +961,53 @@ describe('Dupond correctness repairs regression suite', () => {
     // Temp dir cleanup succeeds after child termination
     cleanupTempDirs();
     assert.strictEqual(fs.existsSync(dir), false);
+  });
+
+  it('Server harness: refuses temp cleanup, retains tracking, and fails with sanitized diagnostics on unconfirmed termination', async () => {
+    const dir = makeTempDir('dupond-unconfirmed-exit-');
+    const keepFile = path.join(dir, 'keep.txt');
+    fs.writeFileSync(keepFile, 'preserve-me');
+
+    const stubChild = {
+      pid: 999991,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    } as unknown as ChildProcess;
+
+    const tracked: ManagedChildServer = {
+      child: stubChild,
+      stdout: 'server log line\n',
+      stderr: 'stuck cleanup TOKEN=top_secret_abc\n',
+      spawnError: null,
+      exitInfo: null,
+      exitPromise: new Promise(() => {}),
+    };
+    children.push(tracked);
+
+    try {
+      await assert.rejects(
+        () => stopChildServers({ sigtermGraceMs: 20, sigkillGraceMs: 20 }),
+        (err: Error) => {
+          assert.ok(err.message.includes('Failed to confirm termination of child pid=999991'), err.message);
+          assert.ok(err.message.includes('TOKEN=[REDACTED]'), err.message);
+          assert.ok(!err.message.includes('top_secret_abc'), 'Secret must be redacted');
+          return true;
+        }
+      );
+
+      // Child tracking information is retained
+      assert.strictEqual(children.length, 1);
+      assert.strictEqual(children[0], tracked);
+
+      // Temporary storage cleanup is refused while child termination is unconfirmed
+      assert.throws(() => cleanupTempDirs(), /Refusing to delete .* unconfirmed termination/i);
+      assert.strictEqual(fs.existsSync(dir), true);
+      assert.strictEqual(fs.readFileSync(keepFile, 'utf-8'), 'preserve-me');
+    } finally {
+      // Release synthetic stub entry so afterEach can clean up the test's temp dir
+      const idx = children.indexOf(tracked);
+      if (idx !== -1) children.splice(idx, 1);
+    }
   });
 });
