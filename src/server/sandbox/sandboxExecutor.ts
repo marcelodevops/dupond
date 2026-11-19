@@ -13,6 +13,18 @@ export interface SandboxOptions {
   allowNetwork?: boolean;
   runId?: string;
   abortSignal?: AbortSignal;
+  /** Invoke command and args directly without wrapping in /bin/sh -c */
+  rawArgv?: boolean;
+  /** Additional host files or directories to allow read-only inside the sandbox */
+  extraReadPaths?: string[];
+  /** Keep .git metadata and gitDir read-only inside the sandbox */
+  gitReadOnly?: boolean;
+  /** Specific paths (e.g. protected files/dirs inside worktree) denied write access */
+  denyWritePaths?: string[];
+  /** Specific env keys from options.env to preserve past secret-name filtering */
+  preserveEnvKeys?: string[];
+  /** Explicit host files to copy into the sandbox's private HOME (e.g. auth.json) */
+  seedHomeFiles?: Array<{ sourcePath: string; targetRelToHome: string }>;
 }
 
 export interface SandboxExecutionResult {
@@ -181,23 +193,69 @@ export class SandboxExecutor {
    * - Restricts write operations strictly to the worktree, git worktree metadata, and private temp dir
    * - Blocks reading any user home files outside the worktree, temp dir, and git repo objects
    */
+  private formatSeatbeltPathRule(action: 'allow' | 'deny', op: string, targetPath: string): string {
+    const escaped = targetPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    let isDir = false;
+    try {
+      isDir = fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (isDir) {
+      return `(${action} ${op} (subpath "${escaped}"))`;
+    }
+    if (fs.existsSync(targetPath)) {
+      return `(${action} ${op} (literal "${escaped}"))`;
+    }
+    return `(${action} ${op} (literal "${escaped}"))\n(${action} ${op} (subpath "${escaped}"))`;
+  }
+
   private generateSeatbeltProfile(
     realWorktree: string,
     realTmp: string,
     allowNetwork: boolean,
     gitDir?: string,
-    gitCommonDir?: string
+    gitCommonDir?: string,
+    extra?: {
+      extraReadPaths?: string[];
+      gitReadOnly?: boolean;
+      denyWritePaths?: string[];
+    }
   ): string {
     const home = os.homedir();
     const networkRule = allowNetwork ? '(allow network*)' : '(deny network*)';
 
     let gitRules = '';
     if (gitDir) {
-      gitRules += `\n(allow file-read-data (subpath "${gitDir}"))\n(allow file-write* (subpath "${gitDir}"))`;
+      gitRules += `\n(allow file-read-data (subpath "${gitDir}"))`;
+      if (!extra?.gitReadOnly) {
+        gitRules += `\n(allow file-write* (subpath "${gitDir}"))`;
+      }
     }
     if (gitCommonDir) {
       gitRules += `\n(allow file-read-data (subpath "${gitCommonDir}"))`;
     }
+
+    const extraReadRules = (extra?.extraReadPaths ?? [])
+      .map((p) => {
+        const resolved = fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p);
+        return `\n${this.formatSeatbeltPathRule('allow', 'file-read-data', resolved)}\n${this.formatSeatbeltPathRule('allow', 'file-read-metadata', resolved)}`;
+      })
+      .join('');
+
+    const denyWriteList: string[] = [];
+    if (extra?.gitReadOnly) {
+      denyWriteList.push(path.join(realWorktree, '.git'));
+      if (gitDir) denyWriteList.push(gitDir);
+      if (gitCommonDir) denyWriteList.push(gitCommonDir);
+    }
+    for (const p of extra?.denyWritePaths ?? []) {
+      const abs = path.isAbsolute(p) ? p : path.resolve(realWorktree, p);
+      denyWriteList.push(abs);
+    }
+    const denyWriteRules = denyWriteList
+      .map((p) => `\n${this.formatSeatbeltPathRule('deny', 'file-write*', p)}`)
+      .join('');
 
     return `(version 1)
 (allow default)
@@ -205,14 +263,14 @@ export class SandboxExecutor {
 (allow file-read-metadata)
 (deny file-read-data (subpath "${home}"))
 (allow file-read-data (subpath "${realWorktree}"))
-(allow file-read-data (subpath "${realTmp}"))${gitRules}
+(allow file-read-data (subpath "${realTmp}"))${gitRules}${extraReadRules}
 (allow file-write* (subpath "${realWorktree}"))
 (allow file-write* (subpath "${realTmp}"))
 (allow file-write* (subpath "/dev/null"))
 (allow file-write* (subpath "/dev/zero"))
 (allow file-write* (subpath "/dev/stdout"))
 (allow file-write* (subpath "/dev/stderr"))
-(allow file-write* (subpath "/dev/tty"))
+(allow file-write* (subpath "/dev/tty"))${denyWriteRules}
 (deny file-read* (regex #"/\\.env.*$"))
 ${networkRule}
 `;
@@ -254,7 +312,11 @@ ${networkRule}
   /**
    * Builds a sanitized environment: no host secrets or ambient credentials.
    */
-  private buildSanitizedEnv(customEnv?: Record<string, string>, sandboxTmp?: string): NodeJS.ProcessEnv {
+  private buildSanitizedEnv(
+    customEnv?: Record<string, string>,
+    sandboxTmp?: string,
+    preserveEnvKeys?: string[]
+  ): NodeJS.ProcessEnv {
     const allowedKeys = ['PATH', 'LANG', 'LC_ALL', 'TERM', 'SHELL', 'SYSTEMROOT'];
     const cleanEnv: NodeJS.ProcessEnv = {};
 
@@ -270,9 +332,21 @@ ${networkRule}
     }
 
     if (customEnv) {
-      // Never allow host secrets even if accidentally passed in customEnv
+      // Never allow host secrets even if accidentally passed in customEnv unless explicitly requested via preserveEnvKeys
       const forbiddenPatterns = [/key/i, /token/i, /secret/i, /passwd/i, /credential/i, /gemini/i, /openai/i, /jira/i, /slack/i, /gh_/i, /github_/i];
+      const preserved = new Set(preserveEnvKeys ?? []);
       for (const [k, v] of Object.entries(customEnv)) {
+        if (k === 'HOME' && sandboxTmp) {
+          const resolvedHome = path.resolve(v);
+          if (resolvedHome === sandboxTmp || resolvedHome.startsWith(`${sandboxTmp}${path.sep}`)) {
+            cleanEnv[k] = resolvedHome;
+          }
+          continue;
+        }
+        if (preserved.has(k) && !k.startsWith('DUPOND_')) {
+          cleanEnv[k] = v;
+          continue;
+        }
         if (!forbiddenPatterns.some((pattern) => pattern.test(k))) {
           cleanEnv[k] = v;
         }
@@ -308,8 +382,24 @@ ${networkRule}
     const sandboxTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dp_sandbox_'));
     const realTmp = fs.realpathSync(sandboxTmp);
 
+    for (const seed of options.seedHomeFiles ?? []) {
+      try {
+        if (fs.existsSync(seed.sourcePath) && fs.statSync(seed.sourcePath).isFile()) {
+          const relClean = seed.targetRelToHome.replace(/^\/+/, '');
+          const destPath = path.resolve(realTmp, relClean);
+          if (destPath.startsWith(`${realTmp}${path.sep}`)) {
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
+            fs.copyFileSync(seed.sourcePath, destPath);
+            fs.chmodSync(destPath, 0o600);
+          }
+        }
+      } catch {
+        // Ignore seed failure; missing optional auth will be reported by CLI
+      }
+    }
+
     const timeoutMs = options.timeoutMs || 45000;
-    const cleanEnv = this.buildSanitizedEnv(options.env, realTmp);
+    const cleanEnv = this.buildSanitizedEnv(options.env, realTmp, options.preserveEnvKeys);
 
     let execCmd: string;
     let execArgs: string[];
@@ -319,9 +409,22 @@ ${networkRule}
     let containerName: string | undefined;
 
     if (this.isDarwin) {
-      const profile = this.generateSeatbeltProfile(realWorktree, realTmp, options.allowNetwork ?? false, gitDir, gitCommonDir);
+      const profile = this.generateSeatbeltProfile(
+        realWorktree,
+        realTmp,
+        options.allowNetwork ?? false,
+        gitDir,
+        gitCommonDir,
+        {
+          extraReadPaths: options.extraReadPaths,
+          gitReadOnly: options.gitReadOnly,
+          denyWritePaths: options.denyWritePaths,
+        }
+      );
       execCmd = 'sandbox-exec';
-      execArgs = ['-p', profile, '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim()];
+      execArgs = options.rawArgv
+        ? ['-p', profile, options.command, ...(options.args ?? [])]
+        : ['-p', profile, '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim()];
     } else if (this.hasPodman || this.hasDocker) {
       // Ensure image is ready before command launch so pull time is decoupled from command timeout
       if (!SandboxExecutor.imagePrepared) {
@@ -345,11 +448,46 @@ ${networkRule}
         '-v', `${realTmp}:${realTmp}:rw`,
       ];
       if (gitDir) {
-        containerMounts.push('-v', `${gitDir}:${gitDir}:rw`);
+        containerMounts.push('-v', `${gitDir}:${gitDir}:${options.gitReadOnly ? 'ro' : 'rw'}`);
       }
       if (gitCommonDir) {
         containerMounts.push('-v', `${gitCommonDir}:${gitCommonDir}:ro`);
       }
+      if (options.gitReadOnly) {
+        const worktreeGit = path.join(realWorktree, '.git');
+        if (fs.existsSync(worktreeGit)) {
+          containerMounts.push('-v', `${worktreeGit}:${worktreeGit}:ro`);
+        }
+      }
+      for (const p of options.extraReadPaths ?? []) {
+        if (fs.existsSync(p)) {
+          const resolved = fs.realpathSync(p);
+          containerMounts.push('-v', `${resolved}:${resolved}:ro`);
+        }
+      }
+      for (const p of options.denyWritePaths ?? []) {
+        const abs = path.isAbsolute(p) ? p : path.resolve(realWorktree, p);
+        if (fs.existsSync(abs)) {
+          const resolved = fs.realpathSync(abs);
+          containerMounts.push('-v', `${resolved}:${resolved}:ro`);
+        }
+      }
+
+      const containerEnvFlags: string[] = [
+        '--env', `HOME=${cleanEnv.HOME ?? '/tmp'}`,
+        '--env', `TMPDIR=${cleanEnv.TMPDIR ?? '/tmp'}`,
+        '--env', 'NODE_ENV=test',
+        '--env', 'CI=true',
+      ];
+      for (const [k, v] of Object.entries(cleanEnv)) {
+        if (v !== undefined && !['PATH', 'LANG', 'LC_ALL', 'TERM', 'SHELL', 'SYSTEMROOT', 'HOME', 'TMPDIR', 'NODE_ENV', 'CI'].includes(k)) {
+          containerEnvFlags.push('--env', `${k}=${v}`);
+        }
+      }
+
+      const containerCmdArgs = options.rawArgv
+        ? [options.command, ...(options.args ?? [])]
+        : ['/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim()];
 
       execArgs = [
         'run', '--rm',
@@ -357,12 +495,9 @@ ${networkRule}
         '--network', options.allowNetwork ? 'bridge' : 'none',
         ...containerMounts,
         '-w', realWorktree,
-        '--env', 'HOME=/tmp',
-        '--env', 'TMPDIR=/tmp',
-        '--env', 'NODE_ENV=test',
-        '--env', 'CI=true',
+        ...containerEnvFlags,
         'node:22-bookworm',
-        '/bin/sh', '-c', `${options.command} ${options.args ? options.args.join(' ') : ''}`.trim(),
+        ...containerCmdArgs,
       ];
     } else {
       throw new DomainError('Restricted execution sandbox unavailable: Host lacks required container runtime (podman or docker) on Linux. Refusing to run untrusted code on host.');
