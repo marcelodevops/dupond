@@ -29,6 +29,7 @@ import {
   GeminiTestResult,
   OpenAICredentialStatus,
   OpenAITestResult,
+  OpenCodeWorkerStatus,
   ProjectSourcePlan,
   ParsePlanRequest,
   AdoptPlanRequest,
@@ -412,6 +413,17 @@ export const projectApi = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(model ? { model } : {}),
       },
+      signal
+    );
+  },
+
+  /**
+   * Probe local OpenCode CLI availability and configured models (read-only metadata, never returns secrets)
+   */
+  async getOpenCodeWorkerStatus(signal?: AbortSignal): Promise<OpenCodeWorkerStatus> {
+    return callProjectApi<OpenCodeWorkerStatus>(
+      '/api/workers/opencode/status',
+      { method: 'GET' },
       signal
     );
   },

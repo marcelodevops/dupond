@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Task, Agent, Epic, TaskStatus, Priority } from '../types';
 import { projectApi } from '../lib/projectApi';
-import type { TaskRunsEvidenceResponse } from '../types/projectContract';
+import type { OpenCodeWorkerStatus, TaskRunsEvidenceResponse } from '../types/projectContract';
 import { withPromotedChecklistItem } from '../services/acceptanceMapping';
 import { AgentAvatar } from './AgentAvatar';
 import {
@@ -115,6 +115,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
   const [newCriterionTitle, setNewCriterionTitle] = useState('');
   const [openAIConfigured, setOpenAIConfigured] = useState<boolean | null>(null);
+  const [openCodeStatus, setOpenCodeStatus] = useState<OpenCodeWorkerStatus | null>(null);
+  const [openCodeCustomModelMode, setOpenCodeCustomModelMode] = useState(false);
 
   useEffect(() => {
     if (task.workerConfig?.provider !== 'openai') {
@@ -129,6 +131,35 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
       })
       .catch(() => {
         if (!cancelled) setOpenAIConfigured(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.workerConfig?.provider, runRefreshKey]);
+
+  useEffect(() => {
+    if (task.workerConfig?.provider !== 'opencode') {
+      setOpenCodeStatus(null);
+      setOpenCodeCustomModelMode(false);
+      return;
+    }
+    let cancelled = false;
+    projectApi
+      .getOpenCodeWorkerStatus()
+      .then((status) => {
+        if (!cancelled) setOpenCodeStatus(status);
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setOpenCodeStatus({
+            available: false,
+            executablePath: null,
+            version: null,
+            models: [],
+            configuredProviders: [],
+            error: err?.message || 'Failed to check OpenCode CLI availability.',
+          });
+        }
       });
     return () => {
       cancelled = true;
@@ -503,10 +534,16 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 Worker Provider
               </label>
               <select
+                data-testid="task-worker-provider-select"
                 value={task.workerConfig?.provider || 'gemini'}
                 onChange={(e) => {
                   const prov = e.target.value;
-                  const defaultMod = prov === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
+                  const defaultMod =
+                    prov === 'openai'
+                      ? 'gpt-4o-mini'
+                      : prov === 'opencode'
+                        ? openCodeStatus?.models?.[0] || 'github-copilot/gpt-5.3-codex'
+                        : 'gemini-3.8-flash';
                   onUpdateTask({
                     ...task,
                     workerConfig: {
@@ -519,6 +556,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
               >
                 <option value="gemini">Google Gemini</option>
                 <option value="openai">OpenAI</option>
+                <option value="opencode">OpenCode CLI</option>
               </select>
             </div>
 
@@ -526,36 +564,106 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
               <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
                 Worker Model
               </label>
-              <select
-                value={task.workerConfig?.model || (task.workerConfig?.provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash')}
-                onChange={(e) => {
-                  onUpdateTask({
-                    ...task,
-                    workerConfig: {
-                      provider: task.workerConfig?.provider || 'gemini',
-                      model: e.target.value,
-                    },
-                  });
-                }}
-                className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              >
-                {(task.workerConfig?.provider || 'gemini') === 'gemini' ? (
-                  <>
-                    <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended)</option>
-                    <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                  </>
-                ) : (
-                  <>
-                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
-                    <option value="gpt-4o">gpt-4o</option>
-                    <option value="o3-mini">o3-mini</option>
-                    <option value="o1">o1</option>
-                    <option value="gpt-4.5-preview">gpt-4.5-preview</option>
-                  </>
-                )}
-              </select>
+              {(task.workerConfig?.provider || 'gemini') === 'opencode' ? (
+                <div className="space-y-1.5">
+                  {(() => {
+                    const discovered = openCodeStatus?.models || [];
+                    const fallbackDefault = discovered[0] || 'github-copilot/gpt-5.3-codex';
+                    const currentModel = task.workerConfig?.model || fallbackDefault;
+                    const presetList = Array.from(new Set([...discovered, fallbackDefault]));
+                    const isCustom = openCodeCustomModelMode || !presetList.includes(currentModel);
+                    return (
+                      <>
+                        <select
+                          data-testid="task-worker-model-select"
+                          value={isCustom ? '__custom__' : currentModel}
+                          onChange={(e) => {
+                            if (e.target.value === '__custom__') {
+                              setOpenCodeCustomModelMode(true);
+                            } else {
+                              setOpenCodeCustomModelMode(false);
+                              onUpdateTask({
+                                ...task,
+                                workerConfig: {
+                                  provider: 'opencode',
+                                  model: e.target.value,
+                                },
+                              });
+                            }
+                          }}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        >
+                          {presetList.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                          <option value="__custom__">Custom provider/model...</option>
+                        </select>
+                        {isCustom && (
+                          <input
+                            type="text"
+                            data-testid="task-opencode-custom-model-input"
+                            value={currentModel}
+                            onChange={(e) =>
+                              onUpdateTask({
+                                ...task,
+                                workerConfig: {
+                                  provider: 'opencode',
+                                  model: e.target.value,
+                                },
+                              })
+                            }
+                            placeholder="provider/model (e.g. github-copilot/gpt-5.3-codex)"
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg text-xs text-white font-mono px-2.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                          />
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <select
+                  data-testid="task-worker-model-select"
+                  value={task.workerConfig?.model || (task.workerConfig?.provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash')}
+                  onChange={(e) => {
+                    onUpdateTask({
+                      ...task,
+                      workerConfig: {
+                        provider: task.workerConfig?.provider || 'gemini',
+                        model: e.target.value,
+                      },
+                    });
+                  }}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  {(task.workerConfig?.provider || 'gemini') === 'gemini' ? (
+                    <>
+                      <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended)</option>
+                      <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
+                      <option value="gpt-4o">gpt-4o</option>
+                      <option value="o3-mini">o3-mini</option>
+                      <option value="o1">o1</option>
+                      <option value="gpt-4.5-preview">gpt-4.5-preview</option>
+                    </>
+                  )}
+                </select>
+              )}
             </div>
           </div>
+
+          {task.workerConfig?.provider === 'opencode' && openCodeStatus && !openCodeStatus.available && (
+            <div
+              data-testid="opencode-prerequisite-warning"
+              className="p-3 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs"
+            >
+              {openCodeStatus.error || 'OpenCode CLI is not ready on this server.'}
+            </div>
+          )}
 
           {task.workerConfig?.provider === 'openai' && openAIConfigured === false && onOpenAppSettings && (
             <div

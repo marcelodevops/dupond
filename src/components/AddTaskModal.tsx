@@ -27,7 +27,7 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
   const [epicId, setEpicId] = useState(epics[0]?.id || 'epic-core');
   const [priority, setPriority] = useState<Priority>('medium');
   const [assignedAgentId, setAssignedAgentId] = useState(agents[0]?.id || 'agent-arch');
-  const [workerProvider, setWorkerProvider] = useState<'gemini' | 'openai'>('gemini');
+  const [workerProvider, setWorkerProvider] = useState<'gemini' | 'openai' | 'opencode'>('gemini');
   const [workerModel, setWorkerModel] = useState('gemini-3.8-flash');
   const [estimatedHours, setEstimatedHours] = useState(8);
   const [tagsInput, setTagsInput] = useState('Core, Architecture');
@@ -199,14 +199,21 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
               <select
                 value={workerProvider}
                 onChange={(e) => {
-                  const prov = e.target.value as 'gemini' | 'openai';
+                  const prov = e.target.value as 'gemini' | 'openai' | 'opencode';
                   setWorkerProvider(prov);
-                  setWorkerModel(prov === 'gemini' ? 'gemini-3.8-flash' : 'gpt-4o-mini');
+                  setWorkerModel(
+                    prov === 'gemini'
+                      ? 'gemini-3.8-flash'
+                      : prov === 'opencode'
+                        ? 'github-copilot/gpt-5.3-codex'
+                        : 'gpt-4o-mini',
+                  );
                 }}
                 className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
               >
                 <option value="gemini">Google Gemini</option>
                 <option value="openai">OpenAI</option>
+                <option value="opencode">OpenCode CLI</option>
               </select>
             </div>
 
@@ -214,26 +221,36 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
               <label className="text-xs font-semibold text-slate-300 block mb-1">
                 Model Identifier
               </label>
-              <select
-                value={workerModel}
-                onChange={(e) => setWorkerModel(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
-              >
-                {workerProvider === 'gemini' ? (
-                  <>
-                    <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended)</option>
-                    <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                  </>
-                ) : (
-                  <>
-                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
-                    <option value="gpt-4o">gpt-4o</option>
-                    <option value="o3-mini">o3-mini</option>
-                    <option value="o1">o1</option>
-                    <option value="gpt-4.5-preview">gpt-4.5-preview</option>
-                  </>
-                )}
-              </select>
+              {workerProvider === 'opencode' ? (
+                <input
+                  type="text"
+                  value={workerModel}
+                  onChange={(e) => setWorkerModel(e.target.value)}
+                  placeholder="github-copilot/gpt-5.3-codex"
+                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
+                />
+              ) : (
+                <select
+                  value={workerModel}
+                  onChange={(e) => setWorkerModel(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                >
+                  {workerProvider === 'gemini' ? (
+                    <>
+                      <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended)</option>
+                      <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
+                      <option value="gpt-4o">gpt-4o</option>
+                      <option value="o3-mini">o3-mini</option>
+                      <option value="o1">o1</option>
+                      <option value="gpt-4.5-preview">gpt-4.5-preview</option>
+                    </>
+                  )}
+                </select>
+              )}
             </div>
           </div>
 

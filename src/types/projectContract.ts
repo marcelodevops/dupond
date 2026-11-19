@@ -220,6 +220,15 @@ export interface OpenAITestResult {
   error?: string;
 }
 
+export interface OpenCodeWorkerStatus {
+  available: boolean;
+  executablePath: string | null;
+  version: string | null;
+  models: string[];
+  configuredProviders: string[];
+  error?: string;
+}
+
 export interface PlanningReadiness {
   provider: string;
   model: string;

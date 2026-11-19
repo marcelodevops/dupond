@@ -13,6 +13,7 @@ import {
   OPENAI_MODEL_ID_REGEX,
   testOpenAIConnection,
 } from '../openai.js';
+import { probeOpenCodeReadiness } from '../worker/opencodeWorkerAdapter.js';
 
 const RepositorySchema = z
   .object({
@@ -354,6 +355,14 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
   router.get('/planning/readiness', (_req: Request, res: Response) => {
     try {
       res.json(getPlanningReadiness());
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.get('/workers/opencode/status', (_req: Request, res: Response) => {
+    try {
+      res.json(probeOpenCodeReadiness());
     } catch (err) {
       fail(res, err);
     }
