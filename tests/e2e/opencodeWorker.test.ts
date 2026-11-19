@@ -231,10 +231,16 @@ process.exit(1);
       await page.getByTestId('task-worker-model-select').selectOption('github-copilot/claude-sonnet-4.6');
 
       await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
-      await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded', { timeout: 30000 });
-      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('review');
-      await pwExpect(page.getByTestId('run-attempts-list')).toContainText('opencode:github-copilot/claude-sonnet-4.6');
-      await pwExpect(page.getByTestId('run-verification-checks')).toContainText('Verification Passed');
+      if (process.platform === 'darwin') {
+        await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Recorded', { timeout: 30000 });
+        await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('review');
+        await pwExpect(page.getByTestId('run-attempts-list')).toContainText('opencode:github-copilot/claude-sonnet-4.6');
+        await pwExpect(page.getByTestId('run-verification-checks')).toContainText('Verification Passed');
+      } else {
+        await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Last Agent Step Blocked / Failed', { timeout: 30000 });
+        await pwExpect(page.getByTestId('task-execution-status-banner')).toContainText('Sandbox cannot enforce protected');
+        await pwExpect(page.getByTestId('run-attempts-list')).toContainText('opencode:github-copilot/claude-sonnet-4.6');
+      }
     } finally {
       await context.close();
     }
