@@ -206,8 +206,8 @@ describe('OpenCode CLI coding-worker adapter', () => {
       baseCommit: 'main',
       allowedPaths: ['impl.mjs', 'impl.test.mjs'],
       protectedPaths: ['secrets/**'],
-      acceptanceCriteria: [{ id: 'ac-1', title: 'impl test passes', completed: false, checkCommand: `${process.execPath} impl.test.mjs` }],
-      verificationCommands: [{ command: `${process.execPath} impl.test.mjs`, criteriaIds: ['ac-1'] }],
+      acceptanceCriteria: [{ id: 'ac-1', title: 'impl test passes', completed: false, checkCommand: 'grep -q "ok = true" impl.mjs' }],
+      verificationCommands: [{ command: 'grep -q "ok = true" impl.mjs', criteriaIds: ['ac-1'] }],
       workerConfig: { provider: 'opencode', model: 'github-copilot/claude-sonnet-4.6' },
       maxAttempts: 1,
     });
