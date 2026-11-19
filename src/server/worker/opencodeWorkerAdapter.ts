@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { DomainError } from '../utils/errors';
 import {
   CodingWorkerAdapter,
@@ -68,6 +68,7 @@ export function resolveOpenCodeExecutable(): string | null {
 
 function buildOpenCodeEnv(
   context?: Pick<WorkerExecutionContext, 'allowedPaths' | 'protectedPaths'>,
+  options?: { sandboxed?: boolean }
 ): Record<string, string> {
   const env: Record<string, string> = {};
   const blockedEnvPatterns = [
@@ -80,11 +81,23 @@ function buildOpenCodeEnv(
     /^ANTHROPIC_ADMIN/i,
     /PASSWORD|SECRET|PRIVATE_KEY/i,
   ];
+  const sandboxStrippedKeys = new Set([
+    'HOME',
+    'TMPDIR',
+    'XDG_DATA_HOME',
+    'XDG_CONFIG_HOME',
+    'XDG_STATE_HOME',
+    'XDG_CACHE_HOME',
+  ]);
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v !== 'string') continue;
     if (blockedEnvPatterns.some((re) => re.test(k))) continue;
+    if (options?.sandboxed && sandboxStrippedKeys.has(k)) continue;
     env[k] = v;
   }
+
+  // Always block repository-supplied OpenCode configs, plugins, and custom tools
+  env.OPENCODE_DISABLE_PROJECT_CONFIG = 'true';
 
   if (context) {
     const editRules: Record<string, 'allow' | 'deny'> = context.allowedPaths?.length
@@ -99,6 +112,12 @@ function buildOpenCodeEnv(
       }
     }
 
+    const readRules: Record<string, 'allow' | 'deny'> = {
+      '*': 'allow',
+      '.env': 'deny',
+      '.env.*': 'deny',
+    };
+
     const alwaysProtected = ['.git/**', '.env', '.env.*', ...(context.protectedPaths || [])];
     for (const prot of alwaysProtected) {
       const normalized = prot.replace(/^\/+/, '').replace(/\/+$/, '');
@@ -110,10 +129,23 @@ function buildOpenCodeEnv(
       }
     }
 
+    for (const prot of context.protectedPaths || []) {
+      const normalized = prot.replace(/^\/+/, '').replace(/\/+$/, '');
+      if (normalized) {
+        readRules[normalized] = 'deny';
+        if (!normalized.includes('*')) {
+          readRules[`${normalized}/**`] = 'deny';
+        }
+      }
+    }
+
     env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
       $schema: 'https://opencode.ai/config.json',
+      mcp: {},
+      plugin: [],
       permission: {
         edit: editRules,
+        read: readRules,
         bash: { '*': 'deny' },
         external_directory: 'deny',
       },
@@ -121,6 +153,45 @@ function buildOpenCodeEnv(
   }
 
   return env;
+}
+
+function collectOpenCodeAuthSeedFiles(): Array<{ sourcePath: string; targetRelToHome: string }> {
+  const dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), '.local', 'share');
+  const authPath = path.join(dataHome, 'opencode', 'auth.json');
+  if (fs.existsSync(authPath) && fs.statSync(authPath).isFile()) {
+    return [{ sourcePath: authPath, targetRelToHome: '.local/share/opencode/auth.json' }];
+  }
+  return [];
+}
+
+function collectExtraReadPaths(binPath: string): string[] {
+  const candidates = new Set<string>();
+  const addPathAndParent = (p: string) => {
+    try {
+      const resolved = fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p);
+      candidates.add(resolved);
+      candidates.add(path.dirname(resolved));
+    } catch {
+      candidates.add(path.resolve(p));
+    }
+  };
+  addPathAndParent(binPath);
+  addPathAndParent(path.resolve(binPath));
+  addPathAndParent(process.execPath);
+  return Array.from(candidates);
+}
+
+function collectDenyWritePaths(realWorktree: string, protectedPaths?: string[]): string[] {
+  const out: string[] = [];
+  for (const p of protectedPaths || []) {
+    const clean = p.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!clean) continue;
+    const abs = path.resolve(realWorktree, clean);
+    if (abs === realWorktree || abs.startsWith(`${realWorktree}${path.sep}`)) {
+      out.push(abs);
+    }
+  }
+  return out;
 }
 
 function sanitizeWorkerOutput(raw: string): string {
@@ -220,28 +291,217 @@ export function probeOpenCodeReadiness(): OpenCodeReadinessStatus {
   };
 }
 
-function snapshotWorktreeStatus(realWorktree: string): Map<string, string> {
-  const statusOut = execFileSync('git', ['status', '--porcelain', '-uall'], {
-    cwd: realWorktree,
-    encoding: 'utf-8',
-  });
-  const files = new Map<string, string>();
-  for (const line of statusOut.split(/\r?\n/)) {
-    if (line.length < 4) continue;
-    const relPath = line.slice(3).trim().replace(/^"(.*)"$/, '$1');
-    if (!relPath) continue;
-    const absPath = path.join(realWorktree, relPath);
-    let digest = 'deleted';
+interface TreeEntrySnapshot {
+  kind: 'file' | 'symlink';
+  value: string;
+}
+
+interface RepoBaseline {
+  headSha: string;
+  headRef: string;
+  refs: Map<string, string>;
+  gitDir: string | null;
+  gitMetadata: Map<string, TreeEntrySnapshot>;
+  entries: Map<string, TreeEntrySnapshot>;
+}
+
+function captureTreeEntries(rootDir: string, skipDirNames: Set<string>): Map<string, TreeEntrySnapshot> {
+  const entries = new Map<string, TreeEntrySnapshot>();
+  const walk = (dir: string, relPrefix: string) => {
+    let dirEntries: fs.Dirent[];
     try {
-      if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
-        digest = crypto.createHash('sha256').update(fs.readFileSync(absPath)).digest('hex');
+      dirEntries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const d of dirEntries) {
+      if (skipDirNames.has(d.name)) continue;
+      const absPath = path.join(dir, d.name);
+      const relPath = relPrefix ? `${relPrefix}/${d.name}` : d.name;
+      try {
+        const lstat = fs.lstatSync(absPath);
+        if (lstat.isSymbolicLink()) {
+          entries.set(relPath, { kind: 'symlink', value: fs.readlinkSync(absPath) });
+        } else if (lstat.isDirectory()) {
+          walk(absPath, relPath);
+        } else if (lstat.isFile()) {
+          const digest = crypto.createHash('sha256').update(fs.readFileSync(absPath)).digest('hex');
+          entries.set(relPath, { kind: 'file', value: digest });
+        }
+      } catch {
+        entries.set(relPath, { kind: 'file', value: 'unreadable' });
+      }
+    }
+  };
+  walk(rootDir, '');
+  return entries;
+}
+
+function captureGitState(realWorktree: string): {
+  headSha: string;
+  headRef: string;
+  refs: Map<string, string>;
+  gitDir: string | null;
+  gitMetadata: Map<string, TreeEntrySnapshot>;
+} {
+  let headSha = '';
+  try {
+    headSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: realWorktree, encoding: 'utf-8' }).trim();
+  } catch {
+    headSha = '';
+  }
+
+  let headRef = 'DETACHED';
+  try {
+    headRef = execFileSync('git', ['symbolic-ref', '-q', 'HEAD'], { cwd: realWorktree, encoding: 'utf-8' }).trim() || 'DETACHED';
+  } catch {
+    headRef = 'DETACHED';
+  }
+
+  const refs = new Map<string, string>();
+  try {
+    const refsOut = execFileSync('git', ['for-each-ref', '--format=%(refname)\t%(objectname)'], {
+      cwd: realWorktree,
+      encoding: 'utf-8',
+    });
+    for (const line of refsOut.split(/\r?\n/)) {
+      if (!line) continue;
+      const [refName, sha] = line.split('\t');
+      if (refName) refs.set(refName, sha || '');
+    }
+  } catch {
+    // ignore
+  }
+
+  let gitDir: string | null = null;
+  try {
+    const rawGitDir = execFileSync('git', ['rev-parse', '--git-dir'], { cwd: realWorktree, encoding: 'utf-8' }).trim();
+    const absGitDir = path.resolve(realWorktree, rawGitDir);
+    if (fs.existsSync(absGitDir)) {
+      gitDir = fs.realpathSync(absGitDir);
+    }
+  } catch {
+    gitDir = null;
+  }
+
+  const gitMetadata = gitDir ? captureTreeEntries(gitDir, new Set()) : new Map<string, TreeEntrySnapshot>();
+  return { headSha, headRef, refs, gitDir, gitMetadata };
+}
+
+export function captureRepoBaseline(realWorktree: string): RepoBaseline {
+  const gitState = captureGitState(realWorktree);
+  const entries = captureTreeEntries(realWorktree, new Set(['.git', 'node_modules']));
+  return {
+    ...gitState,
+    entries,
+  };
+}
+
+function findGitIgnoredPaths(realWorktree: string, candidatePaths: string[]): Set<string> {
+  if (candidatePaths.length === 0) return new Set();
+  try {
+    const out = execFileSync('git', ['check-ignore', '-z', '--stdin'], {
+      cwd: realWorktree,
+      input: candidatePaths.join('\0') + '\0',
+      encoding: 'utf-8',
+    });
+    return new Set(out.split('\0').filter(Boolean));
+  } catch {
+    // git check-ignore exits with 1 when NO paths are ignored
+    return new Set();
+  }
+}
+
+export function inspectAndVerifyRepoChanges(
+  realWorktree: string,
+  baseline: RepoBaseline,
+  context: Pick<WorkerExecutionContext, 'allowedPaths' | 'protectedPaths'>
+): { filesModified: string[]; diff: string; violations: string[] } {
+  const afterGit = captureGitState(realWorktree);
+  const afterEntries = captureTreeEntries(realWorktree, new Set(['.git', 'node_modules']));
+  const violations: string[] = [];
+
+  if (afterGit.headSha !== baseline.headSha) {
+    violations.push(`Unauthorized HEAD commit change (${baseline.headSha.slice(0, 8)} -> ${afterGit.headSha.slice(0, 8)})`);
+  }
+  if (afterGit.headRef !== baseline.headRef) {
+    violations.push(`Unauthorized HEAD ref change (${baseline.headRef} -> ${afterGit.headRef})`);
+  }
+
+  const allRefNames = new Set([...baseline.refs.keys(), ...afterGit.refs.keys()]);
+  for (const refName of allRefNames) {
+    if (baseline.refs.get(refName) !== afterGit.refs.get(refName)) {
+      violations.push(`Unauthorized Git ref modification: ${refName}`);
+    }
+  }
+
+  const allGitMetaKeys = new Set([...baseline.gitMetadata.keys(), ...afterGit.gitMetadata.keys()]);
+  for (const key of allGitMetaKeys) {
+    const b = baseline.gitMetadata.get(key);
+    const a = afterGit.gitMetadata.get(key);
+    if (!b || !a || b.kind !== a.kind || b.value !== a.value) {
+      violations.push(`Unauthorized Git metadata modification: .git/${key}`);
+    }
+  }
+
+  const changedPaths = new Set<string>();
+  const allEntryPaths = new Set([...baseline.entries.keys(), ...afterEntries.keys()]);
+  for (const relPath of allEntryPaths) {
+    const b = baseline.entries.get(relPath);
+    const a = afterEntries.get(relPath);
+    if (!b || !a || b.kind !== a.kind || b.value !== a.value) {
+      changedPaths.add(relPath);
+      if (a?.kind === 'symlink') {
+        violations.push(`Symlink creation or modification is not permitted: "${relPath}"`);
+      }
+    }
+  }
+
+  if (baseline.headSha && afterGit.headSha && baseline.headSha !== afterGit.headSha) {
+    try {
+      const committedOut = execFileSync(
+        'git',
+        ['diff', '--name-only', '-z', baseline.headSha, afterGit.headSha],
+        { cwd: realWorktree, encoding: 'utf-8' }
+      );
+      for (const relPath of committedOut.split('\0').filter(Boolean)) {
+        changedPaths.add(relPath);
       }
     } catch {
-      digest = 'unreadable';
+      // ignore
     }
-    files.set(relPath, `${line.slice(0, 2)}:${digest}`);
   }
-  return files;
+
+  const filesModified = Array.from(changedPaths).sort();
+  const ignoredPaths = findGitIgnoredPaths(realWorktree, filesModified);
+  for (const ignored of ignoredPaths) {
+    violations.push(`Ignored path modified or created during execution: "${ignored}"`);
+  }
+
+  for (const file of filesModified) {
+    const resolved = resolveSafePath(realWorktree, file, {
+      allowedPaths: context.allowedPaths,
+      protectedPaths: context.protectedPaths,
+    });
+    if (!resolved.isSafe || resolved.isProtected || !resolved.isAllowed) {
+      violations.push(
+        `Boundary violation on "${file}": ${resolved.error || (resolved.isProtected ? 'protected path' : 'outside allowedPaths')}`
+      );
+    }
+  }
+
+  let diff = '';
+  try {
+    const baseRef = baseline.headSha || 'HEAD';
+    diff = execFileSync('git', ['diff', baseRef], {
+      cwd: realWorktree,
+      encoding: 'utf-8',
+    });
+  } catch {
+    diff = '';
+  }
+
+  return { filesModified, diff, violations };
 }
 
 function buildOpenCodePrompt(context: WorkerExecutionContext): string {
@@ -321,10 +581,10 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
     }
 
     const realWorktree = fs.realpathSync(context.worktreePath);
-    const beforeSnapshot = snapshotWorktreeStatus(realWorktree);
+    const baseline = captureRepoBaseline(realWorktree);
     const prompt = buildOpenCodePrompt(context);
     const timeoutMs = Math.max(1000, context.timeoutMs ?? 300_000);
-    const env = buildOpenCodeEnv(context);
+    const env = buildOpenCodeEnv(context, { sandboxed: true });
 
     const args = [
       'run',
@@ -339,114 +599,49 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
     ];
 
     const logs: string[] = [
-      `[OpenCode] Executing ${binPath} with model ${this.model} in ${realWorktree}`,
+      `[OpenCode] Executing ${binPath} in OS sandbox with model ${this.model} in ${realWorktree}`,
     ];
 
-    const execOutcome = await new Promise<{
-      exitCode: number | null;
-      signal: NodeJS.Signals | null;
-      stdout: string;
-      stderr: string;
-      timedOut: boolean;
-      cancelled: boolean;
-    }>((resolve, reject) => {
-      let stdout = '';
-      let stderr = '';
-      let stdoutTruncated = false;
-      let stderrTruncated = false;
-      let timedOut = false;
-      let cancelled = false;
-      let settled = false;
-
-      const child = spawn(binPath, args, {
-        cwd: realWorktree,
-        env,
-        detached: process.platform !== 'win32',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      const killProcessTree = () => {
-        if (!child.pid) return;
-        try {
-          if (process.platform !== 'win32') {
-            process.kill(-child.pid, 'SIGTERM');
-          } else {
-            child.kill('SIGTERM');
-          }
-        } catch {}
-        setTimeout(() => {
-          try {
-            if (process.platform !== 'win32' && child.pid) {
-              process.kill(-child.pid, 'SIGKILL');
-            } else {
-              child.kill('SIGKILL');
-            }
-          } catch {}
-        }, 1200).unref();
-      };
-
-      const onAbort = () => {
-        cancelled = true;
-        killProcessTree();
-      };
-
-      if (context.abortSignal?.aborted) {
-        onAbort();
-      } else if (context.abortSignal) {
-        context.abortSignal.addEventListener('abort', onAbort, { once: true });
-      }
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        killProcessTree();
-      }, timeoutMs);
-
-      child.stdout?.on('data', (chunk: Buffer) => {
-        if (stdout.length < MAX_OUTPUT_BYTES) {
-          stdout += chunk.toString('utf-8').slice(0, MAX_OUTPUT_BYTES - stdout.length);
-        } else if (!stdoutTruncated) {
-          stdoutTruncated = true;
-        }
-      });
-
-      child.stderr?.on('data', (chunk: Buffer) => {
-        if (stderr.length < MAX_OUTPUT_BYTES) {
-          stderr += chunk.toString('utf-8').slice(0, MAX_OUTPUT_BYTES - stderr.length);
-        } else if (!stderrTruncated) {
-          stderrTruncated = true;
-        }
-      });
-
-      child.on('error', (err) => {
-        clearTimeout(timer);
-        context.abortSignal?.removeEventListener('abort', onAbort);
-        if (!settled) {
-          settled = true;
-          reject(err);
-        }
-      });
-
-      child.on('close', (exitCode, signal) => {
-        clearTimeout(timer);
-        context.abortSignal?.removeEventListener('abort', onAbort);
-        if (!settled) {
-          settled = true;
-          resolve({ exitCode, signal, stdout, stderr, timedOut, cancelled });
-        }
-      });
+    const sandboxResult = await this.sandbox.execute({
+      worktreePath: realWorktree,
+      command: binPath,
+      args,
+      rawArgv: true,
+      timeoutMs,
+      env,
+      allowNetwork: true,
+      runId: context.runId,
+      abortSignal: context.abortSignal,
+      gitReadOnly: true,
+      extraReadPaths: collectExtraReadPaths(binPath),
+      denyWritePaths: collectDenyWritePaths(realWorktree, context.protectedPaths),
+      seedHomeFiles: collectOpenCodeAuthSeedFiles(),
+      preserveEnvKeys: ['GITHUB_TOKEN'],
     });
 
-    if (execOutcome.cancelled) {
+    // Always inspect repo baseline vs post-execution state on success, failure, timeout, and cancellation.
+    const repoInspection = inspectAndVerifyRepoChanges(realWorktree, baseline, context);
+    if (repoInspection.violations.length > 0) {
+      throw new DomainError(`OpenCode boundary violation: ${repoInspection.violations.join('; ')}`);
+    }
+
+    if (sandboxResult.killed && context.abortSignal?.aborted) {
       throw new DomainError('OpenCode execution cancelled by user');
     }
-    if (execOutcome.timedOut) {
+    if (sandboxResult.timedOut) {
       throw new DomainError(`OpenCode execution timed out after ${timeoutMs}ms`);
     }
+    if (sandboxResult.killed) {
+      throw new DomainError('OpenCode execution cancelled by user');
+    }
+
+    const boundedStdout = sandboxResult.stdout.slice(0, MAX_OUTPUT_BYTES);
+    const boundedStderr = sandboxResult.stderr.slice(0, MAX_OUTPUT_BYTES);
 
     // Parse NDJSON output from `opencode run --format json`
     const parsedEvents: any[] = [];
     const malformedLines: string[] = [];
-    for (const rawLine of execOutcome.stdout.split(/\r?\n/)) {
+    for (const rawLine of boundedStdout.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line) continue;
       try {
@@ -456,8 +651,8 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
       }
     }
 
-    if (execOutcome.stderr.trim()) {
-      logs.push(`[OpenCode stderr] ${sanitizeWorkerOutput(execOutcome.stderr.trim())}`);
+    if (boundedStderr.trim()) {
+      logs.push(`[OpenCode stderr] ${sanitizeWorkerOutput(boundedStderr.trim())}`);
     }
 
     const tokenUsage = parsedEvents.reduce(
@@ -477,15 +672,15 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
       .filter((ev) => ev?.type === 'error' || ev?.error)
       .map((ev) => sanitizeWorkerOutput(String(ev?.error?.message || ev?.error || ev?.message || 'OpenCode error')));
 
-    if (execOutcome.exitCode !== 0 || eventErrors.length > 0) {
+    if (sandboxResult.exitCode !== 0 || eventErrors.length > 0) {
       const detail =
         eventErrors[0] ||
-        sanitizeWorkerOutput(execOutcome.stderr.trim()) ||
-        `OpenCode exited with code ${execOutcome.exitCode ?? 'null'}`;
+        sanitizeWorkerOutput(boundedStderr.trim()) ||
+        `OpenCode exited with code ${sandboxResult.exitCode ?? 'null'}`;
       return {
         success: false,
-        filesModified: [],
-        diff: '',
+        filesModified: repoInspection.filesModified,
+        diff: repoInspection.diff,
         commitMessage: '',
         logs,
         tokenUsage: tokenUsage.totalTokens > 0 ? tokenUsage : undefined,
@@ -497,8 +692,8 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
     if (malformedLines.length > 0 || parsedEvents.length === 0) {
       return {
         success: false,
-        filesModified: [],
-        diff: '',
+        filesModified: repoInspection.filesModified,
+        diff: repoInspection.diff,
         commitMessage: '',
         logs,
         durationMs: Date.now() - startTime,
@@ -508,29 +703,6 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
             : 'OpenCode CLI produced no structured JSON events.',
       };
     }
-
-    // Verify worktree changes made during OpenCode execution against Dupond's path & protected-path boundaries
-    const afterSnapshot = snapshotWorktreeStatus(realWorktree);
-    const modifiedFiles = Array.from(afterSnapshot.entries())
-      .filter(([file, sig]) => beforeSnapshot.get(file) !== sig)
-      .map(([file]) => file);
-
-    for (const file of modifiedFiles) {
-      const resolved = resolveSafePath(realWorktree, file, {
-        allowedPaths: context.allowedPaths,
-        protectedPaths: context.protectedPaths,
-      });
-      if (!resolved.isSafe || resolved.isProtected || !resolved.isAllowed) {
-        throw new DomainError(
-          `OpenCode boundary violation on "${file}": ${resolved.error || (resolved.isProtected ? 'protected path' : 'outside allowedPaths')}`,
-        );
-      }
-    }
-
-    const diff = execFileSync('git', ['diff', 'HEAD'], {
-      cwd: realWorktree,
-      encoding: 'utf-8',
-    });
 
     const summaryText = parsedEvents
       .map((ev) => ev?.part?.text || ev?.text || ev?.message || '')
@@ -543,8 +715,8 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
 
     return {
       success: true,
-      filesModified: modifiedFiles,
-      diff,
+      filesModified: repoInspection.filesModified,
+      diff: repoInspection.diff,
       commitMessage: `feat(${context.taskKey}): implement via opencode (${this.model})`,
       logs,
       tokenUsage: tokenUsage.totalTokens > 0 ? tokenUsage : undefined,
