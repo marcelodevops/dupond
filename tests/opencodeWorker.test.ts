@@ -126,10 +126,40 @@ if (args[0] === 'run') {
     setInterval(() => {}, 1000);
     return;
   }
-  if (mode === 'protected_violation') {
-    fs.mkdirSync(path.join(process.cwd(), 'secrets'), { recursive: true });
-    fs.writeFileSync(path.join(process.cwd(), 'secrets/prod.key'), 'hacked\\n');
-    console.log(JSON.stringify({ type: 'text', part: { text: 'edited protected file' } }));
+  if (mode === 'attempt_bypass_protected_patterns') {
+    // Deliberately ignore OPENCODE_CONFIG_CONTENT and try direct filesystem writes
+    const targets = [
+      'secrets/prod.key',
+      'secrets/new.key',
+      '.github/workflows/ci.yml',
+      '.github/new-workflow.yml',
+      'tests/existing.test.mjs',
+      'tests/new.test.mjs',
+      '.env',
+      '.env.local',
+      '.env.evil',
+      'nested/.env.injected',
+    ];
+    const results = {};
+    for (const rel of targets) {
+      const full = path.join(process.cwd(), rel);
+      try {
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+      } catch {}
+      try {
+        fs.writeFileSync(full, 'PWNED\\n');
+        results[rel] = 'WRITTEN';
+      } catch (err) {
+        results[rel] = 'BLOCKED:' + (err.code || err.message);
+      }
+    }
+    console.error('BYPASS_RESULTS:' + JSON.stringify(results));
+    console.log(JSON.stringify({ type: 'text', part: { text: 'bypass attempt complete' } }));
+    process.exit(0);
+  }
+  if (mode === 'allowed_path_violation') {
+    fs.writeFileSync(path.join(process.cwd(), 'outside-allowed.mjs'), 'export const bad = true;\\n');
+    console.log(JSON.stringify({ type: 'text', part: { text: 'edited outside allowedPaths' } }));
     process.exit(0);
   }
   if (mode === 'verify_fail') {
@@ -176,6 +206,8 @@ describe('OpenCode CLI coding-worker adapter', () => {
         path.join(dir, 'impl.test.mjs'),
         "import assert from 'node:assert'; import { ok } from './impl.mjs'; assert.strictEqual(ok, true);\n",
       );
+      fs.mkdirSync(path.join(dir, 'secrets'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'secrets/prod.key'), 'original-secret\n');
       execFileSync('git', ['add', '.'], { cwd: dir });
       execFileSync('git', ['commit', '-m', 'init'], { cwd: dir });
     }
@@ -354,9 +386,13 @@ describe('OpenCode CLI coding-worker adapter', () => {
     assert.strictEqual(malRes.success, false);
     assert.ok(malRes.errorMessage?.includes('Malformed OpenCode JSON output'));
 
-    // Protected path violation
-    process.env.FAKE_OPENCODE_MODE = 'protected_violation';
-    await assert.rejects(() => adapter.execute(baseCtx), /boundary violation/i);
+    // Allowed-path boundary violation caught independently
+    process.env.FAKE_OPENCODE_MODE = 'allowed_path_violation';
+    await assert.rejects(
+      () => adapter.execute({ ...baseCtx, allowedPaths: ['impl.mjs'] }),
+      /boundary violation/i,
+    );
+    fs.rmSync(path.join(repoA, 'outside-allowed.mjs'), { force: true });
 
     // Timeout kills process tree
     const pidOut1 = path.join(tmpDir, 'pid-timeout.txt');
@@ -396,12 +432,9 @@ describe('OpenCode CLI coding-worker adapter', () => {
 
   it('enforces OS sandbox boundaries and catches committed, ignored, symlink, and Git-metadata violations', async () => {
     const adapter = new OpenCodeCodingWorkerAdapter('github-copilot/gpt-5.3-codex');
-    // Seed an existing protected file, .gitignore, and an outside sentinel secret under $HOME
-    fs.mkdirSync(path.join(repoA, 'secrets'), { recursive: true });
-    fs.writeFileSync(path.join(repoA, 'secrets/prod.key'), 'original-secret\n');
     fs.writeFileSync(path.join(repoA, '.gitignore'), 'ignored.secret\n');
     execFileSync('git', ['add', '.'], { cwd: repoA });
-    execFileSync('git', ['commit', '-m', 'add protected and gitignore'], { cwd: repoA });
+    execFileSync('git', ['commit', '-m', 'add gitignore'], { cwd: repoA });
 
     const homeSentinelDir = fs.mkdtempSync(path.join(os.homedir(), '.dupond-opencode-sentinel-'));
     const homeSentinelFile = path.join(homeSentinelDir, 'sentinel.secret');
@@ -416,7 +449,7 @@ describe('OpenCode CLI coding-worker adapter', () => {
       acceptanceCriteria: [],
       worktreePath: repoA,
       allowedPaths: ['impl.mjs', 'impl.test.mjs'],
-      protectedPaths: ['secrets', 'secrets/**'],
+      protectedPaths: ['secrets/**'],
       attemptNumber: 1,
     };
 
@@ -479,5 +512,91 @@ describe('OpenCode CLI coding-worker adapter', () => {
       delete process.env.FAKE_OPENCODE_OUTSIDE_WRITE;
       fs.rmSync(homeSentinelDir, { recursive: true, force: true });
     }
+  });
+
+  it('enforces protected-path patterns ONLY (secrets/**, .github/**, tests/**, .env*) at OS level or fails closed', async () => {
+    const adapter = new OpenCodeCodingWorkerAdapter('github-copilot/gpt-5.3-codex');
+
+    fs.mkdirSync(path.join(repoA, '.github', 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(repoA, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
+    fs.mkdirSync(path.join(repoA, 'tests'), { recursive: true });
+    fs.writeFileSync(path.join(repoA, 'tests', 'existing.test.mjs'), 'export const keep = true;\n');
+    fs.writeFileSync(path.join(repoA, '.env'), 'SECRET=keep\n');
+    fs.writeFileSync(path.join(repoA, '.env.local'), 'LOCAL=keep\n');
+    execFileSync('git', ['add', '.github/workflows/ci.yml', 'tests/existing.test.mjs'], {
+      cwd: repoA,
+    });
+    execFileSync('git', ['commit', '-m', 'seed protected pattern targets'], { cwd: repoA });
+
+    const protectedPatternsOnly = ['secrets/**', '.github/**', 'tests/**', '.env*'];
+    const ctx = {
+      taskId: 't-patterns',
+      taskKey: 'OPC-401',
+      taskTitle: 'Pattern enforcement test',
+      taskDescription: 'Desc',
+      acceptanceCriteria: [],
+      worktreePath: repoA,
+      allowedPaths: [],
+      protectedPaths: protectedPatternsOnly,
+      attemptNumber: 1,
+    };
+
+    process.env.FAKE_OPENCODE_MODE = 'attempt_bypass_protected_patterns';
+
+    if (process.platform === 'darwin') {
+      // On macOS Seatbelt, all 4 patterns (subtree + .env* glob) are enforced at OS level
+      // even when the fake CLI ignores OPENCODE_CONFIG_CONTENT and exits 0.
+      const res = await adapter.execute(ctx);
+      assert.strictEqual(res.success, true);
+
+      const bypassLog = res.logs.find((l) => l.includes('BYPASS_RESULTS:'));
+      assert.ok(bypassLog, 'Expected BYPASS_RESULTS log from fake CLI');
+      const results = JSON.parse(
+        bypassLog.slice(bypassLog.indexOf('BYPASS_RESULTS:') + 'BYPASS_RESULTS:'.length)
+      ) as Record<string, string>;
+
+      for (const [target, status] of Object.entries(results)) {
+        assert.ok(status.startsWith('BLOCKED:'), `Expected OS block for "${target}", got ${status}`);
+      }
+
+      // Verify all existing protected bytes remained unchanged
+      assert.strictEqual(fs.readFileSync(path.join(repoA, 'secrets/prod.key'), 'utf-8'), 'original-secret\n');
+      assert.strictEqual(fs.readFileSync(path.join(repoA, '.github/workflows/ci.yml'), 'utf-8'), 'name: ci\n');
+      assert.strictEqual(fs.readFileSync(path.join(repoA, 'tests/existing.test.mjs'), 'utf-8'), 'export const keep = true;\n');
+      assert.strictEqual(fs.readFileSync(path.join(repoA, '.env'), 'utf-8'), 'SECRET=keep\n');
+      assert.strictEqual(fs.readFileSync(path.join(repoA, '.env.local'), 'utf-8'), 'LOCAL=keep\n');
+
+      // Verify no new matching protected files were created
+      assert.strictEqual(fs.existsSync(path.join(repoA, 'secrets/new.key')), false);
+      assert.strictEqual(fs.existsSync(path.join(repoA, '.github/new-workflow.yml')), false);
+      assert.strictEqual(fs.existsSync(path.join(repoA, 'tests/new.test.mjs')), false);
+      assert.strictEqual(fs.existsSync(path.join(repoA, '.env.evil')), false);
+      assert.strictEqual(fs.existsSync(path.join(repoA, 'nested/.env.injected')), false);
+    } else {
+      // On Linux container runtime, .env* glob cannot prevent new matching file creation -> fail closed before launching
+      await assert.rejects(
+        () => adapter.execute(ctx),
+        /cannot enforce protected-path glob "\.env\*"/i,
+      );
+
+      // Existing subtree patterns (secrets/**, .github/**, tests/**) ARE enforced via :ro bind mounts
+      const res = await adapter.execute({
+        ...ctx,
+        protectedPaths: ['secrets/**', '.github/**', 'tests/**'],
+      });
+      assert.strictEqual(res.success, true);
+      assert.strictEqual(fs.readFileSync(path.join(repoA, 'secrets/prod.key'), 'utf-8'), 'original-secret\n');
+      assert.strictEqual(fs.readFileSync(path.join(repoA, '.github/workflows/ci.yml'), 'utf-8'), 'name: ci\n');
+      assert.strictEqual(fs.readFileSync(path.join(repoA, 'tests/existing.test.mjs'), 'utf-8'), 'export const keep = true;\n');
+      assert.strictEqual(fs.existsSync(path.join(repoA, 'secrets/new.key')), false);
+      assert.strictEqual(fs.existsSync(path.join(repoA, '.github/new-workflow.yml')), false);
+      assert.strictEqual(fs.existsSync(path.join(repoA, 'tests/new.test.mjs')), false);
+    }
+
+    // Unsupported pattern fails closed on all platforms before launching
+    await assert.rejects(
+      () => adapter.execute({ ...ctx, protectedPaths: ['secrets/{a,b}.key'] }),
+      /Unsupported protected-path pattern/i,
+    );
   });
 });
