@@ -1385,21 +1385,23 @@ ${implementationCode.slice(0, 500)}...
     }
 
     const requestedWorkerConfig =
-      storeTask?.workerConfig && storeTask.workerConfig.provider
-        ? storeTask.workerConfig
-        : task.workerConfig || { provider: 'gemini', model: GEMINI_MODEL };
+      task.workerConfig && task.workerConfig.provider
+        ? task.workerConfig
+        : storeTask?.workerConfig && storeTask.workerConfig.provider
+          ? storeTask.workerConfig
+          : { provider: 'gemini', model: GEMINI_MODEL };
 
     if (!storeTask) {
       const reg = this.registerProjectedTaskAuthoritatively(task, executionProjectId, 'in_progress');
       if (!reg.ok) {
-        let earlyWorkerAvailable = false;
+        let earlyWorkerAvail: { available: boolean; error?: string } = { available: false };
         try {
-          earlyWorkerAvailable = (await resolveCodingWorker(requestedWorkerConfig).isAvailable()).available;
+          earlyWorkerAvail = await resolveCodingWorker(requestedWorkerConfig).isAvailable();
         } catch {
-          earlyWorkerAvailable = false;
+          earlyWorkerAvail = { available: false };
         }
-        if (!earlyWorkerAvailable) {
-          throw blocked();
+        if (!earlyWorkerAvail.available) {
+          throw new DomainError(`${blocked().message} (${earlyWorkerAvail.error || 'Worker unavailable'})`);
         }
         throw new DomainError(reg.error);
       }
@@ -1416,7 +1418,7 @@ ${implementationCode.slice(0, 500)}...
 
     const workerAvailable = await taskWorker.isAvailable();
     if (!workerAvailable.available) {
-      throw blocked();
+      throw new DomainError(`${blocked().message} (${workerAvailable.error || 'Worker unavailable'})`);
     }
 
     const effectiveVerificationCommands =
