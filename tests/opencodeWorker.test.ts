@@ -12,6 +12,8 @@ import { AuthoritativeVerifier } from '../src/server/verification/authoritativeV
 import { WorkspaceManager } from '../src/server/workspace/workspaceManager.js';
 import {
   OpenCodeCodingWorkerAdapter,
+  captureRepoBaseline,
+  inspectAndVerifyRepoChanges,
   probeOpenCodeReadiness,
 } from '../src/server/worker/opencodeWorkerAdapter.js';
 import { resolveCodingWorker, validateWorkerConfig } from '../src/server/worker/workerRegistry.js';
@@ -42,15 +44,71 @@ if (args[0] === 'auth' && args[1] === 'list') {
   process.exit(0);
 }
 if (args[0] === 'run') {
-  if (process.env.FAKE_OPENCODE_ENV_OUT) {
-    fs.writeFileSync(process.env.FAKE_OPENCODE_ENV_OUT, JSON.stringify({
+  if (process.env.FAKE_OPENCODE_EMIT_ENV === '1') {
+    console.error('ENV_DIAG:' + JSON.stringify({
       config: process.env.OPENCODE_CONFIG_CONTENT || '',
+      disableProjectConfig: process.env.OPENCODE_DISABLE_PROJECT_CONFIG || '',
       hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
       hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
       hasDupondAuth: Boolean(process.env.DUPOND_AUTH_TOKEN),
       cwd: process.cwd(),
       args,
     }));
+  }
+  if (mode === 'attempt_read_outside') {
+    try {
+      const data = fs.readFileSync(process.env.FAKE_OPENCODE_SENTINEL_READ, 'utf-8');
+      console.error('READ_UNEXPECTED:' + data);
+      process.exit(0);
+    } catch (err) {
+      console.log(JSON.stringify({ type: 'error', error: { message: 'Blocked read: ' + (err.code || err.message) } }));
+      process.exit(1);
+    }
+  }
+  if (mode === 'attempt_write_outside') {
+    try {
+      fs.writeFileSync(process.env.FAKE_OPENCODE_OUTSIDE_WRITE, 'pwned');
+      console.error('WRITE_OUTSIDE_UNEXPECTED');
+      process.exit(0);
+    } catch (err) {
+      console.log(JSON.stringify({ type: 'error', error: { message: 'Blocked write: ' + (err.code || err.message) } }));
+      process.exit(1);
+    }
+  }
+  if (mode === 'attempt_write_git') {
+    try {
+      fs.writeFileSync(path.join(process.cwd(), '.git', 'evil-ref'), 'deadbeef');
+      console.error('WRITE_GIT_UNEXPECTED');
+      process.exit(0);
+    } catch (err) {
+      console.log(JSON.stringify({ type: 'error', error: { message: 'Blocked git write: ' + (err.code || err.message) } }));
+      process.exit(1);
+    }
+  }
+  if (mode === 'attempt_write_existing_protected') {
+    try {
+      fs.writeFileSync(path.join(process.cwd(), 'secrets/prod.key'), 'overwritten\\n');
+      console.error('WRITE_PROTECTED_UNEXPECTED');
+      process.exit(0);
+    } catch (err) {
+      console.log(JSON.stringify({ type: 'error', error: { message: 'Blocked protected write: ' + (err.code || err.message) } }));
+      process.exit(1);
+    }
+  }
+  if (mode === 'ignored_violation') {
+    fs.writeFileSync(path.join(process.cwd(), 'ignored.secret'), 'leaked\\n');
+    console.log(JSON.stringify({ type: 'text', part: { text: 'wrote ignored file' } }));
+    process.exit(0);
+  }
+  if (mode === 'symlink_violation') {
+    fs.symlinkSync('/etc/passwd', path.join(process.cwd(), 'bad-link'));
+    console.log(JSON.stringify({ type: 'text', part: { text: 'created symlink' } }));
+    process.exit(0);
+  }
+  if (mode === 'fail_with_violation') {
+    fs.writeFileSync(path.join(process.cwd(), 'ignored.secret'), 'leaked-on-fail\\n');
+    console.log(JSON.stringify({ type: 'error', error: { message: 'Failed after touching ignored' } }));
+    process.exit(1);
   }
   if (mode === 'fail') {
     console.log(JSON.stringify({ type: 'error', error: { message: 'Provider returned error' } }));
@@ -63,7 +121,7 @@ if (args[0] === 'run') {
   if (mode === 'hang') {
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     if (process.env.FAKE_OPENCODE_PID_OUT) {
-      fs.writeFileSync(process.env.FAKE_OPENCODE_PID_OUT, String(child.pid));
+      try { fs.writeFileSync(process.env.FAKE_OPENCODE_PID_OUT, String(child.pid)); } catch {}
     }
     setInterval(() => {}, 1000);
     return;
@@ -237,27 +295,34 @@ describe('OpenCode CLI coding-worker adapter', () => {
 
     // 2. CLI exit 0 + passing Dupond verification -> run succeeds with opencode provenance & secret isolation
     delete process.env.FAKE_OPENCODE_MODE;
-    const envOut = path.join(tmpDir, 'captured-env.json');
-    process.env.FAKE_OPENCODE_ENV_OUT = envOut;
+    process.env.FAKE_OPENCODE_EMIT_ENV = '1';
     const passRun = await coordinator.executeTaskRun({
       task: taskA,
       workspaceManager: new WorkspaceManager(repoA),
       runId: 'run-opc-pass',
     });
+    delete process.env.FAKE_OPENCODE_EMIT_ENV;
     assert.strictEqual(passRun.status, 'completed', `Expected completed but failed: ${passRun.failureReason}`);
 
-    const captured = JSON.parse(fs.readFileSync(envOut, 'utf-8'));
-    assert.strictEqual(captured.hasGeminiKey, false);
-    assert.strictEqual(captured.hasOpenAIKey, false);
-    assert.strictEqual(captured.hasDupondAuth, false);
-    const permCfg = JSON.parse(captured.config);
+    const passAttempts = store.listAttempts('run-opc-pass', projA.id);
+    const logsStr = String(passAttempts[0]?.logs || '');
+    const diagMatch = logsStr.match(/ENV_DIAG:(\{.*\})/);
+    assert.ok(diagMatch, 'Expected ENV_DIAG log entry from sandboxed OpenCode run');
+    const diagJson = JSON.parse(diagMatch[1]);
+    assert.strictEqual(diagJson.hasGeminiKey, false);
+    assert.strictEqual(diagJson.hasOpenAIKey, false);
+    assert.strictEqual(diagJson.hasDupondAuth, false);
+    assert.strictEqual(diagJson.disableProjectConfig, 'true');
+    const permCfg = JSON.parse(diagJson.config);
+    assert.deepStrictEqual(permCfg.mcp, {});
+    assert.deepStrictEqual(permCfg.plugin, []);
     assert.strictEqual(permCfg.permission.external_directory, 'deny');
     assert.strictEqual(permCfg.permission.bash['*'], 'deny');
     assert.strictEqual(permCfg.permission.edit['secrets/**'], 'deny');
+    assert.strictEqual(permCfg.permission.read['.env'], 'deny');
 
-    const attempts = store.listAttempts('run-opc-pass', projA.id);
-    assert.strictEqual(attempts.length, 1);
-    assert.strictEqual(attempts[0].workerType, 'opencode:github-copilot/claude-sonnet-4.6');
+    assert.strictEqual(passAttempts.length, 1);
+    assert.strictEqual(passAttempts[0].workerType, 'opencode:github-copilot/claude-sonnet-4.6');
     assert.strictEqual(store.getTaskScoped('task-opc-b', projB.id)?.status, 'todo');
 
     store.getRawDb().close();
@@ -326,6 +391,93 @@ describe('OpenCode CLI coding-worker adapter', () => {
         alive = false;
       }
       assert.strictEqual(alive, false, 'Cancelled child process tree should be terminated');
+    }
+  });
+
+  it('enforces OS sandbox boundaries and catches committed, ignored, symlink, and Git-metadata violations', async () => {
+    const adapter = new OpenCodeCodingWorkerAdapter('github-copilot/gpt-5.3-codex');
+    // Seed an existing protected file, .gitignore, and an outside sentinel secret under $HOME
+    fs.mkdirSync(path.join(repoA, 'secrets'), { recursive: true });
+    fs.writeFileSync(path.join(repoA, 'secrets/prod.key'), 'original-secret\n');
+    fs.writeFileSync(path.join(repoA, '.gitignore'), 'ignored.secret\n');
+    execFileSync('git', ['add', '.'], { cwd: repoA });
+    execFileSync('git', ['commit', '-m', 'add protected and gitignore'], { cwd: repoA });
+
+    const homeSentinelDir = fs.mkdtempSync(path.join(os.homedir(), '.dupond-opencode-sentinel-'));
+    const homeSentinelFile = path.join(homeSentinelDir, 'sentinel.secret');
+    fs.writeFileSync(homeSentinelFile, 'TOP_SECRET_SENTINEL_DATA');
+    const outsideWriteTarget = path.join(tmpDir, 'outside-worktree-write.txt');
+
+    const baseCtx = {
+      taskId: 't-adv',
+      taskKey: 'OPC-301',
+      taskTitle: 'Adversarial boundary checks',
+      taskDescription: 'Desc',
+      acceptanceCriteria: [],
+      worktreePath: repoA,
+      allowedPaths: ['impl.mjs', 'impl.test.mjs'],
+      protectedPaths: ['secrets', 'secrets/**'],
+      attemptNumber: 1,
+    };
+
+    try {
+      // 1. Attempt to read sentinel secret outside boundary -> blocked at OS level
+      process.env.FAKE_OPENCODE_MODE = 'attempt_read_outside';
+      process.env.FAKE_OPENCODE_SENTINEL_READ = homeSentinelFile;
+      const readRes = await adapter.execute(baseCtx);
+      assert.strictEqual(readRes.success, false);
+      assert.ok(readRes.errorMessage?.includes('Blocked read:'), `Expected OS read block, got: ${readRes.errorMessage}`);
+
+      // 2. Attempt to write outside the worktree -> blocked at OS level
+      process.env.FAKE_OPENCODE_MODE = 'attempt_write_outside';
+      process.env.FAKE_OPENCODE_OUTSIDE_WRITE = outsideWriteTarget;
+      const writeOutsideRes = await adapter.execute(baseCtx);
+      assert.strictEqual(writeOutsideRes.success, false);
+      assert.ok(writeOutsideRes.errorMessage?.includes('Blocked write:'), `Expected OS write block, got: ${writeOutsideRes.errorMessage}`);
+      assert.strictEqual(fs.existsSync(outsideWriteTarget), false, 'Outside file must not be created');
+
+      // 3. Attempt to write .git metadata -> blocked at OS level (gitReadOnly)
+      process.env.FAKE_OPENCODE_MODE = 'attempt_write_git';
+      const writeGitRes = await adapter.execute(baseCtx);
+      assert.strictEqual(writeGitRes.success, false);
+      assert.ok(writeGitRes.errorMessage?.includes('Blocked git write:'), `Expected OS .git write block, got: ${writeGitRes.errorMessage}`);
+      assert.strictEqual(fs.existsSync(path.join(repoA, '.git', 'evil-ref')), false);
+
+      // 4. Attempt to overwrite existing protected file -> blocked at OS level (denyWritePaths)
+      process.env.FAKE_OPENCODE_MODE = 'attempt_write_existing_protected';
+      const writeProtRes = await adapter.execute(baseCtx);
+      assert.strictEqual(writeProtRes.success, false);
+      assert.ok(writeProtRes.errorMessage?.includes('Blocked protected write:'), `Expected OS protected write block, got: ${writeProtRes.errorMessage}`);
+      assert.strictEqual(fs.readFileSync(path.join(repoA, 'secrets/prod.key'), 'utf-8'), 'original-secret\n');
+
+      // 5. Ignored file modification -> caught independently by Dupond baseline/post-execution check
+      process.env.FAKE_OPENCODE_MODE = 'ignored_violation';
+      await assert.rejects(() => adapter.execute(baseCtx), /Ignored path modified/i);
+      fs.rmSync(path.join(repoA, 'ignored.secret'), { force: true });
+
+      // 6. Symlink creation -> caught independently by Dupond baseline/post-execution check
+      process.env.FAKE_OPENCODE_MODE = 'symlink_violation';
+      await assert.rejects(() => adapter.execute(baseCtx), /Symlink creation/i);
+      fs.rmSync(path.join(repoA, 'bad-link'), { force: true });
+
+      // 7. Boundary violation on FAILED run -> still caught and throws DomainError
+      process.env.FAKE_OPENCODE_MODE = 'fail_with_violation';
+      await assert.rejects(() => adapter.execute(baseCtx), /Ignored path modified/i);
+      fs.rmSync(path.join(repoA, 'ignored.secret'), { force: true });
+
+      // 8. Independent repo accounting catches protected-file modification followed by a commit
+      const baselineBeforeCommit = captureRepoBaseline(repoA);
+      fs.writeFileSync(path.join(repoA, 'secrets/prod.key'), 'committed-hack\n');
+      execFileSync('git', ['add', 'secrets/prod.key'], { cwd: repoA });
+      execFileSync('git', ['commit', '-m', 'evil commit'], { cwd: repoA });
+      const committedInspection = inspectAndVerifyRepoChanges(repoA, baselineBeforeCommit, baseCtx);
+      assert.ok(committedInspection.filesModified.includes('secrets/prod.key'));
+      assert.ok(committedInspection.violations.some((v) => /Unauthorized HEAD commit change/i.test(v)));
+      assert.ok(committedInspection.violations.some((v) => /Boundary violation on "secrets\/prod\.key"/i.test(v)));
+    } finally {
+      delete process.env.FAKE_OPENCODE_SENTINEL_READ;
+      delete process.env.FAKE_OPENCODE_OUTSIDE_WRITE;
+      fs.rmSync(homeSentinelDir, { recursive: true, force: true });
     }
   });
 });
