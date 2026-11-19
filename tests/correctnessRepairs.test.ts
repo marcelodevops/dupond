@@ -4,15 +4,43 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, it } from 'vitest';
 import { TaskStore } from '../src/server/db/database';
 import { ProjectStore, ProjectApiError } from '../src/server/projects/projectStore';
 
 const TOKEN = 'correctness-repairs-test-token';
-const children: ChildProcess[] = [];
+const MAX_LOG_BYTES = 8 * 1024;
+const STARTUP_DEADLINE_MS = 15_000;
+const HEALTH_REQUEST_TIMEOUT_MS = 1_000;
+const SIGTERM_GRACE_MS = 1_500;
+const SIGKILL_GRACE_MS = 1_500;
+
+interface ManagedChildServer {
+  child: ChildProcess;
+  stdout: string;
+  stderr: string;
+  spawnError: Error | null;
+  exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
+  exitPromise: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+}
+
+const children: ManagedChildServer[] = [];
 const tempDirs: string[] = [];
+
+function appendBounded(current: string, chunk: Buffer | string): string {
+  const next = current + (typeof chunk === 'string' ? chunk : chunk.toString('utf-8'));
+  if (next.length <= MAX_LOG_BYTES) return next;
+  return next.slice(next.length - MAX_LOG_BYTES);
+}
+
+function sanitizeDiagnosticOutput(raw: string): string {
+  return raw
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+    .replace(/(API_KEY|TOKEN|SECRET|PASSWORD)=([^\s]+)/gi, '$1=[REDACTED]')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED]')
+    .replace(/sk-[0-9A-Za-z_-]{20,}/g, '[REDACTED]');
+}
 
 async function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -31,44 +59,246 @@ async function getFreePort(): Promise<number> {
   });
 }
 
-async function waitForServer(port: number): Promise<void> {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (response.ok) return;
-    } catch {
-      // Server still booting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`Timed out waiting for Dupond server on port ${port}`);
-}
-
-async function startServer(dbPath: string, statePath: string, port: number): Promise<void> {
-  const child = spawn(process.execPath, ['--import', 'tsx/esm', 'server.ts'], {
+function spawnManagedProcess(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv
+): ManagedChildServer {
+  const child = spawn(command, args, {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      NODE_ENV: 'production',
-      PORT: String(port),
-      DUPOND_API_KEY: TOKEN,
-      DUPOND_DB_PATH: dbPath,
-      DUPOND_STATE_FILE: statePath,
-    },
-    stdio: 'ignore',
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  children.push(child);
-  await waitForServer(port);
+
+  const entry: ManagedChildServer = {
+    child,
+    stdout: '',
+    stderr: '',
+    spawnError: null,
+    exitInfo: null,
+    exitPromise: Promise.resolve({ code: null, signal: null }),
+  };
+
+  // Register exit & error listeners immediately at spawn time so early exits are never missed
+  entry.exitPromise = new Promise((resolve) => {
+    child.once('exit', (code, signal) => {
+      entry.exitInfo = { code, signal };
+      resolve({ code, signal });
+    });
+    child.once('error', (err) => {
+      entry.spawnError = err;
+      if (!entry.exitInfo) {
+        entry.exitInfo = { code: child.exitCode, signal: child.signalCode };
+      }
+      resolve(entry.exitInfo);
+    });
+  });
+
+  child.stdout?.on('data', (chunk: Buffer) => {
+    entry.stdout = appendBounded(entry.stdout, chunk);
+  });
+  child.stderr?.on('data', (chunk: Buffer) => {
+    entry.stderr = appendBounded(entry.stderr, chunk);
+  });
+
+  children.push(entry);
+  return entry;
 }
 
-async function stopChildServers(): Promise<void> {
-  for (const child of children.splice(0)) {
-    if (!child.killed) child.kill('SIGTERM');
-    await once(child, 'exit').catch(() => undefined);
+function formatServerFailure(
+  reason: string,
+  port: number,
+  managed: ManagedChildServer,
+  lastHealthStatus: string,
+  attempts: number,
+  elapsedMs: number
+): string {
+  const stdout = sanitizeDiagnosticOutput(managed.stdout.trim()) || '(empty)';
+  const stderr = sanitizeDiagnosticOutput(managed.stderr.trim()) || '(empty)';
+  const exitSummary = managed.exitInfo
+    ? `code=${managed.exitInfo.code ?? 'null'}, signal=${managed.exitInfo.signal ?? 'null'}`
+    : 'still running';
+  const spawnErr = managed.spawnError ? managed.spawnError.message : 'none';
+  return [
+    `${reason} (port=${port}, elapsedMs=${elapsedMs}, attempts=${attempts}, lastHealth=${lastHealthStatus}, exit=[${exitSummary}], spawnError=${spawnErr})`,
+    `--- child stdout (tail) ---\n${stdout}`,
+    `--- child stderr (tail) ---\n${stderr}`,
+  ].join('\n');
+}
+
+async function waitForServer(
+  managed: ManagedChildServer,
+  port: number,
+  deadlineMs: number = STARTUP_DEADLINE_MS
+): Promise<void> {
+  const start = Date.now();
+  const deadline = start + deadlineMs;
+  let attempts = 0;
+  let lastHealthStatus = 'not-attempted';
+
+  while (Date.now() < deadline) {
+    if (managed.spawnError) {
+      throw new Error(
+        formatServerFailure(
+          'Dupond server failed to spawn',
+          port,
+          managed,
+          lastHealthStatus,
+          attempts,
+          Date.now() - start
+        )
+      );
+    }
+    if (managed.exitInfo || managed.child.exitCode !== null || managed.child.signalCode !== null) {
+      throw new Error(
+        formatServerFailure(
+          'Dupond server exited before becoming ready',
+          port,
+          managed,
+          lastHealthStatus,
+          attempts,
+          Date.now() - start
+        )
+      );
+    }
+
+    attempts += 1;
+    try {
+      const remainingMs = Math.max(100, deadline - Date.now());
+      const reqTimeoutMs = Math.min(HEALTH_REQUEST_TIMEOUT_MS, remainingMs);
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+        signal: AbortSignal.timeout(reqTimeoutMs),
+      });
+      lastHealthStatus = `HTTP ${response.status}`;
+      if (response.ok) return;
+    } catch (err: any) {
+      lastHealthStatus = err?.message ? String(err.message) : 'fetch-error';
+    }
+
+    if (managed.spawnError || managed.exitInfo || managed.child.exitCode !== null || managed.child.signalCode !== null) {
+      throw new Error(
+        formatServerFailure(
+          managed.spawnError ? 'Dupond server failed to spawn' : 'Dupond server exited before becoming ready',
+          port,
+          managed,
+          lastHealthStatus,
+          attempts,
+          Date.now() - start
+        )
+      );
+    }
+
+    const waitMs = Math.min(50, Math.max(0, deadline - Date.now()));
+    if (waitMs > 0) {
+      await Promise.race([
+        new Promise<void>((resolve) => setTimeout(resolve, waitMs)),
+        managed.exitPromise.then(() => undefined),
+      ]);
+    }
+  }
+
+  throw new Error(
+    formatServerFailure(
+      `Timed out waiting for Dupond server on port ${port} after ${deadlineMs}ms`,
+      port,
+      managed,
+      lastHealthStatus,
+      attempts,
+      Date.now() - start
+    )
+  );
+}
+
+async function startServer(
+  dbPath: string,
+  statePath: string,
+  port: number,
+  keyPath: string = path.join(path.dirname(dbPath), '.dupond_conn_key')
+): Promise<ManagedChildServer> {
+  const managed = spawnManagedProcess(process.execPath, ['--import', 'tsx/esm', 'server.ts'], {
+    ...process.env,
+    NODE_ENV: 'production',
+    PORT: String(port),
+    DUPOND_API_KEY: TOKEN,
+    DUPOND_DB_PATH: dbPath,
+    DUPOND_STATE_FILE: statePath,
+    DUPOND_CONN_KEY_PATH: keyPath,
+  });
+  await waitForServer(managed, port);
+  return managed;
+}
+
+function isChildTerminated(managed: ManagedChildServer): boolean {
+  return (
+    managed.exitInfo !== null ||
+    managed.child.exitCode !== null ||
+    managed.child.signalCode !== null
+  );
+}
+
+async function stopChildServers(options?: {
+  sigtermGraceMs?: number;
+  sigkillGraceMs?: number;
+}): Promise<void> {
+  const sigtermGraceMs = options?.sigtermGraceMs ?? SIGTERM_GRACE_MS;
+  const sigkillGraceMs = options?.sigkillGraceMs ?? SIGKILL_GRACE_MS;
+  const failures: string[] = [];
+
+  for (const managed of [...children]) {
+    const { child, exitPromise } = managed;
+    if (isChildTerminated(managed)) {
+      const idx = children.indexOf(managed);
+      if (idx !== -1) children.splice(idx, 1);
+      continue;
+    }
+
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // Child may have exited concurrently
+    }
+
+    await Promise.race([
+      exitPromise.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), sigtermGraceMs)),
+    ]);
+
+    if (!isChildTerminated(managed)) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // Ignore if already exited
+      }
+      await Promise.race([
+        exitPromise.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), sigkillGraceMs)),
+      ]);
+    }
+
+    if (isChildTerminated(managed)) {
+      const idx = children.indexOf(managed);
+      if (idx !== -1) children.splice(idx, 1);
+    } else {
+      // Retain tracking info in `children` when termination cannot be confirmed
+      const stdout = sanitizeDiagnosticOutput(managed.stdout.trim()) || '(empty)';
+      const stderr = sanitizeDiagnosticOutput(managed.stderr.trim()) || '(empty)';
+      failures.push(
+        `Failed to confirm termination of child pid=${child.pid ?? 'unknown'} after SIGTERM (${sigtermGraceMs}ms) and SIGKILL (${sigkillGraceMs}ms).\n--- child stdout (tail) ---\n${stdout}\n--- child stderr (tail) ---\n${stderr}`
+      );
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(failures.join('\n\n'));
   }
 }
 
 function cleanupTempDirs(): void {
+  if (children.length > 0) {
+    throw new Error(
+      `Refusing to delete ${tempDirs.length} temporary directory(s): ${children.length} child server(s) still have unconfirmed termination.`
+    );
+  }
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -189,7 +419,8 @@ describe('Dupond correctness repairs regression suite', () => {
     taskStore.updateRun(`run-${alpha.id}-2`, { status: 'failed', durationMs: 50 }, alpha.id);
 
     const port = await getFreePort();
-    await startServer(dbPath, statePath, port);
+    const keyPath = path.join(dir, '.dupond_conn_key');
+    await startServer(dbPath, statePath, port, keyPath);
     const uiResetResp = await fetch(`http://127.0.0.1:${port}/api/projects/${alpha.id}/reset`, {
       method: 'POST',
       headers: headers(alpha.id),
@@ -323,7 +554,8 @@ describe('Dupond correctness repairs regression suite', () => {
 
     // Verify via HTTP server across restart
     const port = await getFreePort();
-    await startServer(dbPath, statePath, port);
+    const keyPath = path.join(dir, '.dupond_conn_key');
+    await startServer(dbPath, statePath, port, keyPath);
     const stateResp = await fetch(`http://127.0.0.1:${port}/api/orchestrate/state`, {
       headers: headers(proj.id),
     });
@@ -392,7 +624,8 @@ describe('Dupond correctness repairs regression suite', () => {
     });
 
     const port = await getFreePort();
-    await startServer(dbPath, statePath, port);
+    const keyPath = path.join(dir, '.dupond_conn_key');
+    await startServer(dbPath, statePath, port, keyPath);
 
     // 1. Missing X-Dupond-Project-Id rejected with 400
     const missingCtx = await fetch(`http://127.0.0.1:${port}/api/runs/${alphaRun.id}`, {
@@ -454,7 +687,8 @@ describe('Dupond correctness repairs regression suite', () => {
     projectStore.saveProjectState(alpha.id, alphaState);
 
     const port = await getFreePort();
-    await startServer(dbPath, statePath, port);
+    const keyPath = path.join(dir, '.dupond_conn_key');
+    await startServer(dbPath, statePath, port, keyPath);
 
     const transResp = await fetch(`http://127.0.0.1:${port}/api/orchestrate/tasks/alpha-state-1/transition`, {
       method: 'POST',
@@ -654,5 +888,126 @@ describe('Dupond correctness repairs regression suite', () => {
     assert.deepStrictEqual((secondBoot as any).db.prepare('PRAGMA foreign_key_check').all(), []);
     assert.ok(secondBoot.getTaskScoped('LEG-1', 'default'));
     assert.ok(secondBoot.getTaskScoped('LEG-1', 'proj-2'));
+  });
+
+  it('Server harness: detects early child exit and spawn errors immediately with sanitized diagnostics', async () => {
+    const port = await getFreePort();
+    const earlyChild = spawnManagedProcess(
+      process.execPath,
+      [
+        '-e',
+        'console.log("starting up"); console.error("fatal crash TOKEN=super_secret_value"); process.exit(42);',
+      ],
+      process.env
+    );
+
+    const t0 = Date.now();
+    await assert.rejects(
+      () => waitForServer(earlyChild, port, 10_000),
+      (err: Error) => {
+        assert.ok(err.message.includes('exited before becoming ready'), err.message);
+        assert.ok(err.message.includes('code=42'), err.message);
+        assert.ok(err.message.includes('starting up'), err.message);
+        assert.ok(err.message.includes('TOKEN=[REDACTED]'), err.message);
+        assert.ok(!err.message.includes('super_secret_value'), 'Secret must be redacted');
+        return true;
+      }
+    );
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 3_000, `Expected immediate failure on early exit, took ${elapsed}ms`);
+
+    // Already-exited child must not hang stopChildServers()
+    const stopStart = Date.now();
+    await stopChildServers();
+    assert.ok(Date.now() - stopStart < 500, 'Teardown of already-exited child should be immediate');
+
+    // Non-existent executable triggers immediate spawn error diagnostics
+    const badSpawn = spawnManagedProcess('/nonexistent/dupond-missing-binary', [], process.env);
+    await assert.rejects(
+      () => waitForServer(badSpawn, port, 10_000),
+      /failed to spawn/i
+    );
+    await stopChildServers();
+  });
+
+  it('Server harness: escalates SIGTERM to SIGKILL on unresponsive child before cleaning temp storage', async () => {
+    const dir = makeTempDir('dupond-teardown-escalation-');
+    const markerFile = path.join(dir, 'alive.txt');
+    const stubbornChild = spawnManagedProcess(
+      process.execPath,
+      [
+        '-e',
+        'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "up"); setInterval(() => {}, 1000);',
+        markerFile,
+      ],
+      process.env
+    );
+
+    // Wait briefly until child has written markerFile and installed SIGTERM handler
+    for (let i = 0; i < 40 && !fs.existsSync(markerFile); i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(fs.existsSync(markerFile), 'Stubborn child should start and write marker');
+
+    const t0 = Date.now();
+    await stopChildServers();
+    const teardownMs = Date.now() - t0;
+    assert.ok(
+      stubbornChild.exitInfo !== null || stubbornChild.child.exitCode !== null || stubbornChild.child.signalCode !== null,
+      'Stubborn child must be terminated after SIGKILL escalation'
+    );
+    assert.ok(teardownMs < 4_000, `Expected bounded teardown, took ${teardownMs}ms`);
+
+    // Temp dir cleanup succeeds after child termination
+    cleanupTempDirs();
+    assert.strictEqual(fs.existsSync(dir), false);
+  });
+
+  it('Server harness: refuses temp cleanup, retains tracking, and fails with sanitized diagnostics on unconfirmed termination', async () => {
+    const dir = makeTempDir('dupond-unconfirmed-exit-');
+    const keepFile = path.join(dir, 'keep.txt');
+    fs.writeFileSync(keepFile, 'preserve-me');
+
+    const stubChild = {
+      pid: 999991,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    } as unknown as ChildProcess;
+
+    const tracked: ManagedChildServer = {
+      child: stubChild,
+      stdout: 'server log line\n',
+      stderr: 'stuck cleanup TOKEN=top_secret_abc\n',
+      spawnError: null,
+      exitInfo: null,
+      exitPromise: new Promise(() => {}),
+    };
+    children.push(tracked);
+
+    try {
+      await assert.rejects(
+        () => stopChildServers({ sigtermGraceMs: 20, sigkillGraceMs: 20 }),
+        (err: Error) => {
+          assert.ok(err.message.includes('Failed to confirm termination of child pid=999991'), err.message);
+          assert.ok(err.message.includes('TOKEN=[REDACTED]'), err.message);
+          assert.ok(!err.message.includes('top_secret_abc'), 'Secret must be redacted');
+          return true;
+        }
+      );
+
+      // Child tracking information is retained
+      assert.strictEqual(children.length, 1);
+      assert.strictEqual(children[0], tracked);
+
+      // Temporary storage cleanup is refused while child termination is unconfirmed
+      assert.throws(() => cleanupTempDirs(), /Refusing to delete .* unconfirmed termination/i);
+      assert.strictEqual(fs.existsSync(dir), true);
+      assert.strictEqual(fs.readFileSync(keepFile, 'utf-8'), 'preserve-me');
+    } finally {
+      // Release synthetic stub entry so afterEach can clean up the test's temp dir
+      const idx = children.indexOf(tracked);
+      if (idx !== -1) children.splice(idx, 1);
+    }
   });
 });
