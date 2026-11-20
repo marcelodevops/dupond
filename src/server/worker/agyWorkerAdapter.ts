@@ -306,26 +306,14 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
     const realWorktree = fs.realpathSync(context.worktreePath);
     const baseline = captureRepoBaseline(realWorktree);
     const prompt = buildAgyPrompt(context);
-    const sessionSettings = JSON.stringify({
-      mcpServers: {},
-      hooks: {},
-      extensions: [],
-      disableAllHooks: true,
-    });
-
     const args = [
-      '--print',
-      prompt,
-      '--output-format',
-      'json',
-      '--model',
-      this.model,
-      '--mode',
-      'auto',
+      `--print=${prompt}`,
+      '--output-format=json',
+      `--model=${this.model}`,
+      '--mode=auto',
       '--dangerously-skip-permissions',
       '--disable-slash-commands',
-      '--settings',
-      sessionSettings,
+      '--settings={}',
     ];
 
     logs.push(`[agy] Executing non-interactive coding run with model "${this.model}" in isolated sandbox`);

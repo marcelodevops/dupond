@@ -234,11 +234,10 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     assert.strictEqual(captured.hasTokenSeed, true);
     assert.strictEqual(captured.oldpwd, null);
     assert.notStrictEqual(captured.home, os.homedir());
-    assert.ok(captured.argv.includes('--print'));
-    assert.ok(captured.argv.includes('--output-format'));
-    assert.ok(captured.argv.includes('json'));
+    assert.ok(captured.argv.some((a: string) => a.startsWith('--print=')));
+    assert.ok(captured.argv.includes('--output-format=json'));
     assert.ok(captured.argv.includes('--disable-slash-commands'));
-    assert.ok(captured.argv.includes('--settings'));
+    assert.ok(captured.argv.includes('--settings={}'));
 
     // Reset repoDir before RepairCoordinator run
     execFileSync('git', ['checkout', '--', 'src/feature.ts'], { cwd: repoDir });
