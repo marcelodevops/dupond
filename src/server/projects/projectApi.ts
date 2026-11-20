@@ -370,9 +370,9 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
     }
   });
 
-  router.get('/workers/agy/auth/status', (req: Request, res: Response) => {
+  router.get('/workers/agy/auth/status', async (req: Request, res: Response) => {
     try {
-      res.json(defaultAgyAuthManager.getStatus(req.headers.authorization));
+      res.json(await defaultAgyAuthManager.getStatus(req.headers.authorization));
     } catch (err) {
       fail(res, err);
     }

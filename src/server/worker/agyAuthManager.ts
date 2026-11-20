@@ -127,39 +127,168 @@ export function probeAgyVersion(binPath: string): string | null {
   }
 }
 
-/**
- * Non-inference check: lists available models using ONLY the dedicated profile directory.
- */
-export function probeAgyProfileModels(profileDir: string, binPath?: string | null): {
+export interface ProbeAgyModelsOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface ProbeAgyModelsResult {
   authenticated: boolean;
   models: string[];
   error?: string;
-} {
+  aborted?: boolean;
+  timedOut?: boolean;
+}
+
+/**
+ * Non-inference check: lists available models using ONLY the dedicated profile directory.
+ * Executes asynchronously with bounded timeout, cancellation propagation, and process-tree reaping.
+ */
+export function probeAgyProfileModels(
+  profileDir: string,
+  binPath?: string | null,
+  options?: ProbeAgyModelsOptions,
+): Promise<ProbeAgyModelsResult> {
   const exe = binPath ?? resolveAgyExecutable();
   if (!exe) {
-    return { authenticated: false, models: [], error: 'Antigravity CLI (agy) executable not found.' };
-  }
-  try {
-    const out = execFileSync(exe, ['models'], {
-      env: buildIsolatedAgyEnv(profileDir),
-      encoding: 'utf-8',
-      timeout: PROBE_TIMEOUT_MS,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const models = out
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => /^[a-z0-9][a-z0-9._-]+\s+\S+/.test(l))
-      .map((l) => l.split(/\s+/)[0]);
-    return { authenticated: models.length > 0, models };
-  } catch (err: any) {
-    const msg = String(err?.stderr || err?.message || 'Not signed in');
-    return {
+    return Promise.resolve({
       authenticated: false,
       models: [],
-      error: msg.includes('Please sign in') ? 'Dedicated Antigravity profile is not signed in.' : 'Failed to list models.',
-    };
+      error: 'Antigravity CLI (agy) executable not found.',
+    });
   }
+
+  if (options?.signal?.aborted) {
+    return Promise.resolve({
+      authenticated: false,
+      models: [],
+      error: 'Model probe cancelled.',
+      aborted: true,
+    });
+  }
+
+  const timeoutMs = Math.max(1, options?.timeoutMs ?? PROBE_TIMEOUT_MS);
+
+  return new Promise<ProbeAgyModelsResult>((resolve) => {
+    const child = spawn(exe, ['models'], {
+      env: buildIsolatedAgyEnv(profileDir),
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    const maxBytes = 256 * 1024;
+    let settled = false;
+    let aborted = false;
+    let timedOut = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let killEscalationTimer: NodeJS.Timeout | undefined;
+
+    const signalProbeGroup = (sig: NodeJS.Signals) => {
+      if (child.pid && child.pid > 0) {
+        try {
+          process.kill(-child.pid, sig);
+          return;
+        } catch {
+          // Fall through to direct kill if not process-group leader
+        }
+      }
+      try {
+        child.kill(sig);
+      } catch {
+        // Ignore ESRCH if already exited
+      }
+    };
+
+    const cleanup = () => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killEscalationTimer) clearTimeout(killEscalationTimer);
+      if (options?.signal) {
+        options.signal.removeEventListener('abort', onAbort);
+      }
+    };
+
+    const stopAndReap = (reason: 'abort' | 'timeout') => {
+      if (settled) return;
+      if (reason === 'abort') aborted = true;
+      else timedOut = true;
+
+      signalProbeGroup('SIGTERM');
+      if (!killEscalationTimer) {
+        killEscalationTimer = setTimeout(() => {
+          signalProbeGroup('SIGKILL');
+        }, 150);
+      }
+    };
+
+    const onAbort = () => {
+      stopAndReap('abort');
+    };
+
+    if (options?.signal) {
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    timeoutTimer = setTimeout(() => {
+      stopAndReap('timeout');
+    }, timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (stdout.length < maxBytes) {
+        stdout += chunk.toString('utf-8').slice(0, maxBytes - stdout.length);
+      }
+    });
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < maxBytes) {
+        stderr += chunk.toString('utf-8').slice(0, maxBytes - stderr.length);
+      }
+    });
+
+    child.once('error', () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({
+        authenticated: false,
+        models: [],
+        error: aborted ? 'Model probe cancelled.' : timedOut ? 'Model probe timed out.' : 'Failed to list models.',
+        ...(aborted ? { aborted: true } : {}),
+        ...(timedOut ? { timedOut: true } : {}),
+      });
+    });
+
+    child.once('close', (code) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+
+      if (aborted) {
+        resolve({ authenticated: false, models: [], error: 'Model probe cancelled.', aborted: true });
+        return;
+      }
+      if (timedOut) {
+        resolve({ authenticated: false, models: [], error: 'Model probe timed out.', timedOut: true });
+        return;
+      }
+      if (code === 0) {
+        const models = stdout
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => /^[a-z0-9][a-z0-9._-]+\s+\S+/.test(l))
+          .map((l) => l.split(/\s+/)[0]);
+        resolve({ authenticated: models.length > 0, models });
+        return;
+      }
+      const msg = stderr || 'Not signed in';
+      resolve({
+        authenticated: false,
+        models: [],
+        error: msg.includes('Please sign in') ? 'Dedicated Antigravity profile is not signed in.' : 'Failed to list models.',
+      });
+    });
+  });
 }
 
 /**
@@ -274,6 +403,7 @@ interface PendingAgyLoginSession {
   exited: boolean;
   exitPromise: Promise<void>;
   expiryTimer: NodeJS.Timeout;
+  probeAbortController: AbortController;
 }
 
 export interface UnconfirmedAgyProcessRecord {
@@ -419,10 +549,19 @@ export class AgyAuthSessionManager {
     const deadline = Date.now() + graceMs;
     while (Date.now() < deadline) {
       if (this.isSessionProcessesGone(session)) return true;
-      await Promise.race([
-        session.exitPromise,
-        new Promise<void>((r) => setTimeout(r, 40)),
-      ]);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const stepMs = Math.min(40, remainingMs);
+      if (!session.exited) {
+        await Promise.race([
+          session.exitPromise,
+          new Promise<void>((r) => setTimeout(r, stepMs)),
+        ]);
+        if (this.isSessionProcessesGone(session)) return true;
+      }
+      const afterRaceRemaining = deadline - Date.now();
+      if (afterRaceRemaining <= 0) break;
+      await new Promise<void>((r) => setTimeout(r, Math.min(40, afterRaceRemaining)));
     }
     return this.isSessionProcessesGone(session);
   }
@@ -480,15 +619,16 @@ export class AgyAuthSessionManager {
     ) {
       session.state = 'expired';
       session.error = 'Pending Antigravity login session expired. Start a new login session.';
+      session.probeAbortController.abort();
       void this.terminateSessionProcess(session).catch(() => {});
     }
   }
 
-  public getStatus(operatorToken?: string): AgyAuthStatusResponse {
+  public async getStatus(operatorToken?: string): Promise<AgyAuthStatusResponse> {
     const exe = resolveAgyExecutable();
     const version = exe ? probeAgyVersion(exe) : null;
     const profileDir = resolveAgyProfileDir();
-    const profileCheck = probeAgyProfileModels(profileDir, exe);
+    const profileCheck = await probeAgyProfileModels(profileDir, exe);
 
     let sessionView: AgyAuthStatusResponse['session'] = null;
     if (this.activeSession) {
@@ -549,6 +689,7 @@ export class AgyAuthSessionManager {
         if (isActive) {
           prev.state = 'cancelled';
           prev.error = 'Superseded by a new login session.';
+          prev.probeAbortController.abort();
         }
         await this.terminateSessionProcess(prev);
         this.activeSession = null;
@@ -587,6 +728,7 @@ export class AgyAuthSessionManager {
         expiryTimer: setTimeout(() => {
           this.expireIfElapsed(session);
         }, ttlMs),
+        probeAbortController: new AbortController(),
       };
       session.expiryTimer.unref();
       this.activeSession = session;
@@ -679,73 +821,156 @@ export class AgyAuthSessionManager {
     });
   }
 
+  private async waitForAbortOrDelay(ms: number, signal: AbortSignal): Promise<void> {
+    if (ms <= 0 || signal.aborted) return;
+    await new Promise<void>((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
   public async submitCode(
     operatorToken: string | undefined,
     loginSessionId: string,
     rawCode: unknown,
   ): Promise<{ state: AgyAuthSessionState; authenticated: boolean; modelsCount: number; error?: string }> {
     const code = validateSubmittedAuthCode(rawCode);
-    const session = this.activeSession;
-    if (!session || session.loginSessionId !== loginSessionId) {
-      throw new AgyAuthError(
-        404,
-        'LOGIN_SESSION_NOT_FOUND',
-        'Pending Antigravity login session was not found or was invalidated by a server restart. Start a new login.',
-      );
-    }
-
-    if (session.operatorBindingHash !== hashOperatorBinding(operatorToken)) {
-      throw new AgyAuthError(
-        403,
-        'SESSION_OWNERSHIP_MISMATCH',
-        'Login session belongs to a different authenticated operator session.',
-      );
-    }
-
-    this.expireIfElapsed(session);
-    if (session.state === 'expired') {
-      throw new AgyAuthError(410, 'LOGIN_SESSION_EXPIRED', session.error || 'Login session expired.');
-    }
-    if (session.state !== 'awaiting_code') {
-      throw new AgyAuthError(
-        409,
-        'LOGIN_SESSION_NOT_AWAITING_CODE',
-        `Cannot submit code while login session is in state "${session.state}".`,
-      );
-    }
-
-    // Lock session immediately to prevent concurrent/replay submissions and suppress PTY echo capture
-    session.state = 'submitting';
-    session.suppressPtyCapture = true;
-    session.ptyBuffer = '';
-
-    // Never retain raw PTY chunks (which may contain echoed code); record only a fixed failure category
     let exchangeFailureCategory: 'invalid_grant' | 'exchange_failed' | null = null;
-    const feedbackListener = (chunk: Buffer) => {
-      const clean = stripAnsiAndControls(chunk.toString('utf-8'));
-      if (/invalid_grant/i.test(clean)) {
-        exchangeFailureCategory = 'invalid_grant';
-      } else if (/Got an error:|token exchange failed|OAuth setup failed/i.test(clean)) {
-        exchangeFailureCategory = 'exchange_failed';
-      }
-    };
-    session.child.stdout?.on('data', feedbackListener);
-    session.child.stderr?.on('data', feedbackListener);
+    let feedbackListener: ((chunk: Buffer) => void) | undefined;
 
-    let localCode = code;
-    try {
-      session.child.stdin?.write(`${localCode}\r`);
-    } finally {
-      localCode = '';
-    }
+    // Phase 1: serialize initial state validation, lock, and PTY code write
+    const session = await this.runSerialized(async () => {
+      const active = this.activeSession;
+      if (!active || active.loginSessionId !== loginSessionId) {
+        throw new AgyAuthError(
+          404,
+          'LOGIN_SESSION_NOT_FOUND',
+          'Pending Antigravity login session was not found or was invalidated by a server restart. Start a new login.',
+        );
+      }
+
+      if (active.operatorBindingHash !== hashOperatorBinding(operatorToken)) {
+        throw new AgyAuthError(
+          403,
+          'SESSION_OWNERSHIP_MISMATCH',
+          'Login session belongs to a different authenticated operator session.',
+        );
+      }
+
+      this.expireIfElapsed(active);
+      if (active.state === 'expired') {
+        throw new AgyAuthError(410, 'LOGIN_SESSION_EXPIRED', active.error || 'Login session expired.');
+      }
+      if (active.state !== 'awaiting_code') {
+        throw new AgyAuthError(
+          409,
+          'LOGIN_SESSION_NOT_AWAITING_CODE',
+          `Cannot submit code while login session is in state "${active.state}".`,
+        );
+      }
+
+      // Lock session immediately to prevent concurrent/replay submissions and suppress PTY echo capture
+      active.state = 'submitting';
+      active.suppressPtyCapture = true;
+      active.ptyBuffer = '';
+
+      // Never retain raw PTY chunks (which may contain echoed code); record only a fixed failure category
+      feedbackListener = (chunk: Buffer) => {
+        const clean = stripAnsiAndControls(chunk.toString('utf-8'));
+        if (/invalid_grant/i.test(clean)) {
+          exchangeFailureCategory = 'invalid_grant';
+        } else if (/Got an error:|token exchange failed|OAuth setup failed/i.test(clean)) {
+          exchangeFailureCategory = 'exchange_failed';
+        }
+      };
+      active.child.stdout?.on('data', feedbackListener);
+      active.child.stderr?.on('data', feedbackListener);
+
+      let localCode = code;
+      try {
+        active.child.stdin?.write(`${localCode}\r`);
+      } finally {
+        localCode = '';
+      }
+
+      return active;
+    });
 
     try {
       const submitDeadline = Math.min(session.expiresAt, Date.now() + this.getSubmitTimeoutMs());
       let authenticated = false;
       let modelsCount = 0;
 
+      // Phase 2: async bounded verification outside opQueue so cancel/supersede can interrupt active probes
       while (Date.now() < submitDeadline) {
-        if (this.activeSession !== session || session.state !== 'submitting') {
+        if (
+          this.activeSession !== session ||
+          session.state !== 'submitting' ||
+          session.probeAbortController.signal.aborted
+        ) {
+          break;
+        }
+
+        if (exchangeFailureCategory) {
+          break;
+        }
+
+        const remainingMs = submitDeadline - Date.now();
+        if (remainingMs <= 0) {
+          break;
+        }
+
+        const check = await probeAgyProfileModels(session.profileDir, session.binPath, {
+          timeoutMs: remainingMs,
+          signal: session.probeAbortController.signal,
+        });
+
+        // Re-check session identity and state after async probe in case cancel/supersede/expiry ran
+        if (
+          this.activeSession !== session ||
+          session.state !== 'submitting' ||
+          session.probeAbortController.signal.aborted
+        ) {
+          break;
+        }
+
+        if (check.authenticated) {
+          authenticated = true;
+          modelsCount = check.models.length;
+          break;
+        }
+
+        if (session.exited) {
+          break;
+        }
+
+        const sleepMs = Math.min(150, Math.max(0, submitDeadline - Date.now()));
+        await this.waitForAbortOrDelay(sleepMs, session.probeAbortController.signal);
+      }
+
+      // Phase 3: serialize final state commit and process teardown
+      return await this.runSerialized(async () => {
+        if (feedbackListener) {
+          session.child.stdout?.off('data', feedbackListener);
+          session.child.stderr?.off('data', feedbackListener);
+          feedbackListener = undefined;
+        }
+
+        if (
+          this.activeSession !== session ||
+          session.state !== 'submitting' ||
+          session.probeAbortController.signal.aborted
+        ) {
+          if (this.activeSession === session) {
+            await this.terminateSessionProcess(session).catch(() => {});
+          }
           return {
             state: session.state,
             authenticated: false,
@@ -760,62 +985,45 @@ export class AgyAuthSessionManager {
             exchangeFailureCategory === 'invalid_grant'
               ? 'Antigravity OAuth rejected the authorization code (invalid_grant). Start a new login.'
               : 'Antigravity OAuth token exchange failed. Verify the authorization code and start a new login.';
+          await this.terminateSessionProcess(session);
           return { state: 'failed', authenticated: false, modelsCount: 0, error: session.error };
         }
 
-        const check = probeAgyProfileModels(session.profileDir, session.binPath);
-        // Re-check session identity and state after synchronous probe in case cancel/supersede ran
-        if (this.activeSession !== session || session.state !== 'submitting') {
-          return {
-            state: session.state,
-            authenticated: false,
-            modelsCount: 0,
-            error: session.error || `Login session ${session.state} during submission.`,
-          };
+        if (authenticated && Date.now() < session.expiresAt) {
+          session.state = 'completed';
+          await this.terminateSessionProcess(session);
+          return { state: 'completed', authenticated: true, modelsCount };
         }
 
-        if (check.authenticated) {
-          authenticated = true;
-          modelsCount = check.models.length;
-          break;
+        if (Date.now() >= session.expiresAt) {
+          session.state = 'expired';
+          session.error = 'Pending Antigravity login session expired during code submission.';
+        } else {
+          session.state = 'failed';
+          session.error = 'Antigravity CLI did not confirm authentication within the submission deadline.';
         }
-
-        if (session.exited) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 150));
-      }
-
-      if (this.activeSession !== session || session.state !== 'submitting') {
-        return {
-          state: session.state,
-          authenticated: false,
-          modelsCount: 0,
-          error: session.error || `Login session ${session.state} during submission.`,
-        };
-      }
-
-      if (authenticated) {
-        session.state = 'completed';
-        return { state: 'completed', authenticated: true, modelsCount };
-      }
-
-      if (Date.now() >= session.expiresAt) {
-        session.state = 'expired';
-        session.error = 'Pending Antigravity login session expired during code submission.';
-      } else {
-        session.state = 'failed';
-        session.error = 'Antigravity CLI did not confirm authentication within the submission deadline.';
-      }
-      return { state: session.state, authenticated: false, modelsCount: 0, error: session.error };
+        await this.terminateSessionProcess(session);
+        return { state: session.state, authenticated: false, modelsCount: 0, error: session.error };
+      });
     } finally {
-      session.child.stdout?.off('data', feedbackListener);
-      session.child.stderr?.off('data', feedbackListener);
-      await this.terminateSessionProcess(session);
+      if (feedbackListener) {
+        session.child.stdout?.off('data', feedbackListener);
+        session.child.stderr?.off('data', feedbackListener);
+      }
     }
   }
 
   public async cancelLogin(operatorToken?: string, loginSessionId?: string): Promise<void> {
+    // Interrupt any active model probe immediately if the caller is authorized
+    const snapshot = this.activeSession;
+    if (
+      snapshot &&
+      (!loginSessionId || snapshot.loginSessionId === loginSessionId) &&
+      snapshot.operatorBindingHash === hashOperatorBinding(operatorToken)
+    ) {
+      snapshot.probeAbortController.abort();
+    }
+
     return this.runSerialized(async () => {
       const session = this.activeSession;
       if (!session) return;
@@ -825,6 +1033,7 @@ export class AgyAuthSessionManager {
       if (session.operatorBindingHash !== hashOperatorBinding(operatorToken)) {
         throw new AgyAuthError(403, 'SESSION_OWNERSHIP_MISMATCH', 'Login session belongs to a different operator.');
       }
+      session.probeAbortController.abort();
       session.state = 'cancelled';
       session.error = 'Login cancelled by operator.';
       await this.terminateSessionProcess(session);
