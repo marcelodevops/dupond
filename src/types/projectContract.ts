@@ -235,6 +235,8 @@ export interface GeminiCliWorkerStatus {
   version: string | null;
   supportedVersion: boolean;
   authReady: boolean;
+  authenticationStatus?: 'unverified';
+  modelAccess?: 'unverified';
   authMethod: 'oauth-personal' | 'vertex-ai' | 'adc' | 'none';
   models: string[];
   defaultModel: string;
