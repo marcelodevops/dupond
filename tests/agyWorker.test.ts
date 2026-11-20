@@ -207,7 +207,9 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
       attemptNumber: 1,
     });
     assert.strictEqual(probeExec.success, true);
-    const jsonLogLine = probeExec.logs.find((l) => l.trim().startsWith('{'))!;
+    const jsonLogLine = probeExec.logs
+      .flatMap((l) => l.split(/\r?\n/))
+      .find((l) => l.trim().startsWith('{'))!;
     const captured = JSON.parse(jsonLogLine).captured;
     assert.strictEqual(captured.hasDupondKey, false);
     assert.strictEqual(captured.hasGeminiKey, false);
