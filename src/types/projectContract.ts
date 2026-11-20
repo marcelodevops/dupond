@@ -229,18 +229,34 @@ export interface OpenCodeWorkerStatus {
   error?: string;
 }
 
-export interface GeminiCliWorkerStatus {
-  available: boolean;
+export type AgyAuthSessionState =
+  | 'idle'
+  | 'starting'
+  | 'awaiting_code'
+  | 'submitting'
+  | 'completed'
+  | 'cancelled'
+  | 'expired'
+  | 'failed';
+
+export interface AgyAuthSessionInfo {
+  loginSessionId: string;
+  state: AgyAuthSessionState;
+  authUrl?: string;
+  expiresAt?: string;
+  error?: string;
+}
+
+export interface AgyAuthStatus {
+  cliAvailable: boolean;
   executablePath: string | null;
   version: string | null;
-  supportedVersion: boolean;
-  authReady: boolean;
-  authenticationStatus?: 'unverified';
-  modelAccess?: 'unverified';
-  authMethod: 'oauth-personal' | 'vertex-ai' | 'adc' | 'none';
-  models: string[];
-  defaultModel: string;
+  profileAuthenticated: boolean;
+  availableModelsCount: number;
+  models?: string[];
+  defaultModel?: string;
   error?: string;
+  session: AgyAuthSessionInfo | null;
 }
 
 export interface PlanningReadiness {

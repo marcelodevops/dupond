@@ -30,7 +30,8 @@ import {
   OpenAICredentialStatus,
   OpenAITestResult,
   OpenCodeWorkerStatus,
-  GeminiCliWorkerStatus,
+  AgyAuthStatus,
+  AgyAuthSessionInfo,
   ProjectSourcePlan,
   ParsePlanRequest,
   AdoptPlanRequest,
@@ -429,13 +430,46 @@ export const projectApi = {
     );
   },
 
-  /**
-   * Probe local Gemini CLI availability, version, and auth readiness (read-only metadata, never returns secrets)
-   */
-  async getGeminiCliWorkerStatus(signal?: AbortSignal): Promise<GeminiCliWorkerStatus> {
-    return callProjectApi<GeminiCliWorkerStatus>(
-      '/api/workers/gemini-cli/status',
+  async getAgyAuthStatus(signal?: AbortSignal): Promise<AgyAuthStatus> {
+    return callProjectApi<AgyAuthStatus>(
+      '/api/workers/agy/auth/status',
       { method: 'GET' },
+      signal
+    );
+  },
+
+  async startAgyAuth(signal?: AbortSignal): Promise<{ session: AgyAuthSessionInfo | null }> {
+    return callProjectApi<{ session: AgyAuthSessionInfo | null }>(
+      '/api/workers/agy/auth/start',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      signal
+    );
+  },
+
+  async submitAgyAuthCode(
+    loginSessionId: string,
+    code: string,
+    signal?: AbortSignal
+  ): Promise<{ state: string; authenticated: boolean; modelsCount: number; error?: string }> {
+    return callProjectApi<{ state: string; authenticated: boolean; modelsCount: number; error?: string }>(
+      '/api/workers/agy/auth/submit',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loginSessionId, code }),
+      },
+      signal
+    );
+  },
+
+  async cancelAgyAuth(loginSessionId?: string, signal?: AbortSignal): Promise<{ ok: boolean }> {
+    return callProjectApi<{ ok: boolean }>(
+      '/api/workers/agy/auth/cancel',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginSessionId ? { loginSessionId } : {}),
+      },
       signal
     );
   },

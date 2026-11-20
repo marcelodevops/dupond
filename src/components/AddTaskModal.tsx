@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Task, Agent, Epic, Priority } from '../types';
+import { projectApi } from '../lib/projectApi';
+import type { AgyAuthStatus } from '../types/projectContract';
 import { Plus, X } from 'lucide-react';
 import { AgentAvatar } from './AgentAvatar';
 
@@ -10,6 +12,7 @@ interface AddTaskModalProps {
   agents: Agent[];
   epics: Epic[];
   existingTasksCount: number;
+  onOpenAppSettings?: () => void;
 }
 
 export const AddTaskModal: React.FC<AddTaskModalProps> = ({
@@ -19,18 +22,54 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
   agents,
   epics,
   existingTasksCount,
+  onOpenAppSettings,
 }) => {
-  if (!isOpen) return null;
-
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [epicId, setEpicId] = useState(epics[0]?.id || 'epic-core');
   const [priority, setPriority] = useState<Priority>('medium');
   const [assignedAgentId, setAssignedAgentId] = useState(agents[0]?.id || 'agent-arch');
-  const [workerProvider, setWorkerProvider] = useState<'gemini' | 'openai' | 'opencode' | 'gemini-cli'>('gemini');
+  const [workerProvider, setWorkerProvider] = useState<'gemini' | 'openai' | 'opencode' | 'agy'>('gemini');
   const [workerModel, setWorkerModel] = useState('gemini-3.8-flash');
+  const [agyStatus, setAgyStatus] = useState<AgyAuthStatus | null>(null);
+  const [agyCustomModelMode, setAgyCustomModelMode] = useState(false);
   const [estimatedHours, setEstimatedHours] = useState(8);
   const [tagsInput, setTagsInput] = useState('Core, Architecture');
+
+  useEffect(() => {
+    if (!isOpen || workerProvider !== 'agy') return;
+    let cancelled = false;
+    projectApi
+      .getAgyAuthStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setAgyStatus(status);
+          if (status.defaultModel && !agyCustomModelMode && workerModel === 'gemini-3.8-flash-medium' && status.models?.length) {
+            setWorkerModel(status.models[0]);
+          }
+        }
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setAgyStatus({
+            cliAvailable: false,
+            executablePath: null,
+            version: null,
+            profileAuthenticated: false,
+            availableModelsCount: 0,
+            models: [],
+            defaultModel: 'gemini-3.8-flash-medium',
+            error: err?.message || 'Failed to check Antigravity CLI availability.',
+            session: null,
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, workerProvider]);
+
+  if (!isOpen) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -197,15 +236,17 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
                 Coding Worker Provider
               </label>
               <select
+                data-testid="add-task-worker-provider-select"
                 value={workerProvider}
                 onChange={(e) => {
-                  const prov = e.target.value as 'gemini' | 'openai' | 'opencode' | 'gemini-cli';
+                  const prov = e.target.value as 'gemini' | 'openai' | 'opencode' | 'agy';
                   setWorkerProvider(prov);
+                  setAgyCustomModelMode(false);
                   setWorkerModel(
                     prov === 'gemini'
                       ? 'gemini-3.8-flash'
-                      : prov === 'gemini-cli'
-                        ? 'gemini-2.5-flash'
+                      : prov === 'agy'
+                        ? agyStatus?.models?.[0] || agyStatus?.defaultModel || 'gemini-3.8-flash-medium'
                         : prov === 'opencode'
                           ? 'github-copilot/gpt-5.3-codex'
                           : 'gpt-4o-mini',
@@ -214,7 +255,7 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
                 className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
               >
                 <option value="gemini">Google Gemini</option>
-                <option value="gemini-cli">Gemini CLI</option>
+                <option value="agy">Antigravity CLI (Agy)</option>
                 <option value="openai">OpenAI</option>
                 <option value="opencode">OpenCode CLI</option>
               </select>
@@ -232,16 +273,50 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
                   placeholder="github-copilot/gpt-5.3-codex"
                   className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 font-mono"
                 />
-              ) : workerProvider === 'gemini-cli' ? (
-                <select
-                  value={workerModel}
-                  onChange={(e) => setWorkerModel(e.target.value)}
-                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
-                >
-                  <option value="gemini-2.5-flash">gemini-2.5-flash (Recommended)</option>
-                  <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-                </select>
+              ) : workerProvider === 'agy' ? (
+                <div className="space-y-1.5">
+                  {(() => {
+                    const presets = agyStatus?.models?.length
+                      ? agyStatus.models
+                      : [agyStatus?.defaultModel || 'gemini-3.8-flash-medium'];
+                    const presetList = Array.from(new Set(presets));
+                    const isCustom = agyCustomModelMode || !presetList.includes(workerModel);
+                    return (
+                      <>
+                        <select
+                          data-testid="add-task-agy-model-select"
+                          value={isCustom ? '__custom__' : workerModel}
+                          onChange={(e) => {
+                            if (e.target.value === '__custom__') {
+                              setAgyCustomModelMode(true);
+                            } else {
+                              setAgyCustomModelMode(false);
+                              setWorkerModel(e.target.value);
+                            }
+                          }}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                        >
+                          {presetList.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                          <option value="__custom__">Custom model...</option>
+                        </select>
+                        {isCustom && (
+                          <input
+                            type="text"
+                            data-testid="add-task-agy-custom-model-input"
+                            value={workerModel}
+                            onChange={(e) => setWorkerModel(e.target.value)}
+                            placeholder="gemini-3.8-flash-medium"
+                            className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-xs text-white font-mono"
+                          />
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
               ) : (
                 <select
                   value={workerModel}
@@ -266,6 +341,30 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
               )}
             </div>
           </div>
+
+          {workerProvider === 'agy' && agyStatus && (!agyStatus.cliAvailable || !agyStatus.profileAuthenticated) && (
+            <div
+              data-testid="add-task-agy-readiness-warning"
+              className="p-2.5 rounded-lg border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2"
+            >
+              <span>
+                {agyStatus.error || 'Dedicated Antigravity profile is not authenticated. Connect Antigravity CLI before executing.'}
+              </span>
+              {onOpenAppSettings && (
+                <button
+                  type="button"
+                  data-testid="add-task-open-app-settings-btn"
+                  onClick={() => {
+                    onClose();
+                    onOpenAppSettings();
+                  }}
+                  className="px-2 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-semibold"
+                >
+                  Open Application Settings
+                </button>
+              )}
+            </div>
+          )}
 
           <div>
             <label className="text-xs font-semibold text-slate-300 block mb-1">

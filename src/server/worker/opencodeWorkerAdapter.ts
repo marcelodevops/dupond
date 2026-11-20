@@ -166,7 +166,7 @@ function collectOpenCodeAuthSeedFiles(): Array<{ sourcePath: string; targetRelTo
   return [];
 }
 
-function collectExtraReadPaths(binPath: string): string[] {
+export function collectExtraReadPaths(binPath: string): string[] {
   const candidates = new Set<string>();
   const addPathAndParent = (p: string) => {
     try {

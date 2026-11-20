@@ -1235,6 +1235,7 @@ function AppWorkspace() {
         agents={agents}
         epics={epics}
         existingTasksCount={tasks.length}
+        onOpenAppSettings={() => setIsAppSettingsModalOpen(true)}
       />
 
       {/* Project Wizard Modal */}
