@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   AgyAuthError,
   AgyAuthSessionManager,
@@ -31,13 +31,24 @@ if (args.includes('--version')) {
 }
 
 if (args[0] === 'models') {
-  if (fs.existsSync(tokenFile)) {
-    console.log('gemini-4-neon-high              Gemini 4 Neon (High)');
-    console.log('gemini-3.8-flash-medium         Gemini 3.8 Flash (Medium)');
-    process.exit(0);
+  if (process.env.FAKE_AGY_MODELS_PID_OUT) {
+    fs.writeFileSync(process.env.FAKE_AGY_MODELS_PID_OUT, String(process.pid));
   }
-  console.error('Error: Please sign in to view available models.');
-  process.exit(1);
+  const finishModels = () => {
+    if (fs.existsSync(tokenFile)) {
+      console.log('gemini-4-neon-high              Gemini 4 Neon (High)');
+      console.log('gemini-3.8-flash-medium         Gemini 3.8 Flash (Medium)');
+      process.exit(0);
+    }
+    console.error('Error: Please sign in to view available models.');
+    process.exit(1);
+  };
+  const hangMs = Number(process.env.FAKE_AGY_MODELS_HANG_MS || 0);
+  if (hangMs > 0) {
+    setTimeout(finishModels, hangMs);
+  } else {
+    finishModels();
+  }
 }
 
 // Login-only no-args TUI simulation
@@ -121,6 +132,8 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
       DUPOND_AGY_KILL_GRACE_MS: process.env.DUPOND_AGY_KILL_GRACE_MS,
       FAKE_AGY_MODE: process.env.FAKE_AGY_MODE,
       FAKE_AGY_DESCENDANT_PID_OUT: process.env.FAKE_AGY_DESCENDANT_PID_OUT,
+      FAKE_AGY_MODELS_HANG_MS: process.env.FAKE_AGY_MODELS_HANG_MS,
+      FAKE_AGY_MODELS_PID_OUT: process.env.FAKE_AGY_MODELS_PID_OUT,
     };
     process.env.DUPOND_AGY_BIN = fakeBin;
     process.env.DUPOND_AGY_PROFILE_DIR = profileDir;
@@ -130,6 +143,8 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     delete process.env.DUPOND_AGY_KILL_GRACE_MS;
     delete process.env.FAKE_AGY_MODE;
     delete process.env.FAKE_AGY_DESCENDANT_PID_OUT;
+    delete process.env.FAKE_AGY_MODELS_HANG_MS;
+    delete process.env.FAKE_AGY_MODELS_PID_OUT;
   });
 
   afterEach(() => {
@@ -162,7 +177,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.ok(session.authUrl?.startsWith('https://accounts.google.com/o/oauth2/auth?'));
 
     // Operator B cannot view or submit Operator A's pending session
-    const statusB = mgr.getStatus(tokenB);
+    const statusB = await mgr.getStatus(tokenB);
     assert.strictEqual(statusB.session, null);
     await assert.rejects(
       () => mgr.submitCode(tokenB, session.loginSessionId, 'SYNTH_AUTH_CODE_SECRET'),
@@ -198,7 +213,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.strictEqual(res1.modelsCount, 2);
 
     // PTY echo secrecy: neither status nor response contains the submitted code or ECHO_SECRET_CODE
-    const postStatus = mgr2.getStatus(tokenA);
+    const postStatus = await mgr2.getStatus(tokenA);
     assert.strictEqual(postStatus.profileAuthenticated, true);
     assert.ok(!JSON.stringify(res1).includes('SYNTH_AUTH_CODE_SECRET_123'));
     assert.ok(!JSON.stringify(postStatus).includes('SYNTH_AUTH_CODE_SECRET_123'));
@@ -211,7 +226,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     );
 
     // Dedicated profile + SandboxExecutor portability check with fake CLI
-    const modelsCheck = probeAgyProfileModels(profileDir, fakeBin);
+    const modelsCheck = await probeAgyProfileModels(profileDir, fakeBin);
     assert.strictEqual(modelsCheck.authenticated, true);
 
     const repoDir = path.join(tmpDir, 'repo');
@@ -245,7 +260,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     const sCancel = await mgrCancel.startLogin(token);
     assert.ok(sCancel);
     await mgrCancel.cancelLogin(token, sCancel.loginSessionId);
-    assert.strictEqual(mgrCancel.getStatus(token).session?.state, 'cancelled');
+    assert.strictEqual((await mgrCancel.getStatus(token)).session?.state, 'cancelled');
     await assert.rejects(
       () => mgrCancel.submitCode(token, sCancel.loginSessionId, 'LATE_CODE'),
       (err: any) => err instanceof AgyAuthError && err.statusCode === 409,
@@ -273,8 +288,8 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.strictEqual(badRes.state, 'failed');
     assert.ok(!JSON.stringify(badRes).includes('SENSITIVE_BAD_CODE_999'));
     assert.ok(!JSON.stringify(badRes).includes('ECHO_SECRET_CODE'));
-    assert.ok(!JSON.stringify(mgrBad.getStatus(token)).includes('SENSITIVE_BAD_CODE_999'));
-    assert.ok(!JSON.stringify(mgrBad.getStatus(token)).includes('ECHO_SECRET_CODE'));
+    assert.ok(!JSON.stringify(await mgrBad.getStatus(token)).includes('SENSITIVE_BAD_CODE_999'));
+    assert.ok(!JSON.stringify(await mgrBad.getStatus(token)).includes('ECHO_SECRET_CODE'));
   });
 
   it('kills stubborn SIGTERM-ignoring agy descendants and blocks profile reuse if termination is unconfirmed', async () => {
@@ -304,7 +319,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.ok(descPid > 0, 'Expected stubborn descendant PID to be recorded');
 
     await mgr.cancelLogin(token, session.loginSessionId);
-    assert.strictEqual(mgr.getStatus(token).session?.state, 'cancelled');
+    assert.strictEqual((await mgr.getStatus(token)).session?.state, 'cancelled');
     assert.strictEqual(mgr.getUnconfirmedProcesses().length, 0);
     assert.throws(() => process.kill(descPid, 0), 'Expected stubborn descendant process to be terminated');
 
@@ -374,7 +389,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     const cancelSubmitRes = await submitPromise;
     assert.strictEqual(cancelSubmitRes.state, 'cancelled');
     assert.strictEqual(cancelSubmitRes.authenticated, false);
-    assert.strictEqual(mgrCancelSubmit.getStatus(tokenA).session?.state, 'cancelled');
+    assert.strictEqual((await mgrCancelSubmit.getStatus(tokenA)).session?.state, 'cancelled');
 
     // 3. Same-owner supersede during slow submit never lets old session become completed
     const mgrSupersede = new AgyAuthSessionManager();
@@ -388,8 +403,8 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     const oldRes = await oldSubmit;
     assert.notStrictEqual(oldRes.state, 'completed');
     assert.strictEqual(oldRes.authenticated, false);
-    assert.strictEqual(mgrSupersede.getStatus(tokenA).session?.loginSessionId, sNew.loginSessionId);
-    assert.strictEqual(mgrSupersede.getStatus(tokenA).session?.state, 'awaiting_code');
+    assert.strictEqual((await mgrSupersede.getStatus(tokenA)).session?.loginSessionId, sNew.loginSessionId);
+    assert.strictEqual((await mgrSupersede.getStatus(tokenA)).session?.state, 'awaiting_code');
     await mgrSupersede.cancelLogin(tokenA, sNew.loginSessionId);
 
     // 4. Bounded submission deadline fails cleanly
@@ -402,5 +417,124 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.strictEqual(timeoutRes.authenticated, false);
     assert.strictEqual(timeoutRes.state, 'failed');
     assert.ok(!JSON.stringify(timeoutRes).includes('SYNTH_CODE_TIMEOUT'));
+  });
+
+  it('yields via real timer when bridge exited with surviving descendant, and interrupts/bounds async probes on cancel, deadline, or expiry', async () => {
+    const token = 'operator-async-probe';
+
+    // 1. Bridge already exited (exitPromise already resolved) while a descendant remains alive:
+    // waitForProcessTermination must yield through real timers so an event-loop heartbeat is never starved.
+    process.env.DUPOND_AGY_TERM_GRACE_MS = '220';
+    process.env.DUPOND_AGY_KILL_GRACE_MS = '220';
+    const mgrHeartbeat = new AgyAuthSessionManager();
+    const sHeartbeat = await mgrHeartbeat.startLogin(token);
+    assert.ok(sHeartbeat);
+    const activeHb = (mgrHeartbeat as any).activeSession;
+    if (activeHb.agyPgid) {
+      try { process.kill(-activeHb.agyPgid, 'SIGKILL'); } catch { /* ignore */ }
+    }
+    if (activeHb.child?.pid) {
+      try { process.kill(-activeHb.child.pid, 'SIGKILL'); } catch { /* ignore */ }
+    }
+    await activeHb.exitPromise;
+
+    // Spawn a SIGTERM-ignoring surviving descendant in its own process group while bridge is already exited
+    const hbReadyFile = path.join(tmpDir, 'hb-ready');
+    const survivingDesc = spawn(
+      process.execPath,
+      [
+        '-e',
+        'const fs=require("fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "1"); setInterval(() => {}, 1000);',
+        hbReadyFile,
+      ],
+      { detached: true, stdio: 'ignore' },
+    );
+    assert.ok(survivingDesc.pid);
+    for (let i = 0; i < 40 && !fs.existsSync(hbReadyFile); i++) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.ok(fs.existsSync(hbReadyFile), 'Expected surviving descendant to arm SIGTERM handler');
+    activeHb.exited = true;
+    activeHb.exitPromise = Promise.resolve();
+    activeHb.agyPgid = survivingDesc.pid;
+
+    let heartbeats = 0;
+    const heartbeatTimer = setInterval(() => {
+      heartbeats += 1;
+    }, 20);
+    try {
+      await mgrHeartbeat.cancelLogin(token, sHeartbeat.loginSessionId);
+    } finally {
+      clearInterval(heartbeatTimer);
+    }
+    assert.ok(heartbeats >= 4, `Expected event-loop heartbeat >= 4 ticks during termination wait, got ${heartbeats}`);
+    assert.throws(() => process.kill(survivingDesc.pid!, 0), 'Expected surviving descendant to be killed');
+
+    // Helper to wait for probe PID file
+    const waitForPidFile = async (file: string): Promise<number> => {
+      for (let i = 0; i < 60; i++) {
+        if (fs.existsSync(file)) {
+          const parsed = Number.parseInt(fs.readFileSync(file, 'utf8').trim(), 10);
+          if (Number.isFinite(parsed) && parsed > 0) return parsed;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return 0;
+    };
+
+    // 2. Cancellation interrupts a hanging model probe promptly and reaps the probe process
+    const probePidFileCancel = path.join(tmpDir, 'probe-cancel.pid');
+    process.env.FAKE_AGY_MODELS_HANG_MS = '10000';
+    process.env.FAKE_AGY_MODELS_PID_OUT = probePidFileCancel;
+    delete process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS;
+    const mgrCancelProbe = new AgyAuthSessionManager();
+    const sCancelProbe = await mgrCancelProbe.startLogin(token);
+    assert.ok(sCancelProbe);
+    const submitCancelP = mgrCancelProbe.submitCode(token, sCancelProbe.loginSessionId, 'SYNTH_PROBE_CANCEL');
+    const cancelProbePid = await waitForPidFile(probePidFileCancel);
+    assert.ok(cancelProbePid > 0, 'Expected hanging probe PID to be recorded');
+
+    const tCancelStart = Date.now();
+    await mgrCancelProbe.cancelLogin(token, sCancelProbe.loginSessionId);
+    const cancelProbeRes = await submitCancelP;
+    const cancelElapsedMs = Date.now() - tCancelStart;
+    assert.ok(cancelElapsedMs < 2000, `Expected cancellation to interrupt hanging probe promptly, took ${cancelElapsedMs}ms`);
+    assert.strictEqual(cancelProbeRes.state, 'cancelled');
+    assert.strictEqual(cancelProbeRes.authenticated, false);
+    assert.throws(() => process.kill(cancelProbePid, 0), 'Expected cancelled probe process to be terminated');
+    delete process.env.FAKE_AGY_MODELS_HANG_MS;
+    assert.strictEqual((await mgrCancelProbe.getStatus(token)).session?.state, 'cancelled');
+
+    // 3. Short submission deadline bounds the entire verification operation (including hanging probe)
+    const probePidFileDeadline = path.join(tmpDir, 'probe-deadline.pid');
+    process.env.FAKE_AGY_MODELS_HANG_MS = '10000';
+    process.env.FAKE_AGY_MODELS_PID_OUT = probePidFileDeadline;
+    process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS = '180';
+    const mgrDeadline = new AgyAuthSessionManager();
+    const sDeadline = await mgrDeadline.startLogin(token);
+    assert.ok(sDeadline);
+    const tDeadlineStart = Date.now();
+    const deadlineRes = await mgrDeadline.submitCode(token, sDeadline.loginSessionId, 'SYNTH_PROBE_DEADLINE');
+    const deadlineElapsedMs = Date.now() - tDeadlineStart;
+    const deadlineProbePid = await waitForPidFile(probePidFileDeadline);
+    assert.ok(deadlineElapsedMs < 2000, `Expected short submission deadline to bound verification, took ${deadlineElapsedMs}ms`);
+    assert.strictEqual(deadlineRes.state, 'failed');
+    assert.strictEqual(deadlineRes.authenticated, false);
+    assert.ok(deadlineProbePid > 0);
+    assert.throws(() => process.kill(deadlineProbePid, 0), 'Expected timed-out probe process to be terminated');
+
+    // 4. Expired session during in-flight probe never becomes completed even if probe would otherwise succeed
+    delete process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS;
+    delete process.env.FAKE_AGY_MODELS_PID_OUT;
+    process.env.FAKE_AGY_MODELS_HANG_MS = '600';
+    process.env.DUPOND_AGY_AUTH_TTL_MS = '350';
+    const mgrExpireProbe = new AgyAuthSessionManager();
+    const sExpireProbe = await mgrExpireProbe.startLogin(token);
+    assert.ok(sExpireProbe);
+    const expireRes = await mgrExpireProbe.submitCode(token, sExpireProbe.loginSessionId, 'SYNTH_PROBE_EXPIRE');
+    assert.strictEqual(expireRes.state, 'expired');
+    assert.strictEqual(expireRes.authenticated, false);
+    delete process.env.FAKE_AGY_MODELS_HANG_MS;
+    assert.strictEqual((await mgrExpireProbe.getStatus(token)).session?.state, 'expired');
   });
 });
