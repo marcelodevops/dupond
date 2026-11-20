@@ -8,6 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import {
   AgyAuthError,
   AgyAuthSessionManager,
+  extractValidatedOAuthUrl,
   probeAgyProfileModels,
   resolveAgyProfileDir,
   validateSubmittedAuthCode,
@@ -66,6 +67,25 @@ if (args.length === 0) {
     if (step === 'method' && (buf.includes('\\r') || buf.includes('\\n'))) {
       buf = '';
       step = 'code';
+      if (mode === 'wrapped_url') {
+        const longUrl =
+          'https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-testclient.apps.googleusercontent.com' +
+          '&code_challenge=SYNTH_PKCE_CHALLENGE_43_CHARS_LONG_ABCDEFG&code_challenge_method=S256&prompt=consent' +
+          '&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code' +
+          '&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+openid' +
+          '&state=SYNTH_WRAP_STATE_987';
+        const c1 = longUrl.slice(0, 120);
+        const c2 = longUrl.slice(120, 240);
+        const c3 = longUrl.slice(240);
+        process.stdout.write('\\x1b[34;4m' + c1 + '\\n');
+        setTimeout(() => {
+          process.stdout.write(c2 + '\\n');
+        }, 40);
+        setTimeout(() => {
+          process.stdout.write(c3 + '\\x1b[m\\n\\nIf you are not automatically redirected, paste the authorization code below:\\n');
+        }, 80);
+        return;
+      }
       process.stdout.write(
         'https://accounts.google.com/o/oauth2/auth?client_id=test-client&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&state=abc123\\n' +
         'If you are not automatically redirected, paste the authorization code below:\\n'
@@ -536,5 +556,48 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.strictEqual(expireRes.authenticated, false);
     delete process.env.FAKE_AGY_MODELS_HANG_MS;
     assert.strictEqual((await mgrExpireProbe.getStatus(token)).session?.state, 'expired');
+  });
+
+  it('reconstructs long ANSI-wrapped and multi-chunk PTY OAuth URLs without losing query or PKCE parameters', async () => {
+    const fullUrl =
+      'https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-testclient.apps.googleusercontent.com' +
+      '&code_challenge=SYNTH_PKCE_CHALLENGE_43_CHARS_LONG_ABCDEFG&code_challenge_method=S256&prompt=consent' +
+      '&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code' +
+      '&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+openid' +
+      '&state=SYNTH_WRAP_STATE_987';
+
+    // 1. Truncated prefix without required params is rejected
+    assert.strictEqual(extractValidatedOAuthUrl(fullUrl.slice(0, 120)), null);
+
+    // 2. Wrapped ANSI lines without OSC 8 reconstruct exact URL and do not pull in surrounding prose
+    const wrappedPlain = [
+      'Open this URL in your browser:',
+      '\x1b[34;4m' + fullUrl.slice(0, 138),
+      fullUrl.slice(138, 276),
+      fullUrl.slice(276) + '\x1b[m',
+      '',
+      'If you are not automatically redirected, paste the authorization code below:',
+    ].join('\r\n');
+    assert.strictEqual(extractValidatedOAuthUrl(wrappedPlain), fullUrl);
+
+    // 3. OSC 8 hyperlink extraction preserves exact query string even alongside wrapped visible text
+    const osc8Output =
+      `\x1b]8;id=abc123;${fullUrl}\x07${fullUrl.slice(0, 100)}\n${fullUrl.slice(100)}\x1b]8;;\x07\n`;
+    assert.strictEqual(extractValidatedOAuthUrl(osc8Output), fullUrl);
+
+    // 4. Full PTY chunked flow preserves client_id, redirect_uri, response_type, state, scope, and PKCE params
+    process.env.FAKE_AGY_MODE = 'wrapped_url';
+    const mgr = new AgyAuthSessionManager();
+    const session = await mgr.startLogin('operator-wrapped-url');
+    assert.ok(session?.authUrl);
+    assert.strictEqual(session.authUrl, fullUrl);
+    const parsed = new URL(session.authUrl);
+    assert.strictEqual(parsed.searchParams.get('client_id'), '1071006060591-testclient.apps.googleusercontent.com');
+    assert.strictEqual(parsed.searchParams.get('redirect_uri'), 'https://antigravity.google/oauth-callback');
+    assert.strictEqual(parsed.searchParams.get('response_type'), 'code');
+    assert.strictEqual(parsed.searchParams.get('state'), 'SYNTH_WRAP_STATE_987');
+    assert.strictEqual(parsed.searchParams.get('code_challenge'), 'SYNTH_PKCE_CHALLENGE_43_CHARS_LONG_ABCDEFG');
+    assert.strictEqual(parsed.searchParams.get('code_challenge_method'), 'S256');
+    await mgr.cancelLogin('operator-wrapped-url', session.loginSessionId);
   });
 });
