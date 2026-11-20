@@ -131,8 +131,13 @@ function extractAgyJsonPayload(stdout: string): AgyJsonInfo {
             ? obj.errors.map((e: any) => (typeof e === 'string' ? e : JSON.stringify(e))).join('; ')
             : undefined;
 
+    const rawStatus = typeof obj.status === 'string' ? obj.status : undefined;
+    const isErrorStatus =
+      rawStatus !== undefined && rawStatus !== 'SUCCESS';
+
     const isErrorEnvelope =
       Boolean(rawErrorFromField) ||
+      isErrorStatus ||
       obj.is_error === true ||
       obj.type === 'error' ||
       (typeof obj.subtype === 'string' && obj.subtype !== 'success');
@@ -141,21 +146,26 @@ function extractAgyJsonPayload(stdout: string): AgyJsonInfo {
     if (isErrorEnvelope) {
       const rawErr =
         rawErrorFromField ||
+        (typeof obj.response === 'string' && obj.response.trim() ? obj.response : undefined) ||
         (typeof obj.result === 'string' && obj.result.trim() ? obj.result : undefined) ||
         (typeof obj.message === 'string' && obj.message.trim() ? obj.message : undefined) ||
-        `Antigravity CLI reported an error envelope (${obj.subtype || obj.type || 'is_error'}).`;
+        `Antigravity CLI reported an error envelope (${rawStatus || obj.subtype || obj.type || 'is_error'}).`;
       errorText = sanitizeWorkerOutput(rawErr);
     }
 
-    const hasResultEvidence =
-      typeof obj.result === 'string' ||
-      (typeof obj.session_id === 'string' && obj.session_id.length > 0) ||
+    // Verified agy v1.5.13 --output-format=json completion contract:
+    // { conversation_id, status: "SUCCESS", response, duration_seconds, num_turns, usage }
+    const hasConversation =
+      typeof obj.conversation_id === 'string' && obj.conversation_id.length > 0;
+    const hasResponseOrTurns =
+      typeof obj.response === 'string' ||
       (typeof obj.num_turns === 'number' && obj.num_turns >= 1);
 
     const validCompletion =
       !isErrorEnvelope &&
-      obj.type === 'result' &&
-      hasResultEvidence;
+      rawStatus === 'SUCCESS' &&
+      hasConversation &&
+      hasResponseOrTurns;
 
     return {
       parsed: obj,

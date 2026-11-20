@@ -52,12 +52,12 @@ if (scenario === 'hang') {
 } else if (scenario === 'protected_violation') {
   fs.mkdirSync(path.join(process.cwd(), 'secrets'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), 'secrets', 'leak.txt'), 'nope\\n');
-  console.log(JSON.stringify({ type: 'result', session_id: 'sess-prot', num_turns: 1, result: 'Done', captured: capturedEnv }));
+  console.log(JSON.stringify({ conversation_id: 'conv-prot', status: 'SUCCESS', response: 'Done', num_turns: 1, captured: capturedEnv }));
   process.exit(0);
 } else if (scenario === 'json_error_secret') {
   console.log(JSON.stringify({
-    type: 'result',
-    is_error: true,
+    conversation_id: 'conv-err',
+    status: 'FAILED',
     errors: [
       'Upstream error Bearer SYNTH_SECRET_BEARER_999 ya29.SYNTH_OAUTH_SECRET_888 AIzaSySYNTH_GEMINI_SECRET_777'
     ]
@@ -74,12 +74,12 @@ if (scenario === 'hang') {
 } else if (scenario === 'bad_code_exit0') {
   fs.mkdirSync(path.join(process.cwd(), 'src'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), 'src', 'feature.ts'), 'export const value = 999;\\n');
-  console.log(JSON.stringify({ type: 'result', session_id: 'sess-bad', num_turns: 1, result: 'Done', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, captured: capturedEnv }));
+  console.log(JSON.stringify({ conversation_id: 'conv-bad', status: 'SUCCESS', response: 'Done', num_turns: 1, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, captured: capturedEnv }));
   process.exit(0);
 } else {
   fs.mkdirSync(path.join(process.cwd(), 'src'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), 'src', 'feature.ts'), 'export const value = 42;\\n');
-  console.log(JSON.stringify({ type: 'result', session_id: 'sess-ok', num_turns: 1, result: 'Done', usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 }, captured: capturedEnv }));
+  console.log(JSON.stringify({ conversation_id: 'conv-ok', status: 'SUCCESS', response: 'Done', num_turns: 1, usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 }, captured: capturedEnv }));
   process.exit(0);
 }
 `;
