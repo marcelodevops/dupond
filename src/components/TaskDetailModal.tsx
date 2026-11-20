@@ -1,7 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Task, Agent, Epic, TaskStatus, Priority } from '../types';
 import { projectApi } from '../lib/projectApi';
-import type { OpenCodeWorkerStatus, TaskRunsEvidenceResponse } from '../types/projectContract';
+import type {
+  GeminiCliWorkerStatus,
+  OpenCodeWorkerStatus,
+  TaskRunsEvidenceResponse,
+} from '../types/projectContract';
 import { withPromotedChecklistItem } from '../services/acceptanceMapping';
 import { AgentAvatar } from './AgentAvatar';
 import {
@@ -117,6 +121,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   const [openAIConfigured, setOpenAIConfigured] = useState<boolean | null>(null);
   const [openCodeStatus, setOpenCodeStatus] = useState<OpenCodeWorkerStatus | null>(null);
   const [openCodeCustomModelMode, setOpenCodeCustomModelMode] = useState(false);
+  const [geminiCliStatus, setGeminiCliStatus] = useState<GeminiCliWorkerStatus | null>(null);
+  const [geminiCliCustomModelMode, setGeminiCliCustomModelMode] = useState(false);
 
   useEffect(() => {
     if (task.workerConfig?.provider !== 'openai') {
@@ -131,6 +137,38 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
       })
       .catch(() => {
         if (!cancelled) setOpenAIConfigured(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.workerConfig?.provider, runRefreshKey]);
+
+  useEffect(() => {
+    if (task.workerConfig?.provider !== 'gemini-cli') {
+      setGeminiCliStatus(null);
+      setGeminiCliCustomModelMode(false);
+      return;
+    }
+    let cancelled = false;
+    projectApi
+      .getGeminiCliWorkerStatus()
+      .then((status) => {
+        if (!cancelled) setGeminiCliStatus(status);
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setGeminiCliStatus({
+            available: false,
+            executablePath: null,
+            version: null,
+            supportedVersion: false,
+            authReady: false,
+            authMethod: 'none',
+            models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+            defaultModel: 'gemini-2.5-flash',
+            error: err?.message || 'Failed to check Gemini CLI availability.',
+          });
+        }
       });
     return () => {
       cancelled = true;
@@ -158,6 +196,38 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             models: [],
             configuredProviders: [],
             error: err?.message || 'Failed to check OpenCode CLI availability.',
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.workerConfig?.provider, runRefreshKey]);
+
+  useEffect(() => {
+    if (task.workerConfig?.provider !== 'gemini-cli') {
+      setGeminiCliStatus(null);
+      setGeminiCliCustomModelMode(false);
+      return;
+    }
+    let cancelled = false;
+    projectApi
+      .getGeminiCliWorkerStatus()
+      .then((status) => {
+        if (!cancelled) setGeminiCliStatus(status);
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setGeminiCliStatus({
+            available: false,
+            executablePath: null,
+            version: null,
+            supportedVersion: false,
+            authReady: false,
+            authMethod: 'none',
+            models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+            defaultModel: 'gemini-2.5-flash',
+            error: err?.message || 'Failed to check Gemini CLI availability.',
           });
         }
       });
@@ -543,7 +613,9 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                       ? 'gpt-4o-mini'
                       : prov === 'opencode'
                         ? openCodeStatus?.models?.[0] || 'github-copilot/gpt-5.3-codex'
-                        : 'gemini-3.8-flash';
+                        : prov === 'gemini-cli'
+                          ? geminiCliStatus?.defaultModel || 'gemini-2.5-flash'
+                          : 'gemini-3.8-flash';
                   onUpdateTask({
                     ...task,
                     workerConfig: {
@@ -555,6 +627,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold"
               >
                 <option value="gemini">Google Gemini</option>
+                <option value="gemini-cli">Gemini CLI</option>
                 <option value="openai">OpenAI</option>
                 <option value="opencode">OpenCode CLI</option>
               </select>
@@ -622,6 +695,66 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                     );
                   })()}
                 </div>
+              ) : (task.workerConfig?.provider || 'gemini') === 'gemini-cli' ? (
+                <div className="space-y-1.5">
+                  {(() => {
+                    const presets = geminiCliStatus?.models?.length
+                      ? geminiCliStatus.models
+                      : ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+                    const fallbackDefault = geminiCliStatus?.defaultModel || 'gemini-2.5-flash';
+                    const currentModel = task.workerConfig?.model || fallbackDefault;
+                    const presetList = Array.from(new Set([...presets, fallbackDefault]));
+                    const isCustom = geminiCliCustomModelMode || !presetList.includes(currentModel);
+                    return (
+                      <>
+                        <select
+                          data-testid="task-worker-model-select"
+                          value={isCustom ? '__custom__' : currentModel}
+                          onChange={(e) => {
+                            if (e.target.value === '__custom__') {
+                              setGeminiCliCustomModelMode(true);
+                            } else {
+                              setGeminiCliCustomModelMode(false);
+                              onUpdateTask({
+                                ...task,
+                                workerConfig: {
+                                  provider: 'gemini-cli',
+                                  model: e.target.value,
+                                },
+                              });
+                            }
+                          }}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        >
+                          {presetList.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                          <option value="__custom__">Custom model...</option>
+                        </select>
+                        {isCustom && (
+                          <input
+                            type="text"
+                            data-testid="task-gemini-cli-custom-model-input"
+                            value={currentModel}
+                            onChange={(e) =>
+                              onUpdateTask({
+                                ...task,
+                                workerConfig: {
+                                  provider: 'gemini-cli',
+                                  model: e.target.value,
+                                },
+                              })
+                            }
+                            placeholder="gemini-2.5-flash"
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg text-xs text-white font-mono px-2.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                          />
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
               ) : (
                 <select
                   data-testid="task-worker-model-select"
@@ -662,6 +795,15 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
               className="p-3 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs"
             >
               {openCodeStatus.error || 'OpenCode CLI is not ready on this server.'}
+            </div>
+          )}
+
+          {task.workerConfig?.provider === 'gemini-cli' && geminiCliStatus && !geminiCliStatus.available && (
+            <div
+              data-testid="gemini-cli-prerequisite-warning"
+              className="p-3 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs"
+            >
+              {geminiCliStatus.error || 'Gemini CLI is not ready on this server.'}
             </div>
           )}
 

@@ -229,6 +229,18 @@ export interface OpenCodeWorkerStatus {
   error?: string;
 }
 
+export interface GeminiCliWorkerStatus {
+  available: boolean;
+  executablePath: string | null;
+  version: string | null;
+  supportedVersion: boolean;
+  authReady: boolean;
+  authMethod: 'oauth-personal' | 'vertex-ai' | 'adc' | 'none';
+  models: string[];
+  defaultModel: string;
+  error?: string;
+}
+
 export interface PlanningReadiness {
   provider: string;
   model: string;
