@@ -48,8 +48,9 @@ export class AgyAuthError extends Error {
 
 function stripAnsiAndControls(raw: string): string {
   return raw
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ' ')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+    .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n');
 }
 
@@ -351,19 +352,67 @@ export async function verifyAgySandboxPortability(
   };
 }
 
-function extractValidatedOAuthUrl(cleanText: string): string | null {
-  const matches = cleanText.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?[^\s\x1b"'<>]+/g);
-  if (!matches || matches.length === 0) return null;
-  for (const candidate of matches) {
-    try {
-      const parsed = new URL(candidate);
-      if (parsed.protocol === 'https:' && parsed.hostname === 'accounts.google.com') {
-        return parsed.toString();
-      }
-    } catch {
-      // Ignore partial/wrapped URL fragments
+function isValidOAuthCandidate(candidate: string): string | null {
+  if (!candidate || /[\s\x00-\x1f\x7f"'<>]/.test(candidate)) return null;
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol === 'https:' &&
+      parsed.hostname === 'accounts.google.com' &&
+      parsed.pathname === '/o/oauth2/auth' &&
+      parsed.searchParams.get('client_id') &&
+      parsed.searchParams.get('redirect_uri') &&
+      parsed.searchParams.get('state')
+    ) {
+      return candidate;
     }
+  } catch {
+    // Ignore partial/wrapped URL fragments
   }
+  return null;
+}
+
+export function extractValidatedOAuthUrl(rawText: string): string | null {
+  // 1. Prefer complete, unwrapped OSC 8 terminal hyperlinks when emitted by the CLI
+  const osc8Pattern =
+    /\x1b\]8;[^;\x07\x1b]*;(https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?[^\x07\x1b\s]+)(?:\x07|\x1b\\)/g;
+  for (const match of rawText.matchAll(osc8Pattern)) {
+    const validated = isValidOAuthCandidate(match[1]);
+    if (validated) return validated;
+  }
+
+  // 2. Fallback: reconstruct a clearly delimited URL wrapped across PTY lines without touching prose
+  const cleanText = stripAnsiAndControls(rawText);
+  const lines = cleanText.split('\n');
+  const urlPrefix = 'https://accounts.google.com/o/oauth2/auth?';
+
+  for (let i = 0; i < lines.length; i++) {
+    const startIdx = lines[i].indexOf(urlPrefix);
+    if (startIdx < 0) continue;
+
+    const firstRest = lines[i].slice(startIdx).trimEnd();
+    const spaceInFirst = firstRest.search(/\s/);
+    if (spaceInFirst > 0) {
+      const validated = isValidOAuthCandidate(firstRest.slice(0, spaceInFirst));
+      if (validated) return validated;
+      continue;
+    }
+
+    const parts = [firstRest];
+    for (let j = i + 1; j < lines.length; j++) {
+      const nextTrimmed = lines[j].trim();
+      if (!nextTrimmed) break;
+      if (/^(?:If you are not automatically redirected|Paste\b|Enter\b|To sign in|Select\b|>)/i.test(nextTrimmed)) {
+        break;
+      }
+      if (/[\s"'<>]/.test(nextTrimmed)) break;
+      parts.push(nextTrimmed);
+    }
+
+    const validated = isValidOAuthCandidate(parts.join(''));
+    if (validated) return validated;
+  }
+
   return null;
 }
 
@@ -771,7 +820,7 @@ export class AgyAuthSessionManager {
           } catch {}
         }
 
-        const url = extractValidatedOAuthUrl(clean);
+        const url = extractValidatedOAuthUrl(session.ptyBuffer);
         if (url) {
           session.authUrl = url;
         }
