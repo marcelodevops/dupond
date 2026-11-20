@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/marcelodevops/dupond/compare/v0.16.0...v0.17.0) (2026-11-20)
+
+
+### Features
+
+* **worker:** add Gemini CLI coding-worker provider ([52a0a88](https://github.com/marcelodevops/dupond/commit/52a0a886b7558022ccd2f2d4b39a41fdbba47095))
+
 ## [0.16.0](https://github.com/marcelodevops/dupond/compare/v0.15.0...v0.16.0) (2026-11-20)
 
 
