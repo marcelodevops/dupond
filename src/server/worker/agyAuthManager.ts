@@ -27,6 +27,9 @@ export interface AgyAuthStatusResponse {
   version: string | null;
   profileAuthenticated: boolean;
   availableModelsCount: number;
+  models: string[];
+  defaultModel: string;
+  error?: string;
   session: {
     loginSessionId: string;
     state: AgyAuthSessionState;
@@ -292,6 +295,37 @@ export function probeAgyProfileModels(
   });
 }
 
+const AGY_SANDBOX_AUTH_REL_PATHS = [
+  '.gemini/antigravity-cli/antigravity-oauth-token',
+  '.gemini/jetski-standalone-oauth-token',
+  '.gemini/antigravity-cli/settings.json',
+  '.gemini/antigravity-cli/jetski_state.pbtxt',
+  '.gemini/antigravity-cli/installation_id',
+  '.gemini/antigravity-cli/cache/default_project_id.txt',
+  '.gemini/antigravity-cli/cache/onboarding.json',
+  '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
+];
+
+export function collectAgySandboxSeedFiles(
+  profileDir: string,
+): Array<{ sourcePath: string; targetRelToHome: string }> {
+  const seedHomeFiles: Array<{ sourcePath: string; targetRelToHome: string }> = [];
+  for (const rel of AGY_SANDBOX_AUTH_REL_PATHS) {
+    const full = path.join(profileDir, rel);
+    if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+      seedHomeFiles.push({ sourcePath: full, targetRelToHome: rel });
+    }
+  }
+  return seedHomeFiles;
+}
+
+export function hasAgyAuthTokenSeed(profileDir: string): boolean {
+  return (
+    fs.existsSync(path.join(profileDir, '.gemini/antigravity-cli/antigravity-oauth-token')) ||
+    fs.existsSync(path.join(profileDir, '.gemini/jetski-standalone-oauth-token'))
+  );
+}
+
 /**
  * Verifies whether identified auth files from the dedicated profile are portable into Dupond's OS sandbox
  * without granting broad host HOME or Keychain access.
@@ -306,20 +340,7 @@ export async function verifyAgySandboxPortability(
     return { ok: false, exitCode: -1, modelsCount: 0, error: 'Antigravity CLI (agy) executable not found.' };
   }
 
-  const seedHomeFiles: Array<{ sourcePath: string; targetRelToHome: string }> = [];
-  const candidateRelPaths = [
-    '.gemini/jetski-standalone-oauth-token',
-    '.gemini/antigravity-cli/settings.json',
-    '.gemini/antigravity-cli/jetski_state.pbtxt',
-    '.gemini/antigravity-cli/installation_id',
-    '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
-  ];
-  for (const rel of candidateRelPaths) {
-    const full = path.join(profileDir, rel);
-    if (fs.existsSync(full) && fs.statSync(full).isFile()) {
-      seedHomeFiles.push({ sourcePath: full, targetRelToHome: rel });
-    }
-  }
+  const seedHomeFiles = collectAgySandboxSeedFiles(profileDir);
 
   const realBin = fs.realpathSync(exe);
   const res = await sandbox.execute({
@@ -696,12 +717,23 @@ export class AgyAuthSessionManager {
       }
     }
 
+    const fallbackDefault = process.env.DUPOND_AGY_MODEL?.trim() || 'gemini-3.8-flash-medium';
+    const defaultModel = profileCheck.models[0] || fallbackDefault;
+    const readinessError = !exe
+      ? 'Antigravity CLI (agy) executable not found. Install agy or set DUPOND_AGY_BIN.'
+      : !profileCheck.authenticated
+        ? 'Dedicated Antigravity profile is not authenticated. Connect Antigravity CLI in Application Settings.'
+        : undefined;
+
     return {
       cliAvailable: Boolean(exe),
       executablePath: exe,
       version,
       profileAuthenticated: profileCheck.authenticated,
       availableModelsCount: profileCheck.models.length,
+      models: profileCheck.models,
+      defaultModel,
+      ...(readinessError ? { error: readinessError } : {}),
       session: sessionView,
     };
   }

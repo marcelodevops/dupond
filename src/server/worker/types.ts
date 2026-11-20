@@ -3,7 +3,7 @@ export interface WorkerToolCall {
   arguments: Record<string, any>;
 }
 
-export type WorkerProvider = 'gemini' | 'openai' | 'opencode' | 'gemini-cli';
+export type WorkerProvider = 'gemini' | 'openai' | 'opencode' | 'agy';
 
 export interface WorkerConfig {
   provider: WorkerProvider | string;
