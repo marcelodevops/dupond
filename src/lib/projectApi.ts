@@ -30,7 +30,6 @@ import {
   OpenAICredentialStatus,
   OpenAITestResult,
   OpenCodeWorkerStatus,
-  GeminiCliWorkerStatus,
   AgyAuthStatus,
   AgyAuthSessionInfo,
   ProjectSourcePlan,
@@ -471,17 +470,6 @@ export const projectApi = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(loginSessionId ? { loginSessionId } : {}),
       },
-      signal
-    );
-  },
-
-  /**
-   * Probe local Gemini CLI availability, version, and auth readiness (read-only metadata, never returns secrets)
-   */
-  async getGeminiCliWorkerStatus(signal?: AbortSignal): Promise<GeminiCliWorkerStatus> {
-    return callProjectApi<GeminiCliWorkerStatus>(
-      '/api/workers/gemini-cli/status',
-      { method: 'GET' },
       signal
     );
   },
