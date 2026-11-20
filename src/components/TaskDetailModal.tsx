@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Task, Agent, Epic, TaskStatus, Priority } from '../types';
 import { projectApi } from '../lib/projectApi';
 import type {
-  GeminiCliWorkerStatus,
+  AgyAuthStatus,
   OpenCodeWorkerStatus,
   TaskRunsEvidenceResponse,
 } from '../types/projectContract';
@@ -121,8 +121,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   const [openAIConfigured, setOpenAIConfigured] = useState<boolean | null>(null);
   const [openCodeStatus, setOpenCodeStatus] = useState<OpenCodeWorkerStatus | null>(null);
   const [openCodeCustomModelMode, setOpenCodeCustomModelMode] = useState(false);
-  const [geminiCliStatus, setGeminiCliStatus] = useState<GeminiCliWorkerStatus | null>(null);
-  const [geminiCliCustomModelMode, setGeminiCliCustomModelMode] = useState(false);
+  const [agyStatus, setAgyStatus] = useState<AgyAuthStatus | null>(null);
+  const [agyCustomModelMode, setAgyCustomModelMode] = useState(false);
 
   useEffect(() => {
     if (task.workerConfig?.provider !== 'openai') {
@@ -175,29 +175,29 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   }, [task.workerConfig?.provider, runRefreshKey]);
 
   useEffect(() => {
-    if (task.workerConfig?.provider !== 'gemini-cli') {
-      setGeminiCliStatus(null);
-      setGeminiCliCustomModelMode(false);
+    if (task.workerConfig?.provider !== 'agy') {
+      setAgyStatus(null);
+      setAgyCustomModelMode(false);
       return;
     }
     let cancelled = false;
     projectApi
-      .getGeminiCliWorkerStatus()
+      .getAgyAuthStatus()
       .then((status) => {
-        if (!cancelled) setGeminiCliStatus(status);
+        if (!cancelled) setAgyStatus(status);
       })
       .catch((err: any) => {
         if (!cancelled) {
-          setGeminiCliStatus({
-            available: false,
+          setAgyStatus({
+            cliAvailable: false,
             executablePath: null,
             version: null,
-            supportedVersion: false,
-            authReady: false,
-            authMethod: 'none',
-            models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-            defaultModel: 'gemini-2.5-flash',
-            error: err?.message || 'Failed to check Gemini CLI availability.',
+            profileAuthenticated: false,
+            availableModelsCount: 0,
+            models: [],
+            defaultModel: 'gemini-3.8-flash-medium',
+            error: err?.message || 'Failed to check Antigravity CLI availability.',
+            session: null,
           });
         }
       });
@@ -583,8 +583,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                       ? 'gpt-4o-mini'
                       : prov === 'opencode'
                         ? openCodeStatus?.models?.[0] || 'github-copilot/gpt-5.3-codex'
-                        : prov === 'gemini-cli'
-                          ? geminiCliStatus?.defaultModel || 'gemini-2.5-flash'
+                        : prov === 'agy'
+                          ? agyStatus?.models?.[0] || agyStatus?.defaultModel || 'gemini-3.8-flash-medium'
                           : 'gemini-3.8-flash';
                   onUpdateTask({
                     ...task,
@@ -596,8 +596,13 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 }}
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold"
               >
+                {task.workerConfig?.provider === 'gemini-cli' && (
+                  <option value="gemini-cli" disabled>
+                    Gemini CLI (Removed)
+                  </option>
+                )}
                 <option value="gemini">Google Gemini</option>
-                <option value="gemini-cli">Gemini CLI</option>
+                <option value="agy">Antigravity CLI (Agy)</option>
                 <option value="openai">OpenAI</option>
                 <option value="opencode">OpenCode CLI</option>
               </select>
@@ -665,16 +670,16 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                     );
                   })()}
                 </div>
-              ) : (task.workerConfig?.provider || 'gemini') === 'gemini-cli' ? (
+              ) : (task.workerConfig?.provider || 'gemini') === 'agy' ? (
                 <div className="space-y-1.5">
                   {(() => {
-                    const presets = geminiCliStatus?.models?.length
-                      ? geminiCliStatus.models
-                      : ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
-                    const fallbackDefault = geminiCliStatus?.defaultModel || 'gemini-2.5-flash';
+                    const presets = agyStatus?.models?.length
+                      ? agyStatus.models
+                      : [agyStatus?.defaultModel || 'gemini-3.8-flash-medium'];
+                    const fallbackDefault = agyStatus?.defaultModel || 'gemini-3.8-flash-medium';
                     const currentModel = task.workerConfig?.model || fallbackDefault;
                     const presetList = Array.from(new Set([...presets, fallbackDefault]));
-                    const isCustom = geminiCliCustomModelMode || !presetList.includes(currentModel);
+                    const isCustom = agyCustomModelMode || !presetList.includes(currentModel);
                     return (
                       <>
                         <select
@@ -682,13 +687,13 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                           value={isCustom ? '__custom__' : currentModel}
                           onChange={(e) => {
                             if (e.target.value === '__custom__') {
-                              setGeminiCliCustomModelMode(true);
+                              setAgyCustomModelMode(true);
                             } else {
-                              setGeminiCliCustomModelMode(false);
+                              setAgyCustomModelMode(false);
                               onUpdateTask({
                                 ...task,
                                 workerConfig: {
-                                  provider: 'gemini-cli',
+                                  provider: 'agy',
                                   model: e.target.value,
                                 },
                               });
@@ -706,18 +711,18 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                         {isCustom && (
                           <input
                             type="text"
-                            data-testid="task-gemini-cli-custom-model-input"
+                            data-testid="task-agy-custom-model-input"
                             value={currentModel}
                             onChange={(e) =>
                               onUpdateTask({
                                 ...task,
                                 workerConfig: {
-                                  provider: 'gemini-cli',
+                                  provider: 'agy',
                                   model: e.target.value,
                                 },
                               })
                             }
-                            placeholder="gemini-2.5-flash"
+                            placeholder="gemini-3.8-flash-medium"
                             className="w-full bg-slate-900 border border-slate-700 rounded-lg text-xs text-white font-mono px-2.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                           />
                         )}
@@ -725,6 +730,13 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                     );
                   })()}
                 </div>
+              ) : task.workerConfig?.provider === 'gemini-cli' ? (
+                <input
+                  type="text"
+                  readOnly
+                  value={task.workerConfig?.model || ''}
+                  className="w-full bg-slate-900 border border-rose-800/60 rounded-lg text-xs text-rose-200 font-mono px-2.5 py-1.5"
+                />
               ) : (
                 <select
                   data-testid="task-worker-model-select"
@@ -768,16 +780,45 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             </div>
           )}
 
-          {task.workerConfig?.provider === 'gemini-cli' && geminiCliStatus?.available && (
-            <p className="text-xs text-amber-200">Local CLI credentials detected. Authentication and model access are unverified.</p>
+          {task.workerConfig?.provider === 'gemini-cli' && (
+            <div
+              data-testid="removed-provider-warning"
+              className="p-3 rounded-xl border bg-rose-950/35 border-rose-800/70 text-rose-200 text-xs font-medium"
+            >
+              Provider removed—select another provider.
+            </div>
           )}
 
-          {task.workerConfig?.provider === 'gemini-cli' && geminiCliStatus && !geminiCliStatus.available && (
+          {task.workerConfig?.provider === 'agy' && agyStatus && agyStatus.cliAvailable && agyStatus.profileAuthenticated && (
             <div
-              data-testid="gemini-cli-prerequisite-warning"
-              className="p-3 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs"
+              data-testid="agy-readiness-ready"
+              className="p-2.5 rounded-xl border bg-emerald-950/25 border-emerald-800/50 text-emerald-200 text-xs"
             >
-              {geminiCliStatus.error || 'Gemini CLI is not ready on this server.'}
+              Antigravity CLI v{agyStatus.version || 'unknown'} ready ({agyStatus.availableModelsCount} models available).
+            </div>
+          )}
+
+          {task.workerConfig?.provider === 'agy' && (!agyStatus || !agyStatus.cliAvailable || !agyStatus.profileAuthenticated) && (
+            <div
+              data-testid="agy-prerequisite-warning"
+              className="p-3 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2"
+            >
+              <span>
+                {agyStatus?.error || 'Antigravity CLI is not authenticated. Connect Antigravity CLI before executing.'}
+              </span>
+              {onOpenAppSettings && (
+                <button
+                  type="button"
+                  data-testid="open-app-settings-from-task-agy-btn"
+                  onClick={() => {
+                    onClose();
+                    onOpenAppSettings();
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-semibold"
+                >
+                  Open Application Settings
+                </button>
+              )}
             </div>
           )}
 
@@ -1720,8 +1761,15 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             </button>
 
             <button
+              data-testid="execute-agent-step-btn"
               onClick={handleRunAgent}
-              disabled={isExecutingStep || !assignee}
+              disabled={
+                isExecutingStep ||
+                !assignee ||
+                task.workerConfig?.provider === 'gemini-cli' ||
+                (task.workerConfig?.provider === 'agy' &&
+                  (!agyStatus?.cliAvailable || !agyStatus?.profileAuthenticated))
+              }
               className="flex items-center space-x-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold shadow-md shadow-indigo-600/20 transition-all disabled:opacity-50"
             >
               {isExecutingStep ? (
