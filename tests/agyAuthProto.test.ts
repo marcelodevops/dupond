@@ -63,23 +63,38 @@ if (args.length === 0) {
     }
     if (step === 'code' && (buf.includes('\\r') || buf.includes('\\n'))) {
       const code = buf.trim();
-      // Deliberately echo submitted code to PTY to prove Dupond never leaks PTY echo
-      process.stdout.write('ECHO_SECRET_CODE:' + code + '\\n');
       if (mode === 'bad_code' || code === 'BAD_CODE') {
-        process.stdout.write('Got an error: token exchange failed: oauth2: "invalid_grant" "Bad Request"\\n');
+        // Deliberately emit echoed secret code AND failure marker in ONE chunk
+        process.stdout.write('ECHO_SECRET_CODE:' + code + ' Got an error: token exchange failed: oauth2: "invalid_grant" "Bad Request"\\n');
         return;
       }
+      if (mode === 'never_finish') {
+        process.stdout.write('ECHO_SECRET_CODE:' + code + '\\n');
+        return;
+      }
+      process.stdout.write('ECHO_SECRET_CODE:' + code + '\\n');
       if (mode === 'slow_exchange') {
         setTimeout(() => {
           fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
           fs.writeFileSync(tokenFile, JSON.stringify({ token: 'synth-oauth-token', auth_method: 'oauth' }), { mode: 0o600 });
-        }, 400);
+        }, 600);
         return;
       }
       fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
       fs.writeFileSync(tokenFile, JSON.stringify({ token: 'synth-oauth-token', auth_method: 'oauth' }), { mode: 0o600 });
     }
   });
+  if (mode === 'stubborn_descendant') {
+    const { spawn } = require('child_process');
+    const desc = spawn(
+      process.execPath,
+      ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'],
+      { stdio: 'ignore' }
+    );
+    if (process.env.FAKE_AGY_DESCENDANT_PID_OUT) {
+      fs.writeFileSync(process.env.FAKE_AGY_DESCENDANT_PID_OUT, String(desc.pid));
+    }
+  }
 }
 `;
   fs.writeFileSync(binPath, script, { mode: 0o755 });
@@ -101,12 +116,20 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
       DUPOND_AGY_BIN: process.env.DUPOND_AGY_BIN,
       DUPOND_AGY_PROFILE_DIR: process.env.DUPOND_AGY_PROFILE_DIR,
       DUPOND_AGY_AUTH_TTL_MS: process.env.DUPOND_AGY_AUTH_TTL_MS,
+      DUPOND_AGY_SUBMIT_TIMEOUT_MS: process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS,
+      DUPOND_AGY_TERM_GRACE_MS: process.env.DUPOND_AGY_TERM_GRACE_MS,
+      DUPOND_AGY_KILL_GRACE_MS: process.env.DUPOND_AGY_KILL_GRACE_MS,
       FAKE_AGY_MODE: process.env.FAKE_AGY_MODE,
+      FAKE_AGY_DESCENDANT_PID_OUT: process.env.FAKE_AGY_DESCENDANT_PID_OUT,
     };
     process.env.DUPOND_AGY_BIN = fakeBin;
     process.env.DUPOND_AGY_PROFILE_DIR = profileDir;
     delete process.env.DUPOND_AGY_AUTH_TTL_MS;
+    delete process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS;
+    delete process.env.DUPOND_AGY_TERM_GRACE_MS;
+    delete process.env.DUPOND_AGY_KILL_GRACE_MS;
     delete process.env.FAKE_AGY_MODE;
+    delete process.env.FAKE_AGY_DESCENDANT_PID_OUT;
   });
 
   afterEach(() => {
@@ -239,7 +262,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
       (err: any) => err instanceof AgyAuthError && err.statusCode === 410,
     );
 
-    // 4. Bad code returns failed without exposing echoed PTY secret
+    // 4. Bad code returns failed without exposing echoed PTY secret (even when same-chunk with failure marker)
     delete process.env.DUPOND_AGY_AUTH_TTL_MS;
     process.env.FAKE_AGY_MODE = 'bad_code';
     const mgrBad = new AgyAuthSessionManager();
@@ -249,5 +272,135 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.strictEqual(badRes.authenticated, false);
     assert.strictEqual(badRes.state, 'failed');
     assert.ok(!JSON.stringify(badRes).includes('SENSITIVE_BAD_CODE_999'));
+    assert.ok(!JSON.stringify(badRes).includes('ECHO_SECRET_CODE'));
+    assert.ok(!JSON.stringify(mgrBad.getStatus(token)).includes('SENSITIVE_BAD_CODE_999'));
+    assert.ok(!JSON.stringify(mgrBad.getStatus(token)).includes('ECHO_SECRET_CODE'));
+  });
+
+  it('kills stubborn SIGTERM-ignoring agy descendants and blocks profile reuse if termination is unconfirmed', async () => {
+    const token = 'operator-token-descendant';
+    const descPidFile = path.join(tmpDir, 'descendant.pid');
+    process.env.FAKE_AGY_MODE = 'stubborn_descendant';
+    process.env.FAKE_AGY_DESCENDANT_PID_OUT = descPidFile;
+    process.env.DUPOND_AGY_TERM_GRACE_MS = '80';
+    process.env.DUPOND_AGY_KILL_GRACE_MS = '200';
+
+    const mgr = new AgyAuthSessionManager();
+    const session = await mgr.startLogin(token);
+    assert.ok(session);
+
+    // Wait briefly until descendant PID file is written
+    let descPid = 0;
+    for (let i = 0; i < 40; i++) {
+      if (fs.existsSync(descPidFile)) {
+        const parsed = Number.parseInt(fs.readFileSync(descPidFile, 'utf8').trim(), 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          descPid = parsed;
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(descPid > 0, 'Expected stubborn descendant PID to be recorded');
+
+    await mgr.cancelLogin(token, session.loginSessionId);
+    assert.strictEqual(mgr.getStatus(token).session?.state, 'cancelled');
+    assert.strictEqual(mgr.getUnconfirmedProcesses().length, 0);
+    assert.throws(() => process.kill(descPid, 0), 'Expected stubborn descendant process to be terminated');
+
+    // Unconfirmed termination: retained tracking + explicit failure + profile reuse blocked (409 AGY_PROFILE_LOCKED)
+    delete process.env.FAKE_AGY_MODE;
+    delete process.env.FAKE_AGY_DESCENDANT_PID_OUT;
+    process.env.DUPOND_AGY_TERM_GRACE_MS = '30';
+    process.env.DUPOND_AGY_KILL_GRACE_MS = '30';
+
+    const mgrUnconf = new AgyAuthSessionManager();
+    await mgrUnconf.startLogin(token);
+    const active = (mgrUnconf as any).activeSession;
+    // Cleanly terminate the real test subprocess before swapping in an unkillable stub child
+    if (active.agyPgid) {
+      try { process.kill(-active.agyPgid, 'SIGKILL'); } catch { /* ignore */ }
+    }
+    if (active.child?.pid) {
+      try { process.kill(-active.child.pid, 'SIGKILL'); } catch { /* ignore */ }
+    }
+    await active.exitPromise;
+    active.exited = false;
+    active.exitPromise = new Promise<void>(() => {});
+    active.child = { pid: 999992, exitCode: null, signalCode: null, kill: () => true };
+    active.agyPgid = 999993;
+
+    await assert.rejects(
+      () => mgrUnconf.cancelLogin(token),
+      (err: any) => err instanceof AgyAuthError && err.code === 'AGY_PROCESS_TERMINATION_UNCONFIRMED',
+    );
+    assert.strictEqual(mgrUnconf.getUnconfirmedProcesses().length, 1);
+
+    await assert.rejects(
+      () => mgrUnconf.startLogin(token),
+      (err: any) => err instanceof AgyAuthError && err.statusCode === 409 && err.code === 'AGY_PROFILE_LOCKED',
+    );
+  });
+
+  it('serializes concurrent starts, rejects cross-owner supersede, and prevents cancel/supersede from completing later', async () => {
+    const tokenA = 'operator-A';
+    const tokenB = 'operator-B';
+
+    // 1. Concurrent startLogin calls serialize cleanly and reject cross-owner supersede
+    const mgr = new AgyAuthSessionManager();
+    const [resA, resB] = await Promise.allSettled([
+      mgr.startLogin(tokenA),
+      mgr.startLogin(tokenB),
+    ]);
+    const fulfilledCount = [resA, resB].filter((r) => r.status === 'fulfilled').length;
+    const rejectedCrossOwner = [resA, resB].find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+    assert.strictEqual(fulfilledCount, 1);
+    assert.ok(rejectedCrossOwner);
+    assert.ok(
+      rejectedCrossOwner.reason instanceof AgyAuthError
+      && rejectedCrossOwner.reason.statusCode === 403
+      && rejectedCrossOwner.reason.code === 'SESSION_OWNERSHIP_MISMATCH',
+    );
+    await mgr.cancelLogin(resA.status === 'fulfilled' ? tokenA : tokenB);
+
+    // 2. Cancel during slow submit never turns into completed
+    process.env.FAKE_AGY_MODE = 'slow_exchange';
+    const mgrCancelSubmit = new AgyAuthSessionManager();
+    const s1 = await mgrCancelSubmit.startLogin(tokenA);
+    assert.ok(s1);
+    const submitPromise = mgrCancelSubmit.submitCode(tokenA, s1.loginSessionId, 'SYNTH_CODE_CANCEL_DURING_SUBMIT');
+    await new Promise((r) => setTimeout(r, 40));
+    await mgrCancelSubmit.cancelLogin(tokenA, s1.loginSessionId);
+    const cancelSubmitRes = await submitPromise;
+    assert.strictEqual(cancelSubmitRes.state, 'cancelled');
+    assert.strictEqual(cancelSubmitRes.authenticated, false);
+    assert.strictEqual(mgrCancelSubmit.getStatus(tokenA).session?.state, 'cancelled');
+
+    // 3. Same-owner supersede during slow submit never lets old session become completed
+    const mgrSupersede = new AgyAuthSessionManager();
+    const sOld = await mgrSupersede.startLogin(tokenA);
+    assert.ok(sOld);
+    const oldSubmit = mgrSupersede.submitCode(tokenA, sOld.loginSessionId, 'SYNTH_CODE_SUPERSEDED');
+    await new Promise((r) => setTimeout(r, 40));
+    const sNew = await mgrSupersede.startLogin(tokenA);
+    assert.ok(sNew);
+    assert.notStrictEqual(sNew.loginSessionId, sOld.loginSessionId);
+    const oldRes = await oldSubmit;
+    assert.notStrictEqual(oldRes.state, 'completed');
+    assert.strictEqual(oldRes.authenticated, false);
+    assert.strictEqual(mgrSupersede.getStatus(tokenA).session?.loginSessionId, sNew.loginSessionId);
+    assert.strictEqual(mgrSupersede.getStatus(tokenA).session?.state, 'awaiting_code');
+    await mgrSupersede.cancelLogin(tokenA, sNew.loginSessionId);
+
+    // 4. Bounded submission deadline fails cleanly
+    process.env.FAKE_AGY_MODE = 'never_finish';
+    process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS = '120';
+    const mgrTimeout = new AgyAuthSessionManager();
+    const sTimeout = await mgrTimeout.startLogin(tokenA);
+    assert.ok(sTimeout);
+    const timeoutRes = await mgrTimeout.submitCode(tokenA, sTimeout.loginSessionId, 'SYNTH_CODE_TIMEOUT');
+    assert.strictEqual(timeoutRes.authenticated, false);
+    assert.strictEqual(timeoutRes.state, 'failed');
+    assert.ok(!JSON.stringify(timeoutRes).includes('SYNTH_CODE_TIMEOUT'));
   });
 });
