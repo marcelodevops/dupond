@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'vitest';
+import { describe, it, beforeEach, afterEach, vi } from 'vitest';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,6 +14,9 @@ import {
   GeminiCliCodingWorkerAdapter,
   probeGeminiCliReadiness,
 } from '../src/server/worker/geminiCliWorkerAdapter.js';
+import { SandboxExecutor } from '../src/server/sandbox/sandboxExecutor.js';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { resolveCodingWorker, validateWorkerConfig } from '../src/server/worker/workerRegistry.js';
 
 function createFakeGeminiCliBin(dir: string): string {
@@ -247,6 +250,78 @@ describe('Gemini CLI coding-worker adapter', () => {
       else process.env[k] = v;
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('aborts required policy/credential initialization before spawn and removes temporary secrets', async () => {
+    const sandbox = new SandboxExecutor();
+    vi.spyOn(sandbox, 'isAvailable').mockReturnValue({ available: true, mechanism: 'test' });
+    const spawnSpy = vi.spyOn(childProcess, 'spawn');
+    syncBuiltinESMExports();
+    const mkdir = fs.mkdtempSync.bind(fs);
+    const roots: string[] = [];
+    vi.spyOn(fs, 'mkdtempSync').mockImplementation(((prefix: string) => {
+      const result = mkdir(prefix);
+      roots.push(result);
+      return result;
+    }) as typeof fs.mkdtempSync);
+    const write = fs.writeFileSync.bind(fs);
+    const chmod = fs.chmodSync.bind(fs);
+    try {
+      const base = { worktreePath: repoA, command: process.execPath, rawArgv: true };
+      for (const target of ['../escape', '/absolute-policy']) {
+        await assert.rejects(() => sandbox.execute({ ...base, seedHomeContents: [{ content: 'policy', targetRelToHome: target }] }), /Required sandbox initialization/);
+      }
+      await assert.rejects(() => sandbox.execute({ ...base, seedHomeFiles: [{ sourcePath: path.join(tmpDir, 'missing'), targetRelToHome: '.gemini/oauth_creds.json' }] }), /Required sandbox initialization/);
+      const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation(((file: any, ...args: any[]) => {
+        if (String(file).endsWith('settings.json')) throw new Error('synthetic write failure');
+        return (write as any)(file, ...args);
+      }) as typeof fs.writeFileSync);
+      await assert.rejects(() => sandbox.execute({ ...base,
+        seedHomeFiles: [{ sourcePath: path.join(geminiHome, 'oauth_creds.json'), targetRelToHome: '.gemini/oauth_creds.json' }],
+        seedHomeContents: [{ content: 'policy', targetRelToHome: '.gemini/settings.json' }],
+      }), /Required sandbox initialization/);
+      writeSpy.mockRestore();
+      const chmodSpy = vi.spyOn(fs, 'chmodSync').mockImplementation(((file: any, mode: any) => {
+        if (String(file).endsWith('settings.json') || String(file).endsWith('oauth_creds.json')) throw new Error('synthetic permission failure');
+        return chmod(file, mode);
+      }) as typeof fs.chmodSync);
+      await assert.rejects(() => sandbox.execute({ ...base, seedHomeContents: [{ content: 'policy', targetRelToHome: '.gemini/settings.json' }] }), /Required sandbox initialization/);
+      await assert.rejects(() => sandbox.execute({ ...base, seedHomeFiles: [{ sourcePath: path.join(geminiHome, 'oauth_creds.json'), targetRelToHome: '.gemini/oauth_creds.json' }] }), /Required sandbox initialization/);
+      chmodSpy.mockRestore();
+      assert.strictEqual(spawnSpy.mock.calls.length, 0, 'No worker may launch after initialization failure');
+      assert.ok(roots.length >= 5);
+      for (const root of roots) assert.strictEqual(fs.existsSync(root), false, 'Private HOME including secrets must be removed');
+    } finally {
+      vi.restoreAllMocks();
+      syncBuiltinESMExports();
+    }
+  });
+
+  it('reports local credential prerequisites separately from unverified authentication and rejects invalid ADC', () => {
+    const saved = { ...process.env };
+    try {
+      const oauth = probeGeminiCliReadiness();
+      assert.strictEqual(oauth.authenticationStatus, 'unverified');
+      assert.strictEqual(oauth.modelAccess, 'unverified');
+      fs.rmSync(path.join(geminiHome, 'oauth_creds.json'));
+      fs.writeFileSync(path.join(geminiHome, 'settings.json'), JSON.stringify({ security: { auth: { selectedType: 'vertex-ai' } } }));
+      process.env.GOOGLE_GENAI_USE_VERTEXAI = 'true';
+      process.env.GOOGLE_CLOUD_PROJECT = 'synthetic-project';
+      const adc = path.join(tmpDir, 'adc.json');
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = adc;
+      assert.strictEqual(probeGeminiCliReadiness().authReady, false, 'Vertex flags without credentials are insufficient');
+      fs.writeFileSync(adc, '{bad-json');
+      assert.strictEqual(probeGeminiCliReadiness().available, false);
+      fs.writeFileSync(adc, JSON.stringify({ type: 'authorized_user' }));
+      assert.strictEqual(probeGeminiCliReadiness().authReady, false);
+      fs.writeFileSync(adc, JSON.stringify({ type: 'authorized_user', client_id: 'synthetic', client_secret: 'synthetic', refresh_token: 'synthetic' }));
+      const ready = probeGeminiCliReadiness();
+      assert.strictEqual(ready.available, true);
+      assert.strictEqual(ready.authenticationStatus, 'unverified');
+      assert.strictEqual(ready.authMethod, 'vertex-ai');
+    } finally {
+      process.env = saved;
+    }
   });
 
   it('validates worker registry config, probes binary/version/auth readiness without secrets, and keeps binary-only unauthenticated', async () => {
