@@ -14,6 +14,7 @@ import {
   testOpenAIConnection,
 } from '../openai.js';
 import { probeOpenCodeReadiness } from '../worker/opencodeWorkerAdapter.js';
+import { AgyAuthError, defaultAgyAuthManager } from '../worker/agyAuthManager.js';
 import { probeGeminiCliReadiness } from '../worker/geminiCliWorkerAdapter.js';
 
 const RepositorySchema = z
@@ -365,6 +366,70 @@ export function createProjectRouter(deps: ProjectRouterDeps = {}): Router {
     try {
       res.json(probeOpenCodeReadiness());
     } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.get('/workers/agy/auth/status', (req: Request, res: Response) => {
+    try {
+      res.json(defaultAgyAuthManager.getStatus(req.headers.authorization));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  router.post('/workers/agy/auth/start', async (req: Request, res: Response) => {
+    try {
+      const session = await defaultAgyAuthManager.startLogin(req.headers.authorization);
+      res.json({ session });
+    } catch (err) {
+      if (err instanceof AgyAuthError) {
+        res.status(err.statusCode).json({ error: err.message, code: err.code });
+        return;
+      }
+      fail(res, err);
+    }
+  });
+
+  router.post('/workers/agy/auth/submit', async (req: Request, res: Response) => {
+    try {
+      const parsed = z
+        .object({
+          loginSessionId: z.string().trim().min(1).max(128),
+          code: z.string().max(1024),
+        })
+        .strict()
+        .parse(req.body ?? {});
+      const result = await defaultAgyAuthManager.submitCode(
+        req.headers.authorization,
+        parsed.loginSessionId,
+        parsed.code
+      );
+      res.json(result);
+    } catch (err) {
+      if (err instanceof AgyAuthError) {
+        res.status(err.statusCode).json({ error: err.message, code: err.code });
+        return;
+      }
+      fail(res, err);
+    }
+  });
+
+  router.post('/workers/agy/auth/cancel', async (req: Request, res: Response) => {
+    try {
+      const parsed = z
+        .object({
+          loginSessionId: z.string().trim().min(1).max(128).optional(),
+        })
+        .strict()
+        .parse(req.body ?? {});
+      await defaultAgyAuthManager.cancelLogin(req.headers.authorization, parsed.loginSessionId);
+      res.json({ ok: true });
+    } catch (err) {
+      if (err instanceof AgyAuthError) {
+        res.status(err.statusCode).json({ error: err.message, code: err.code });
+        return;
+      }
       fail(res, err);
     }
   });

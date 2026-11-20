@@ -229,6 +229,33 @@ export interface OpenCodeWorkerStatus {
   error?: string;
 }
 
+export type AgyAuthSessionState =
+  | 'idle'
+  | 'starting'
+  | 'awaiting_code'
+  | 'submitting'
+  | 'completed'
+  | 'cancelled'
+  | 'expired'
+  | 'failed';
+
+export interface AgyAuthSessionInfo {
+  loginSessionId: string;
+  state: AgyAuthSessionState;
+  authUrl?: string;
+  expiresAt?: string;
+  error?: string;
+}
+
+export interface AgyAuthStatus {
+  cliAvailable: boolean;
+  executablePath: string | null;
+  version: string | null;
+  profileAuthenticated: boolean;
+  availableModelsCount: number;
+  session: AgyAuthSessionInfo | null;
+}
+
 export interface GeminiCliWorkerStatus {
   available: boolean;
   executablePath: string | null;

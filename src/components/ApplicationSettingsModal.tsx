@@ -4,6 +4,7 @@ import {
   PlanningReadiness,
   GeminiCredentialStatus,
   OpenAICredentialStatus,
+  AgyAuthStatus,
   CredentialSource,
   CredentialTestOutcome,
 } from '../types/projectContract';
@@ -571,6 +572,11 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     openai: false,
   });
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  const [agyAuthStatus, setAgyAuthStatus] = useState<AgyAuthStatus | null>(null);
+  const [agyCodeInput, setAgyCodeInput] = useState('');
+  const [agyBusy, setAgyBusy] = useState(false);
+  const [agyError, setAgyError] = useState<string | null>(null);
+  const [agyNotice, setAgyNotice] = useState<string | null>(null);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -634,6 +640,10 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
       setPlanningReadiness(null);
       setGeminiStatus(null);
       setOpenaiStatus(null);
+      setAgyAuthStatus(null);
+      setAgyCodeInput('');
+      setAgyError(null);
+      setAgyNotice(null);
       setGeminiLoadError(null);
       setOpenaiLoadError(null);
       setShowDiscardConfirm(false);
@@ -641,6 +651,9 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     }
     setGeminiKeyInput('');
     setOpenaiKeyInput('');
+    setAgyCodeInput('');
+    setAgyError(null);
+    setAgyNotice(null);
     setShowDiscardConfirm(false);
 
     let mounted = true;
@@ -651,6 +664,15 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
     setPlanningReadiness(null);
     setGeminiStatus(null);
     setOpenaiStatus(null);
+
+    projectApi
+      .getAgyAuthStatus()
+      .then((agyRes) => {
+        if (mounted) setAgyAuthStatus(agyRes);
+      })
+      .catch((err) => {
+        if (mounted) setAgyError(err?.message || 'Failed to load Antigravity CLI auth status.');
+      });
 
     Promise.all([projectApi.getPlanningReadiness(), projectApi.getGeminiCredentialStatus()])
       .then(([readinessRes, credRes]) => {
@@ -922,6 +944,172 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                 </p>
               )}
             </div>
+          </div>
+
+          {/* Antigravity CLI (Dedicated Profile PTY OAuth Prototype) */}
+          <div
+            data-testid="agy-auth-card"
+            className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2.5"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-xs font-semibold text-slate-200">
+                  Antigravity CLI (Dedicated Profile)
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Isolated OAuth onboarding via PTY into Dupond&apos;s dedicated profile directory.
+                </div>
+              </div>
+              {agyAuthStatus?.profileAuthenticated ? (
+                <span
+                  data-testid="agy-auth-badge"
+                  className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                >
+                  Authenticated ({agyAuthStatus.availableModelsCount} models)
+                </span>
+              ) : (
+                <span
+                  data-testid="agy-auth-badge"
+                  className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                >
+                  Not Signed In
+                </span>
+              )}
+            </div>
+
+            {agyError && (
+              <div
+                data-testid="agy-auth-error"
+                className="p-2 rounded-lg bg-rose-950/40 border border-rose-800/60 text-rose-200 text-[11px]"
+              >
+                {agyError}
+              </div>
+            )}
+
+            {agyNotice && (
+              <div
+                data-testid="agy-auth-notice"
+                className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-200 text-[11px]"
+              >
+                {agyNotice}
+              </div>
+            )}
+
+            {agyAuthStatus?.session?.state === 'awaiting_code' && agyAuthStatus.session.authUrl ? (
+              <div className="space-y-2 pt-1">
+                <div className="text-[11px] text-slate-300">
+                  1. Open the official Antigravity Google login link and sign in:
+                </div>
+                <a
+                  data-testid="agy-auth-url"
+                  href={agyAuthStatus.session.authUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block p-2 rounded-lg bg-slate-900 border border-slate-700 text-indigo-300 hover:text-indigo-200 text-[11px] font-mono break-all underline"
+                >
+                  {agyAuthStatus.session.authUrl}
+                </a>
+                <div className="text-[11px] text-slate-300">
+                  2. Paste the authorization code from the completion page:
+                </div>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="password"
+                    data-testid="agy-auth-code-input"
+                    autoComplete="off"
+                    value={agyCodeInput}
+                    onChange={(e) => setAgyCodeInput(e.target.value)}
+                    placeholder="Paste authorization code..."
+                    disabled={agyBusy}
+                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    data-testid="agy-auth-submit-btn"
+                    disabled={agyBusy || !agyCodeInput.trim()}
+                    onClick={async () => {
+                      const sessionId = agyAuthStatus.session?.loginSessionId;
+                      if (!sessionId) return;
+                      const submitted = agyCodeInput;
+                      setAgyCodeInput('');
+                      setAgyBusy(true);
+                      setAgyError(null);
+                      setAgyNotice(null);
+                      try {
+                        const res = await projectApi.submitAgyAuthCode(sessionId, submitted);
+                        if (res.authenticated) {
+                          setAgyNotice(`Dedicated profile authenticated (${res.modelsCount} models available).`);
+                        } else {
+                          setAgyError(res.error || 'Authentication failed.');
+                        }
+                        setAgyAuthStatus(await projectApi.getAgyAuthStatus());
+                      } catch (err: any) {
+                        setAgyError(err?.message || 'Failed to submit authorization code.');
+                        try {
+                          setAgyAuthStatus(await projectApi.getAgyAuthStatus());
+                        } catch {}
+                      } finally {
+                        setAgyBusy(false);
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
+                  >
+                    {agyBusy ? 'Submitting...' : 'Submit Code'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="agy-auth-cancel-btn"
+                    disabled={agyBusy}
+                    onClick={async () => {
+                      setAgyCodeInput('');
+                      setAgyBusy(true);
+                      setAgyError(null);
+                      try {
+                        await projectApi.cancelAgyAuth(agyAuthStatus.session?.loginSessionId);
+                        setAgyAuthStatus(await projectApi.getAgyAuthStatus());
+                      } catch (err: any) {
+                        setAgyError(err?.message || 'Failed to cancel login.');
+                      } finally {
+                        setAgyBusy(false);
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-[11px] text-slate-400">
+                  {agyAuthStatus?.cliAvailable
+                    ? `CLI v${agyAuthStatus.version || 'unknown'} ready`
+                    : 'Antigravity CLI (agy) not found on server'}
+                </span>
+                <button
+                  type="button"
+                  data-testid="agy-auth-start-btn"
+                  disabled={agyBusy || agyAuthStatus?.cliAvailable === false}
+                  onClick={async () => {
+                    setAgyCodeInput('');
+                    setAgyBusy(true);
+                    setAgyError(null);
+                    setAgyNotice(null);
+                    try {
+                      await projectApi.startAgyAuth();
+                      setAgyAuthStatus(await projectApi.getAgyAuthStatus());
+                    } catch (err: any) {
+                      setAgyError(err?.message || 'Failed to start Antigravity CLI login.');
+                    } finally {
+                      setAgyBusy(false);
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
+                >
+                  {agyBusy ? 'Starting...' : agyAuthStatus?.profileAuthenticated ? 'Reconnect Antigravity CLI' : 'Connect Antigravity CLI'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
