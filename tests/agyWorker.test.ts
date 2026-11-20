@@ -74,7 +74,9 @@ function initGitRepo(tmpDir: string): string {
   const repoDir = path.join(tmpDir, 'repo');
   const bareDir = path.join(tmpDir, 'remote.git');
   fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(repoDir, 'secrets'), { recursive: true });
   fs.writeFileSync(path.join(repoDir, 'src', 'feature.ts'), 'export const value = 1;\n');
+  fs.writeFileSync(path.join(repoDir, 'secrets', 'token.txt'), 'protected\n');
   fs.writeFileSync(
     path.join(repoDir, 'package.json'),
     JSON.stringify({ name: 'test-repo', version: '1.0.0', type: 'module' }, null, 2),
