@@ -55,6 +55,8 @@ export interface WorkerExecutionResult {
   };
   durationMs: number;
   errorMessage?: string;
+  /** True when the failure is a deterministic startup/configuration/prerequisite error that should not be retried */
+  nonRetryable?: boolean;
 }
 
 export interface CodingWorkerAdapter {

@@ -84,6 +84,8 @@ function buildOpenCodeEnv(
   const sandboxStrippedKeys = new Set([
     'HOME',
     'TMPDIR',
+    'PWD',
+    'OLDPWD',
     'XDG_DATA_HOME',
     'XDG_CONFIG_HOME',
     'XDG_STATE_HOME',
@@ -675,6 +677,10 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
         eventErrors[0] ||
         sanitizeWorkerOutput(boundedStderr.trim()) ||
         `OpenCode exited with code ${sandboxResult.exitCode ?? 'null'}`;
+      const isDeterministicStartupFailure =
+        /Failed to change directory to|Model unavailable|provider\.no-route|executable not found|not authenticated|unauthorized|invalid api key|ENOENT/i.test(
+          detail,
+        );
       return {
         success: false,
         filesModified: repoInspection.filesModified,
@@ -684,6 +690,7 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
         tokenUsage: tokenUsage.totalTokens > 0 ? tokenUsage : undefined,
         durationMs: Date.now() - startTime,
         errorMessage: `OpenCode CLI failed: ${detail}`,
+        nonRetryable: isDeterministicStartupFailure,
       };
     }
 
