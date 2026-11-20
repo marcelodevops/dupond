@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.16.0](https://github.com/marcelodevops/dupond/compare/v0.15.0...v0.16.0) (2026-11-20)
+
+
+### Features
+
+* **sandbox:** add rawArgv, gitReadOnly, denyWritePaths, and minimal auth seeding ([6a1c975](https://github.com/marcelodevops/dupond/commit/6a1c97511039ca4c736b03bcbb3a838cc39f0d79))
+* **ui:** add OpenCode CLI worker and model selection in Task Details and Add Task ([c65e072](https://github.com/marcelodevops/dupond/commit/c65e072668f3e03dcaaa16ccde878b790b05ed13))
+* **worker:** add OpenCode CLI coding-worker adapter ([024ecc3](https://github.com/marcelodevops/dupond/commit/024ecc3875be4e43380451f7e3ca57f874eaeece))
+* **worker:** add OpenCode CLI coding-worker adapter with worktree isolation and boundary checks ([821ef13](https://github.com/marcelodevops/dupond/commit/821ef1333a72b945f919c08203ba731328991058))
+
+
+### Bug Fixes
+
+* **opencode:** override inherited PWD in sandbox and fail fast on startup prerequisites ([e5ae0f2](https://github.com/marcelodevops/dupond/commit/e5ae0f2637306cb7f9c239037753524aae0e5612))
+* **opencode:** route CLI execution through OS sandbox and verify full repo baseline ([2018240](https://github.com/marcelodevops/dupond/commit/2018240226ab6e8cdb949262d20640d4b6dace9d))
+* **opencode:** strip parent PWD and fail fast on deterministic startup prerequisites ([4dd4229](https://github.com/marcelodevops/dupond/commit/4dd4229df4eea23d5030763f4d0927d6e61d3494))
+* **sandbox:** pin PWD to worktreePath instead of inheriting parent server PWD ([de5e403](https://github.com/marcelodevops/dupond/commit/de5e403cd8a49b6113c3e703f2bd18f15984961d))
+* **sandbox:** translate protected-path subtree and glob patterns into enforceable OS rules ([3052c2a](https://github.com/marcelodevops/dupond/commit/3052c2a4d0dc8e6f2d112608799a374829d8db12))
+
 ## [0.15.0](https://github.com/marcelodevops/dupond/compare/v0.14.1...v0.15.0) (2026-11-18)
 
 
