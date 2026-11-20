@@ -38,7 +38,10 @@ export interface GeminiCliReadinessStatus {
   executablePath: string | null;
   version: string | null;
   supportedVersion: boolean;
+  /** Local credential prerequisites only; does not establish provider acceptance. */
   authReady: boolean;
+  authenticationStatus?: 'unverified';
+  modelAccess?: 'unverified';
   authMethod: GeminiCliAuthMethod;
   models: string[];
   defaultModel: string;
@@ -148,27 +151,25 @@ function inspectGeminiCliAuth(): {
 
   const adcEnvPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
   const defaultAdcPath = path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
-  const resolvedAdc =
-    adcEnvPath && fs.existsSync(adcEnvPath)
-      ? adcEnvPath
-      : fs.existsSync(defaultAdcPath)
-        ? defaultAdcPath
-        : undefined;
-
-  if (process.env.GOOGLE_GENAI_USE_VERTEXAI === 'true' && process.env.GOOGLE_CLOUD_PROJECT?.trim()) {
-    return {
-      authReady: true,
-      authMethod: 'vertex-ai',
-      adcPath: resolvedAdc,
-    };
-  }
-
-  if (resolvedAdc && (selectedType === 'compute-default-credentials' || selectedType === 'vertex-ai')) {
-    return {
-      authReady: true,
-      authMethod: 'adc',
-      adcPath: resolvedAdc,
-    };
+  const resolvedAdc = adcEnvPath || (fs.existsSync(defaultAdcPath) ? defaultAdcPath : undefined);
+  const vertexRequested = process.env.GOOGLE_GENAI_USE_VERTEXAI === 'true';
+  const adcRequested = vertexRequested || selectedType === 'compute-default-credentials' || selectedType === 'vertex-ai';
+  if (adcRequested) {
+    if (vertexRequested && !process.env.GOOGLE_CLOUD_PROJECT?.trim()) {
+      return { authReady: false, authMethod: 'none', reason: 'Vertex AI requires GOOGLE_CLOUD_PROJECT and a supported local ADC credential file.' };
+    }
+    try {
+      if (!resolvedAdc) throw new Error('missing ADC');
+      const adc = JSON.parse(fs.readFileSync(resolvedAdc, 'utf-8'));
+      const nonempty = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+      const supported =
+        (adc.type === 'authorized_user' && nonempty(adc.client_id) && nonempty(adc.client_secret) && nonempty(adc.refresh_token)) ||
+        (adc.type === 'service_account' && nonempty(adc.client_email) && nonempty(adc.private_key));
+      if (!supported) throw new Error('unsupported ADC');
+      return { authReady: true, authMethod: vertexRequested ? 'vertex-ai' : 'adc', adcPath: resolvedAdc };
+    } catch {
+      return { authReady: false, authMethod: 'none', reason: 'ADC credentials are missing, unreadable, malformed, or unsupported. Configure a local authorized_user or service_account ADC file. Authentication and model access have not been verified.' };
+    }
   }
 
   return {
@@ -289,6 +290,8 @@ export function probeGeminiCliReadiness(): GeminiCliReadinessStatus {
     version,
     supportedVersion: true,
     authReady: true,
+    authenticationStatus: 'unverified',
+    modelAccess: 'unverified',
     authMethod: auth.authMethod,
     models: [...SUPPORTED_GEMINI_CLI_MODELS],
     defaultModel: DEFAULT_GEMINI_CLI_MODEL,
@@ -400,7 +403,7 @@ export class GeminiCliCodingWorkerAdapter implements CodingWorkerAdapter {
     const prompt = buildGeminiCliPrompt(context);
     const timeoutMs = Math.max(1000, context.timeoutMs ?? 300_000);
 
-    const seedHomeFiles: Array<{ sourcePath: string; targetRelToHome: string }> = [];
+    const seedHomeFiles: Array<{ sourcePath: string; targetRelToHome: string; required?: boolean }> = [];
     if (auth.oauthCredsPath) {
       seedHomeFiles.push({
         sourcePath: auth.oauthCredsPath,
@@ -411,6 +414,7 @@ export class GeminiCliCodingWorkerAdapter implements CodingWorkerAdapter {
       seedHomeFiles.push({
         sourcePath: auth.googleAccountsPath,
         targetRelToHome: '.gemini/google_accounts.json',
+        required: false,
       });
     }
     if (auth.adcPath) {
@@ -444,6 +448,8 @@ export class GeminiCliCodingWorkerAdapter implements CodingWorkerAdapter {
       if (process.env.GOOGLE_CLOUD_PROJECT) env.GOOGLE_CLOUD_PROJECT = process.env.GOOGLE_CLOUD_PROJECT;
       if (process.env.GOOGLE_CLOUD_LOCATION) env.GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION;
     }
+
+    delete env.GOOGLE_APPLICATION_CREDENTIALS;
 
     const args = [
       '-p',
