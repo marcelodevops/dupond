@@ -30,6 +30,7 @@ import {
   OpenAICredentialStatus,
   OpenAITestResult,
   OpenCodeWorkerStatus,
+  GeminiCliWorkerStatus,
   ProjectSourcePlan,
   ParsePlanRequest,
   AdoptPlanRequest,
@@ -423,6 +424,17 @@ export const projectApi = {
   async getOpenCodeWorkerStatus(signal?: AbortSignal): Promise<OpenCodeWorkerStatus> {
     return callProjectApi<OpenCodeWorkerStatus>(
       '/api/workers/opencode/status',
+      { method: 'GET' },
+      signal
+    );
+  },
+
+  /**
+   * Probe local Gemini CLI availability, version, and auth readiness (read-only metadata, never returns secrets)
+   */
+  async getGeminiCliWorkerStatus(signal?: AbortSignal): Promise<GeminiCliWorkerStatus> {
+    return callProjectApi<GeminiCliWorkerStatus>(
+      '/api/workers/gemini-cli/status',
       { method: 'GET' },
       signal
     );

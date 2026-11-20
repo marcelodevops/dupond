@@ -189,3 +189,24 @@ A live parity demonstration was executed against the disposable public repositor
   ```
 - **Observed Behavior**: Detected `insufficient_quota` and immediately failed closed without retrying or looping.
 - **Unblocking Requirement**: Deposit prepaid API credits at `https://platform.openai.com/settings/organization/billing/`.
+
+
+### Gemini CLI readiness and sandbox initialization
+
+CLI readiness reports local prerequisites only. `authReady` means a supported
+credential source was found; `authenticationStatus: unverified` and
+`modelAccess: unverified` explicitly indicate that no provider request was made.
+OAuth token presence does not prove validity or available quota. Vertex flags
+and a project name alone are insufficient: configure a readable local ADC JSON
+file of type `authorized_user` or `service_account` with the required fields.
+Metadata/ambient credentials and other ADC types are not supported by this adapter.
+
+The sandbox must copy required credentials and write its hardened policy before
+launch. Initialization or permission failures abort execution and remove the
+private HOME. Optional account metadata may be omitted. Credential copies and
+policy content are required by default; only explicitly `required: false` seeds
+may fail without aborting.
+
+Controlled fake-CLI tests exercise candidate verification and Review. Real CLI
+startup reaching an authentication failure does not establish successful real
+authenticated inference, which remains unverified.

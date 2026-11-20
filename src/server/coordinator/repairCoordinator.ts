@@ -247,7 +247,7 @@ export class RepairCoordinator {
           lastFailureReason = `Worker failed on attempt ${attemptNum}: ${workerErr.message}`;
           lastFailureType = 'implementation';
           const isDeterministicPrereqError =
-            /^(Worker execution blocked|Prerequisite missing|Sandbox cannot enforce|Unsupported protected-path|Unsafe protected-path|OpenCode boundary violation):/i.test(
+            /^(Worker execution blocked|Prerequisite missing|Sandbox cannot enforce|Unsupported protected-path|Unsafe protected-path|OpenCode boundary violation|Gemini CLI boundary violation):/i.test(
               workerErr?.message || '',
             );
           if (isDeterministicPrereqError) {
