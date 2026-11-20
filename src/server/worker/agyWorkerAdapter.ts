@@ -82,16 +82,36 @@ function buildAgyPrompt(context: WorkerExecutionContext): string {
   return parts.filter(Boolean).join('\n\n');
 }
 
-function extractAgyJsonPayload(stdout: string): {
+interface AgyJsonInfo {
   parsed?: any;
   tokenUsage?: WorkerExecutionResult['tokenUsage'];
   errorText?: string;
-} {
+  empty?: boolean;
+  malformed?: boolean;
+  validCompletion: boolean;
+  invalidReason?: string;
+}
+
+function extractAgyJsonPayload(stdout: string): AgyJsonInfo {
   const trimmed = stdout.trim();
-  if (!trimmed) return {};
+  if (!trimmed) {
+    return {
+      empty: true,
+      validCompletion: false,
+      invalidReason: 'Antigravity CLI returned empty output instead of structured JSON.',
+    };
+  }
   try {
     const obj = JSON.parse(trimmed);
-    const usage = obj?.usage || obj?.tokenUsage || obj?.stats?.models;
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      return {
+        malformed: true,
+        validCompletion: false,
+        invalidReason: 'Antigravity CLI returned non-object JSON output.',
+      };
+    }
+
+    const usage = obj.usage || obj.tokenUsage || obj.stats?.models;
     let tokenUsage: WorkerExecutionResult['tokenUsage'];
     if (usage && typeof usage === 'object') {
       const promptTokens = Number(usage.input_tokens ?? usage.promptTokens ?? usage.input ?? 0);
@@ -101,15 +121,61 @@ function extractAgyJsonPayload(stdout: string): {
         tokenUsage = { promptTokens, completionTokens, totalTokens };
       }
     }
-    const errorText =
-      typeof obj?.error === 'string'
+
+    const rawErrorFromField =
+      typeof obj.error === 'string'
         ? obj.error
-        : typeof obj?.error?.message === 'string'
+        : typeof obj.error?.message === 'string'
           ? obj.error.message
-          : undefined;
-    return { parsed: obj, tokenUsage, errorText };
+          : Array.isArray(obj.errors) && obj.errors.length > 0
+            ? obj.errors.map((e: any) => (typeof e === 'string' ? e : JSON.stringify(e))).join('; ')
+            : undefined;
+
+    const isErrorEnvelope =
+      Boolean(rawErrorFromField) ||
+      obj.is_error === true ||
+      obj.type === 'error' ||
+      (typeof obj.subtype === 'string' && obj.subtype !== 'success');
+
+    let errorText: string | undefined;
+    if (isErrorEnvelope) {
+      const rawErr =
+        rawErrorFromField ||
+        (typeof obj.result === 'string' && obj.result.trim() ? obj.result : undefined) ||
+        (typeof obj.message === 'string' && obj.message.trim() ? obj.message : undefined) ||
+        `Antigravity CLI reported an error envelope (${obj.subtype || obj.type || 'is_error'}).`;
+      errorText = sanitizeWorkerOutput(rawErr);
+    }
+
+    const hasResultEvidence =
+      typeof obj.result === 'string' ||
+      (typeof obj.session_id === 'string' && obj.session_id.length > 0) ||
+      (typeof obj.num_turns === 'number' && obj.num_turns >= 1);
+
+    const validCompletion =
+      !isErrorEnvelope &&
+      obj.type === 'result' &&
+      hasResultEvidence;
+
+    return {
+      parsed: obj,
+      tokenUsage,
+      errorText,
+      validCompletion,
+      ...(validCompletion
+        ? {}
+        : {
+            invalidReason:
+              errorText ||
+              'Antigravity CLI JSON output did not match a valid completion result envelope.',
+          }),
+    };
   } catch {
-    return {};
+    return {
+      malformed: true,
+      validCompletion: false,
+      invalidReason: 'Antigravity CLI returned malformed JSON output.',
+    };
   }
 }
 
@@ -330,9 +396,15 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
       };
     }
 
-    if (sbRes.exitCode !== 0 || jsonInfo.errorText) {
-      const detail = jsonInfo.errorText || sanitizeWorkerOutput(sbRes.stderr || sbRes.stdout || '').trim();
+    if (sbRes.exitCode !== 0 || jsonInfo.errorText || !jsonInfo.validCompletion) {
+      const detail = sanitizeWorkerOutput(
+        jsonInfo.errorText || sbRes.stderr || sbRes.stdout || '',
+      ).trim();
       const nonRetryable = isNonRetryableAgyError(detail);
+      const errorMessage =
+        sbRes.exitCode !== 0 || jsonInfo.errorText
+          ? `Antigravity CLI failed (exit ${sbRes.exitCode})${detail ? `: ${detail.slice(0, 400)}` : '.'}`
+          : jsonInfo.invalidReason || 'Antigravity CLI exited 0 without a verified JSON completion envelope.';
       return {
         success: false,
         filesModified: inspection.filesModified,
@@ -341,7 +413,7 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
         logs,
         tokenUsage: jsonInfo.tokenUsage,
         durationMs: Date.now() - startTime,
-        errorMessage: `Antigravity CLI failed (exit ${sbRes.exitCode})${detail ? `: ${detail.slice(0, 400)}` : '.'}`,
+        errorMessage,
         ...(nonRetryable ? { nonRetryable: true } : {}),
       };
     }
