@@ -48,12 +48,29 @@ if (args[0] === 'run') {
     console.error('ENV_DIAG:' + JSON.stringify({
       config: process.env.OPENCODE_CONFIG_CONTENT || '',
       disableProjectConfig: process.env.OPENCODE_DISABLE_PROJECT_CONFIG || '',
+      pwd: process.env.PWD || '',
       hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
       hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
       hasDupondAuth: Boolean(process.env.DUPOND_AUTH_TOKEN),
       cwd: process.cwd(),
       args,
     }));
+  }
+  if (mode === 'honor_pwd') {
+    const targetDir = process.env.PWD || process.cwd();
+    try {
+      process.chdir(targetDir);
+    } catch {
+      console.log(JSON.stringify({ type: 'error', error: { message: 'Failed to change directory to ' + targetDir } }));
+      process.exit(1);
+    }
+    fs.writeFileSync(path.join(process.cwd(), 'impl.mjs'), 'export const ok = true;\\n');
+    console.log(JSON.stringify({ type: 'text', part: { text: 'honored sandboxed PWD cleanly' } }));
+    process.exit(0);
+  }
+  if (mode === 'deterministic_startup_error') {
+    console.log(JSON.stringify({ type: 'error', error: { type: 'provider.no-route', message: 'Model unavailable: opencode/nonexistent-test' } }));
+    process.exit(1);
   }
   if (mode === 'attempt_read_outside') {
     try {
@@ -598,5 +615,121 @@ describe('OpenCode CLI coding-worker adapter', () => {
       () => adapter.execute({ ...ctx, protectedPaths: ['secrets/{a,b}.key'] }),
       /Unsupported protected-path pattern/i,
     );
+  });
+
+  it('overrides inherited parent-repo PWD in sandboxed linked worktrees and validates real OpenCode CLI startup when installed', async () => {
+    const homeBase = fs.mkdtempSync(path.join(os.homedir(), '.dupond-pwd-test-'));
+    const origPwd = process.env.PWD;
+    try {
+      const parentRepo = path.join(homeBase, 'parent-repo');
+      const worktreePath = path.join(parentRepo, '.dupond_worktrees', 'run-pwd-check');
+      fs.mkdirSync(parentRepo, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: parentRepo });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: parentRepo });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: parentRepo });
+      fs.writeFileSync(path.join(parentRepo, 'impl.mjs'), 'export const ok = false;\n');
+      execFileSync('git', ['add', '.'], { cwd: parentRepo });
+      execFileSync('git', ['commit', '-m', 'init'], { cwd: parentRepo });
+      execFileSync('git', ['worktree', 'add', '-b', 'run-pwd-check', worktreePath, 'HEAD'], { cwd: parentRepo });
+
+      const realWorktree = fs.realpathSync(worktreePath);
+      process.env.PWD = parentRepo;
+      process.env.FAKE_OPENCODE_MODE = 'honor_pwd';
+      process.env.FAKE_OPENCODE_EMIT_ENV = '1';
+
+      const adapter = new OpenCodeCodingWorkerAdapter('github-copilot/gpt-5.3-codex');
+      const res = await adapter.execute({
+        taskId: 't-pwd',
+        taskKey: 'OPC-501',
+        taskTitle: 'PWD isolation check',
+        taskDescription: 'Desc',
+        acceptanceCriteria: [],
+        worktreePath: realWorktree,
+        allowedPaths: ['impl.mjs'],
+        protectedPaths: [],
+        attemptNumber: 1,
+      });
+
+      assert.strictEqual(res.success, true, `Expected success, got: ${res.errorMessage}`);
+      const logsStr = res.logs.join('\n');
+      const diagMatch = logsStr.match(/ENV_DIAG:(\{.*\})/);
+      assert.ok(diagMatch, 'Expected ENV_DIAG log');
+      const diag = JSON.parse(diagMatch[1]);
+      assert.strictEqual(diag.pwd, realWorktree, 'PWD inside sandbox must be the worktree, not parent repo');
+      assert.strictEqual(diag.cwd, realWorktree);
+
+      // Real installed OpenCode CLI startup check (non-paid model error, zero paid calls)
+      const realOpenCodeBin = path.join(os.homedir(), '.opencode', 'bin', 'opencode');
+      if (process.platform === 'darwin' && fs.existsSync(realOpenCodeBin)) {
+        const { SandboxExecutor } = await import('../src/server/sandbox/sandboxExecutor.js');
+        const realBin = fs.realpathSync(realOpenCodeBin);
+        const sb = new SandboxExecutor();
+        const realRes = await sb.execute({
+          worktreePath: realWorktree,
+          command: realOpenCodeBin,
+          args: ['run', '--standalone', '--format', 'json', '--archived', '--auto', '--model', 'opencode/nonexistent-test', 'hello'],
+          rawArgv: true,
+          timeoutMs: 10_000,
+          allowNetwork: true,
+          gitReadOnly: true,
+          extraReadPaths: [realOpenCodeBin, path.dirname(realOpenCodeBin), realBin, path.dirname(realBin), process.execPath, path.dirname(process.execPath)],
+          env: {
+            PWD: parentRepo, // Explicitly pass parentRepo PWD to prove SandboxExecutor overrides it
+            OPENCODE_DISABLE_PROJECT_CONFIG: 'true',
+          },
+        });
+        assert.strictEqual(
+          realRes.stdout.includes('Failed to change directory to'),
+          false,
+          `Real OpenCode CLI hit chdir failure: ${realRes.stdout}`,
+        );
+        assert.ok(
+          realRes.stdout.includes('Model unavailable'),
+          `Expected real OpenCode CLI to reach model validation cleanly, got stdout=${realRes.stdout} stderr=${realRes.stderr}`,
+        );
+      }
+    } finally {
+      delete process.env.FAKE_OPENCODE_EMIT_ENV;
+      if (origPwd === undefined) delete process.env.PWD;
+      else process.env.PWD = origPwd;
+      fs.rmSync(homeBase, { recursive: true, force: true });
+    }
+  });
+
+  it('fails fast in 1 attempt on deterministic startup/configuration errors without spending 3 repair attempts', async () => {
+    const store = new TaskStore(dbPath);
+    const projectStore = new ProjectStore(store);
+    const proj = projectStore.createProject({ name: 'FailFast Proj', actor: 'test', repository: { localPath: repoA, defaultBranch: 'main' } });
+    const task = store.createTask({
+      id: 'task-opc-failfast',
+      key: 'OPC-502',
+      projectId: proj.id,
+      title: 'Deterministic startup error test',
+      description: 'Should not retry 3 times on deterministic startup error',
+      status: 'in_progress',
+      targetRepo: 'local',
+      targetRepoPath: repoA,
+      baseCommit: 'main',
+      allowedPaths: ['impl.mjs'],
+      protectedPaths: [],
+      acceptanceCriteria: [{ id: 'ac-1', title: 'passes', completed: false, checkCommand: 'true' }],
+      verificationCommands: [{ command: 'true', criteriaIds: ['ac-1'] }],
+      workerConfig: { provider: 'opencode', model: 'github-copilot/claude-sonnet-4.6' },
+      maxAttempts: 3,
+    });
+
+    const coordinator = new RepairCoordinator(store, new WorkspaceManager(repoA), new AuthoritativeVerifier());
+    process.env.FAKE_OPENCODE_MODE = 'deterministic_startup_error';
+    const run = await coordinator.executeTaskRun({
+      task,
+      workspaceManager: new WorkspaceManager(repoA),
+      runId: 'run-opc-failfast',
+    });
+
+    assert.strictEqual(run.status, 'failed');
+    assert.ok(run.failureReason?.includes('Model unavailable'));
+    const attempts = store.listAttempts('run-opc-failfast', proj.id);
+    assert.strictEqual(attempts.length, 1, 'Deterministic startup failure must stop after 1 attempt instead of 3');
+    store.getRawDb().close();
   });
 });

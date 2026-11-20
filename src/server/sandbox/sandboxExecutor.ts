@@ -430,7 +430,8 @@ ${networkRule}
   private buildSanitizedEnv(
     customEnv?: Record<string, string>,
     sandboxTmp?: string,
-    preserveEnvKeys?: string[]
+    preserveEnvKeys?: string[],
+    worktreePath?: string
   ): NodeJS.ProcessEnv {
     const allowedKeys = ['PATH', 'LANG', 'LC_ALL', 'TERM', 'SHELL', 'SYSTEMROOT'];
     const cleanEnv: NodeJS.ProcessEnv = {};
@@ -445,12 +446,18 @@ ${networkRule}
       cleanEnv.TMPDIR = sandboxTmp;
       cleanEnv.HOME = sandboxTmp; // Divert HOME away from host home
     }
+    if (worktreePath) {
+      cleanEnv.PWD = worktreePath; // Never inherit parent server's PWD
+    }
 
     if (customEnv) {
       // Never allow host secrets even if accidentally passed in customEnv unless explicitly requested via preserveEnvKeys
       const forbiddenPatterns = [/key/i, /token/i, /secret/i, /passwd/i, /credential/i, /gemini/i, /openai/i, /jira/i, /slack/i, /gh_/i, /github_/i];
       const preserved = new Set(preserveEnvKeys ?? []);
       for (const [k, v] of Object.entries(customEnv)) {
+        if (k === 'PWD' || k === 'OLDPWD') {
+          continue;
+        }
         if (k === 'HOME' && sandboxTmp) {
           const resolvedHome = path.resolve(v);
           if (resolvedHome === sandboxTmp || resolvedHome.startsWith(`${sandboxTmp}${path.sep}`)) {
@@ -514,7 +521,7 @@ ${networkRule}
     }
 
     const timeoutMs = options.timeoutMs || 45000;
-    const cleanEnv = this.buildSanitizedEnv(options.env, realTmp, options.preserveEnvKeys);
+    const cleanEnv = this.buildSanitizedEnv(options.env, realTmp, options.preserveEnvKeys, realWorktree);
 
     let execCmd: string;
     let execArgs: string[];
