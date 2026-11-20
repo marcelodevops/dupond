@@ -143,37 +143,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
     };
   }, [task.workerConfig?.provider, runRefreshKey]);
 
-  useEffect(() => {
-    if (task.workerConfig?.provider !== 'gemini-cli') {
-      setGeminiCliStatus(null);
-      setGeminiCliCustomModelMode(false);
-      return;
-    }
-    let cancelled = false;
-    projectApi
-      .getGeminiCliWorkerStatus()
-      .then((status) => {
-        if (!cancelled) setGeminiCliStatus(status);
-      })
-      .catch((err: any) => {
-        if (!cancelled) {
-          setGeminiCliStatus({
-            available: false,
-            executablePath: null,
-            version: null,
-            supportedVersion: false,
-            authReady: false,
-            authMethod: 'none',
-            models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-            defaultModel: 'gemini-2.5-flash',
-            error: err?.message || 'Failed to check Gemini CLI availability.',
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [task.workerConfig?.provider, runRefreshKey]);
+
 
   useEffect(() => {
     if (task.workerConfig?.provider !== 'opencode') {
@@ -796,6 +766,10 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             >
               {openCodeStatus.error || 'OpenCode CLI is not ready on this server.'}
             </div>
+          )}
+
+          {task.workerConfig?.provider === 'gemini-cli' && geminiCliStatus?.available && (
+            <p className="text-xs text-amber-200">Local CLI credentials detected. Authentication and model access are unverified.</p>
           )}
 
           {task.workerConfig?.provider === 'gemini-cli' && geminiCliStatus && !geminiCliStatus.available && (
