@@ -24,9 +24,9 @@ export interface SandboxOptions {
   /** Specific env keys from options.env to preserve past secret-name filtering */
   preserveEnvKeys?: string[];
   /** Explicit host files to copy into the sandbox's private HOME (e.g. auth.json) */
-  seedHomeFiles?: Array<{ sourcePath: string; targetRelToHome: string }>;
+  seedHomeFiles?: Array<{ sourcePath: string; targetRelToHome: string; required?: boolean }>;
   /** Explicit synthesized files to write into the sandbox's private HOME (e.g. hardened settings.json) */
-  seedHomeContents?: Array<{ content: string; targetRelToHome: string; mode?: number }>;
+  seedHomeContents?: Array<{ content: string; targetRelToHome: string; mode?: number; required?: boolean }>;
 }
 
 export interface SandboxExecutionResult {
@@ -506,34 +506,39 @@ ${networkRule}
     const sandboxTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dp_sandbox_'));
     const realTmp = fs.realpathSync(sandboxTmp);
 
-    for (const seed of options.seedHomeFiles ?? []) {
-      try {
-        if (fs.existsSync(seed.sourcePath) && fs.statSync(seed.sourcePath).isFile()) {
-          const relClean = seed.targetRelToHome.replace(/^\/+/, '');
-          const destPath = path.resolve(realTmp, relClean);
-          if (destPath.startsWith(`${realTmp}${path.sep}`)) {
-            fs.mkdirSync(path.dirname(destPath), { recursive: true });
-            fs.copyFileSync(seed.sourcePath, destPath);
-            fs.chmodSync(destPath, 0o600);
-          }
+    // Required policy/auth material must exist before any subprocess can launch.
+    try {
+      const destination = (relative: string): string => {
+        const dest = path.resolve(realTmp, relative);
+        if (path.isAbsolute(relative) || !dest.startsWith(`${realTmp}${path.sep}`)) {
+          throw new Error('Invalid sandbox seed destination');
         }
-      } catch {
-        // Ignore seed failure; missing optional auth will be reported by CLI
-      }
-    }
-
-    for (const seed of options.seedHomeContents ?? []) {
-      try {
-        const relClean = seed.targetRelToHome.replace(/^\/+/, '');
-        const destPath = path.resolve(realTmp, relClean);
-        if (destPath.startsWith(`${realTmp}${path.sep}`)) {
-          fs.mkdirSync(path.dirname(destPath), { recursive: true });
-          fs.writeFileSync(destPath, seed.content, { mode: seed.mode ?? 0o600 });
-          fs.chmodSync(destPath, seed.mode ?? 0o600);
+        return dest;
+      };
+      for (const seed of options.seedHomeFiles ?? []) {
+        try {
+          const dest = destination(seed.targetRelToHome);
+          if (!fs.statSync(seed.sourcePath).isFile()) throw new Error('Seed source is not a file');
+          fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+          fs.copyFileSync(seed.sourcePath, dest);
+          fs.chmodSync(dest, 0o600);
+        } catch {
+          if (seed.required !== false) throw new Error('Required sandbox credential initialization failed');
         }
-      } catch {
-        // Ignore seed failure
       }
+      for (const seed of options.seedHomeContents ?? []) {
+        try {
+          const dest = destination(seed.targetRelToHome);
+          fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+          fs.writeFileSync(dest, seed.content, { mode: seed.mode ?? 0o600 });
+          fs.chmodSync(dest, seed.mode ?? 0o600);
+        } catch {
+          if (seed.required !== false) throw new Error('Required sandbox policy initialization failed');
+        }
+      }
+    } catch {
+      fs.rmSync(realTmp, { recursive: true, force: true });
+      throw new DomainError('Prerequisite missing: Required sandbox initialization failed; no worker launched');
     }
 
     const timeoutMs = options.timeoutMs || 45000;
