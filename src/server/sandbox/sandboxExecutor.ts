@@ -25,6 +25,8 @@ export interface SandboxOptions {
   preserveEnvKeys?: string[];
   /** Explicit host files to copy into the sandbox's private HOME (e.g. auth.json) */
   seedHomeFiles?: Array<{ sourcePath: string; targetRelToHome: string }>;
+  /** Explicit synthesized files to write into the sandbox's private HOME (e.g. hardened settings.json) */
+  seedHomeContents?: Array<{ content: string; targetRelToHome: string; mode?: number }>;
 }
 
 export interface SandboxExecutionResult {
@@ -517,6 +519,20 @@ ${networkRule}
         }
       } catch {
         // Ignore seed failure; missing optional auth will be reported by CLI
+      }
+    }
+
+    for (const seed of options.seedHomeContents ?? []) {
+      try {
+        const relClean = seed.targetRelToHome.replace(/^\/+/, '');
+        const destPath = path.resolve(realTmp, relClean);
+        if (destPath.startsWith(`${realTmp}${path.sep}`)) {
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          fs.writeFileSync(destPath, seed.content, { mode: seed.mode ?? 0o600 });
+          fs.chmodSync(destPath, seed.mode ?? 0o600);
+        }
+      } catch {
+        // Ignore seed failure
       }
     }
 

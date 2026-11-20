@@ -183,7 +183,7 @@ function collectExtraReadPaths(binPath: string): string[] {
   return Array.from(candidates);
 }
 
-function collectDenyWritePaths(_realWorktree: string, protectedPaths?: string[]): string[] {
+export function collectDenyWritePaths(_realWorktree: string, protectedPaths?: string[]): string[] {
   const out: string[] = [];
   for (const p of protectedPaths || []) {
     const clean = p.trim().replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
@@ -194,9 +194,11 @@ function collectDenyWritePaths(_realWorktree: string, protectedPaths?: string[])
   return out;
 }
 
-function sanitizeWorkerOutput(raw: string): string {
+export function sanitizeWorkerOutput(raw: string): string {
   return sanitizeOpenAIError(sanitizeGeminiError(raw))
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+    .replace(/ya29\.[A-Za-z0-9._-]+/g, '[REDACTED]')
+    .replace(/1\/\/[A-Za-z0-9._-]{10,}/g, '[REDACTED]')
     .replace(/gh[pousr]_[A-Za-z0-9_]{10,}/g, '[REDACTED]');
 }
 
