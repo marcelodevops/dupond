@@ -41,7 +41,7 @@ if (args[0] === 'models') {
   process.exit(1);
 }
 
-console.log(JSON.stringify({ ok: true }));
+console.log(JSON.stringify({ type: 'result', session_id: 'sess-e2e', num_turns: 1, result: 'Done' }));
 `;
   fs.writeFileSync(binPath, script, { mode: 0o755 });
   return binPath;

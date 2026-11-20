@@ -52,17 +52,34 @@ if (scenario === 'hang') {
 } else if (scenario === 'protected_violation') {
   fs.mkdirSync(path.join(process.cwd(), 'secrets'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), 'secrets', 'leak.txt'), 'nope\\n');
-  console.log(JSON.stringify({ ok: true, captured: capturedEnv }));
+  console.log(JSON.stringify({ type: 'result', session_id: 'sess-prot', num_turns: 1, result: 'Done', captured: capturedEnv }));
+  process.exit(0);
+} else if (scenario === 'json_error_secret') {
+  console.log(JSON.stringify({
+    type: 'result',
+    is_error: true,
+    errors: [
+      'Upstream error Bearer SYNTH_SECRET_BEARER_999 ya29.SYNTH_OAUTH_SECRET_888 AIzaSySYNTH_GEMINI_SECRET_777'
+    ]
+  }));
+  process.exit(0);
+} else if (scenario === 'empty_exit0') {
+  process.exit(0);
+} else if (scenario === 'malformed_exit0') {
+  console.log('not valid json {{{');
+  process.exit(0);
+} else if (scenario === 'missing_completion_exit0') {
+  console.log(JSON.stringify({ ok: true }));
   process.exit(0);
 } else if (scenario === 'bad_code_exit0') {
   fs.mkdirSync(path.join(process.cwd(), 'src'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), 'src', 'feature.ts'), 'export const value = 999;\\n');
-  console.log(JSON.stringify({ ok: true, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, captured: capturedEnv }));
+  console.log(JSON.stringify({ type: 'result', session_id: 'sess-bad', num_turns: 1, result: 'Done', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, captured: capturedEnv }));
   process.exit(0);
 } else {
   fs.mkdirSync(path.join(process.cwd(), 'src'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), 'src', 'feature.ts'), 'export const value = 42;\\n');
-  console.log(JSON.stringify({ ok: true, usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 }, captured: capturedEnv }));
+  console.log(JSON.stringify({ type: 'result', session_id: 'sess-ok', num_turns: 1, result: 'Done', usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 }, captured: capturedEnv }));
   process.exit(0);
 }
 `;
@@ -360,5 +377,57 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     assert.strictEqual(okRes.status, 'completed', `Expected completed, got ${okRes.status}: ${okRes.failureReason}`);
     assert.strictEqual(taskStore.listAttempts(okRes.id, project.id)[0].workerType, 'agy:gemini-3.8-flash-medium');
     assert.strictEqual(taskStore.listAttempts(histRun.id, project.id)[0].workerType, 'gemini-cli:gemini-2.5-flash');
+  });
+
+  it('sanitizes structured JSON errors and fails closed on empty, malformed, error-envelope, or unverified exit-0 output', async () => {
+    writeProfileToken();
+    const repoDir = initGitRepo(tmpDir);
+    const sandbox = new SandboxExecutor();
+    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox);
+    const baseCtx = {
+      taskId: 't-contract',
+      taskKey: 'AEG-205',
+      taskTitle: 'Output contract check',
+      taskDescription: 'Verify fail-closed JSON contract and secret sanitization',
+      acceptanceCriteria: [],
+      worktreePath: repoDir,
+      allowedPaths: ['src'],
+      protectedPaths: ['secrets'],
+      attemptNumber: 1,
+    };
+
+    // 1. Structured JSON error with embedded synthetic secrets is sanitized in both errorMessage and logs
+    process.env.FAKE_AGY_SCENARIO = 'json_error_secret';
+    const errSecretRes = await adapter.execute(baseCtx);
+    assert.strictEqual(errSecretRes.success, false);
+    const serialized = JSON.stringify({ err: errSecretRes.errorMessage, logs: errSecretRes.logs });
+    assert.ok(!serialized.includes('SYNTH_SECRET_BEARER_999'), 'Bearer secret must be sanitized');
+    assert.ok(!serialized.includes('SYNTH_OAUTH_SECRET_888'), 'OAuth token must be sanitized');
+    assert.ok(!serialized.includes('SYNTH_GEMINI_SECRET_777'), 'API key must be sanitized');
+    assert.ok(errSecretRes.errorMessage?.includes('[REDACTED]'));
+
+    // 2. Empty stdout with exit 0 fails closed
+    process.env.FAKE_AGY_SCENARIO = 'empty_exit0';
+    const emptyRes = await adapter.execute(baseCtx);
+    assert.strictEqual(emptyRes.success, false);
+    assert.ok(/empty output/i.test(emptyRes.errorMessage || ''));
+
+    // 3. Malformed JSON stdout with exit 0 fails closed
+    process.env.FAKE_AGY_SCENARIO = 'malformed_exit0';
+    const malformedRes = await adapter.execute(baseCtx);
+    assert.strictEqual(malformedRes.success, false);
+    assert.ok(/malformed JSON/i.test(malformedRes.errorMessage || ''));
+
+    // 4. Arbitrary JSON missing steps.JSONOutput completion envelope fails closed even on exit 0
+    process.env.FAKE_AGY_SCENARIO = 'missing_completion_exit0';
+    const missingRes = await adapter.execute(baseCtx);
+    assert.strictEqual(missingRes.success, false);
+    assert.ok(/completion/i.test(missingRes.errorMessage || ''));
+
+    // 5. Valid steps.JSONOutput completion envelope succeeds cleanly
+    process.env.FAKE_AGY_SCENARIO = 'success';
+    const validRes = await adapter.execute(baseCtx);
+    assert.strictEqual(validRes.success, true);
+    assert.strictEqual(validRes.tokenUsage?.totalTokens, 20);
   });
 });
