@@ -15,6 +15,9 @@ const fs = require('fs');
 const path = require('path');
 
 const args = process.argv.slice(2);
+if (process.env.FAKE_AGY_SPAWN_SENTINEL) {
+  fs.appendFileSync(process.env.FAKE_AGY_SPAWN_SENTINEL, args.join(' ') + '\\n');
+}
 const homeDir = process.env.HOME;
 const tokenFile = path.join(homeDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
 
@@ -208,7 +211,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     assert.strictEqual(agyValidation.provider, 'agy');
     assert.strictEqual(agyValidation.model, 'gemini-3.8-flash-medium');
 
-    const worker = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', new SandboxExecutor());
+    const worker = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', new SandboxExecutor(), 'linux');
     const unauthAvail = await worker.isAvailable();
     assert.strictEqual(unauthAvail.available, false);
     assert.ok(unauthAvail.error?.includes('Application Settings'));
@@ -252,7 +255,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
 
     // Inspect captured sandbox env/argv directly from adapter.execute() logs
     process.env.FAKE_AGY_SCENARIO = 'bad_code_exit0';
-    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox);
+    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox, 'linux');
     const probeExec = await adapter.execute({
       taskId: 't-env',
       taskKey: 'AEG-200',
@@ -307,7 +310,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
 
     const resFail = await repairCoordinator.executeTaskRun({
       task: failTask,
-      worker: new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox),
+      worker: new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox, 'linux'),
     });
     assert.strictEqual(resFail.status, 'failed');
     const failAttempts = taskStore.listAttempts(resFail.id, project.id);
@@ -412,7 +415,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     const okRes = await repairCoordinator.executeTaskRun({
       runId: 'run-legacy-recovery',
       task: { ...legacyTask, workerConfig: { provider: 'agy', model: 'gemini-3.8-flash-medium' } },
-      worker: new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox),
+      worker: new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox, 'linux'),
     });
     assert.strictEqual(okRes.status, 'completed', `Expected completed, got ${okRes.status}: ${okRes.failureReason}`);
     assert.strictEqual(taskStore.listAttempts(okRes.id, project.id)[0].workerType, 'agy:gemini-3.8-flash-medium');
@@ -423,7 +426,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     writeProfileToken();
     const repoDir = initGitRepo(tmpDir);
     const sandbox = new SandboxExecutor();
-    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox);
+    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox, 'linux');
     const baseCtx = {
       taskId: 't-contract',
       taskKey: 'AEG-205',
@@ -516,7 +519,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     );
 
     const sandbox = new SandboxExecutor();
-    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox);
+    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox, 'linux');
     process.env.FAKE_AGY_SCENARIO = 'config_isolation_probe';
 
     const res = await adapter.execute({
@@ -552,7 +555,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     writeProfileToken();
     const repoDir = initGitRepo(tmpDir);
     const sandbox = new SandboxExecutor();
-    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox);
+    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox, 'linux');
     const ctx = {
       taskId: 't-kc-refresh',
       taskKey: 'AEG-207',
@@ -578,5 +581,37 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
       const serialized = JSON.stringify({ err: res.errorMessage, logs: res.logs });
       assert.ok(!serialized.includes('SYNTH_REFRESH_SECRET_333'), 'Refresh secret must be sanitized');
     }
+  });
+
+  it('gates macOS probes and coding execution before spawning agy even when a token file is present', async () => {
+    writeProfileToken();
+    const repoDir = initGitRepo(tmpDir);
+    const sentinel = path.join(tmpDir, 'agy-spawn-sentinel.log');
+    process.env.FAKE_AGY_SPAWN_SENTINEL = sentinel;
+
+    const sandbox = new SandboxExecutor();
+    const darwinAdapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox, 'darwin');
+
+    const avail = await darwinAdapter.isAvailable();
+    assert.strictEqual(avail.available, false);
+    assert.ok(avail.error?.includes('Keychain'));
+
+    const execRes = await darwinAdapter.execute({
+      taskId: 't-darwin-gated',
+      taskKey: 'AEG-208',
+      taskTitle: 'Darwin gated execution',
+      taskDescription: 'Must never spawn agy on darwin',
+      acceptanceCriteria: [],
+      worktreePath: repoDir,
+      allowedPaths: ['src'],
+      protectedPaths: ['secrets'],
+      attemptNumber: 1,
+    });
+    assert.strictEqual(execRes.success, false);
+    assert.strictEqual(execRes.nonRetryable, true);
+    assert.ok(execRes.errorMessage?.includes('Keychain'));
+    assert.strictEqual(fs.existsSync(sentinel), false, 'Blocked darwin paths must launch zero agy subprocesses');
+
+    delete process.env.FAKE_AGY_SPAWN_SENTINEL;
   });
 });

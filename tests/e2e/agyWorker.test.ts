@@ -291,11 +291,29 @@ describe('Antigravity CLI worker & removed-provider UI E2E', () => {
       }, apiKey);
       assert.strictEqual(removedRouteRes, 404);
 
-      // 2. Replace with unauthenticated 'agy' -> readiness warning + Application Settings link + disabled Execute button
+      // 2. Replace with 'agy' -> readiness warning + disabled Execute button
       await page.getByTestId('task-worker-provider-select').selectOption('agy');
       await pwExpect(page.getByTestId('agy-prerequisite-warning')).toBeVisible({ timeout: 10_000 });
-      await pwExpect(page.getByTestId('open-app-settings-from-task-agy-btn')).toBeVisible();
       await pwExpect(page.getByTestId('execute-agent-step-btn')).toBeDisabled();
+
+      if (process.platform === 'darwin') {
+        await pwExpect(page.getByTestId('agy-prerequisite-warning')).toContainText('Keychain');
+        await pwExpect(page.getByTestId('agy-prerequisite-warning')).not.toContainText('Connect Antigravity');
+        await pwExpect(page.getByTestId('open-app-settings-from-task-agy-btn')).toHaveCount(0);
+
+        // Even if a token file is present on macOS, probes & execution remain gated
+        const tokenPath = path.join(profileDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+        fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+        fs.writeFileSync(tokenPath, JSON.stringify({ token: 'synth-token' }), { mode: 0o600 });
+
+        await page.keyboard.press('Escape');
+        await page.getByTestId('kanban-card-AEG-901').click();
+        await pwExpect(page.getByTestId('agy-prerequisite-warning')).toContainText('Keychain', { timeout: 10_000 });
+        await pwExpect(page.getByTestId('execute-agent-step-btn')).toBeDisabled();
+        return;
+      }
+
+      await pwExpect(page.getByTestId('open-app-settings-from-task-agy-btn')).toBeVisible();
 
       // Historical gemini-cli attempt is still preserved
       await pwExpect(page.getByTestId('run-attempts-list')).toContainText('gemini-cli:gemini-2.5-flash');

@@ -270,7 +270,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     );
 
     // Dedicated profile + SandboxExecutor portability check with fake CLI
-    const modelsCheck = await probeAgyProfileModels(profileDir, fakeBin);
+    const modelsCheck = await probeAgyProfileModels(profileDir, fakeBin, { platform: 'linux' });
     assert.strictEqual(modelsCheck.authenticated, true);
 
     const repoDir = path.join(tmpDir, 'repo');
@@ -282,7 +282,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     execFileSync('git', ['add', '.'], { cwd: repoDir });
     execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir });
 
-    const sbCheck = await verifyAgySandboxPortability(profileDir, repoDir);
+    const sbCheck = await verifyAgySandboxPortability(profileDir, repoDir, undefined, { platform: 'linux' });
     assert.strictEqual(sbCheck.ok, true, `Expected sandbox portability check to pass, got: ${sbCheck.error}`);
     assert.strictEqual(sbCheck.modelsCount, 2);
   });
@@ -645,27 +645,43 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     );
     assert.strictEqual((await darwinMgr.getStatus('op-darwin')).session, null);
 
-    // 2. Token file presence alone never implies profile/sandbox/execution verification
+    // 2. Token file presence alone never implies profile/sandbox/execution verification,
+    //    and darwin gates probes & portability checks before spawning agy (0 subprocesses launched).
     const profileDir = resolveAgyProfileDir();
     fs.mkdirSync(path.join(profileDir, '.gemini', 'antigravity-cli'), { recursive: true });
     fs.writeFileSync(path.join(profileDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'), 'synth-token');
-    process.env.FAKE_AGY_MODE = 'models_keychain_cancelled';
-    const cancelledModelsStatus = await darwinMgr.getStatus('op-darwin');
-    assert.strictEqual(cancelledModelsStatus.credentialsPresent, true);
-    assert.strictEqual(cancelledModelsStatus.profileAuthVerified, false);
-    assert.strictEqual(cancelledModelsStatus.sandboxAuthVerified, false);
-    assert.strictEqual(cancelledModelsStatus.executionVerified, false);
-    assert.ok(cancelledModelsStatus.error?.includes('cancelled'));
-    assert.ok(!cancelledModelsStatus.error?.includes('SYNTH_KC_SECRET_111'));
+    const darwinPidSentinel = path.join(tmpDir, 'darwin-probe-pid.txt');
+    process.env.FAKE_AGY_MODELS_PID_OUT = darwinPidSentinel;
+    process.env.FAKE_AGY_MODE = 'success';
 
-    // 3. Probe recognizes missing default keychain & keyring timeout cleanly
+    const gatedStatus = await darwinMgr.getStatus('op-darwin');
+    assert.strictEqual(gatedStatus.credentialsPresent, true);
+    assert.strictEqual(gatedStatus.profileAuthVerified, false);
+    assert.strictEqual(gatedStatus.sandboxAuthVerified, false);
+    assert.strictEqual(gatedStatus.executionVerified, false);
+    assert.ok(gatedStatus.error?.includes('Keychain'));
+    assert.strictEqual(fs.existsSync(darwinPidSentinel), false, 'darwin getStatus must launch zero agy probe processes');
+
+    const gatedSandbox = await verifyAgySandboxPortability(profileDir, tmpDir, undefined, { platform: 'darwin' });
+    assert.strictEqual(gatedSandbox.ok, false);
+    assert.ok(gatedSandbox.error?.includes('Keychain'));
+    assert.strictEqual(fs.existsSync(darwinPidSentinel), false, 'darwin portability check must launch zero agy processes');
+    delete process.env.FAKE_AGY_MODELS_PID_OUT;
+
+    // 3. Probe recognizes keychain cancellation, missing default keychain & keyring timeout cleanly when platform permits probing
+    process.env.FAKE_AGY_MODE = 'models_keychain_cancelled';
+    const cancelledProbe = await probeAgyProfileModels(profileDir, fakeBin, { platform: 'linux' });
+    assert.strictEqual(cancelledProbe.authenticated, false);
+    assert.ok(cancelledProbe.error?.includes('cancelled'));
+    assert.ok(!cancelledProbe.error?.includes('SYNTH_KC_SECRET_111'));
+
     process.env.FAKE_AGY_MODE = 'models_keychain_missing_default';
-    const missingDefaultProbe = await probeAgyProfileModels(profileDir, fakeBin);
+    const missingDefaultProbe = await probeAgyProfileModels(profileDir, fakeBin, { platform: 'linux' });
     assert.strictEqual(missingDefaultProbe.authenticated, false);
     assert.ok(missingDefaultProbe.error?.includes('default macOS Keychain'));
 
     process.env.FAKE_AGY_MODE = 'models_keyring_timeout';
-    const timeoutProbe = await probeAgyProfileModels(profileDir, fakeBin);
+    const timeoutProbe = await probeAgyProfileModels(profileDir, fakeBin, { platform: 'linux' });
     assert.strictEqual(timeoutProbe.authenticated, false);
     assert.ok(timeoutProbe.error?.includes('timed out waiting for macOS Keychain'));
 
