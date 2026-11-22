@@ -23,7 +23,7 @@ export type AgyAuthSessionState =
   | 'failed';
 
 export const AGY_MACOS_KEYCHAIN_LIMITATION =
-  'Antigravity CLI OAuth onboarding is unavailable on macOS: agy v1.5.13 attempts /usr/bin/security Keychain writes under an isolated HOME without a documented file-only credential mode, triggering a macOS Keychain reset prompt.';
+  'Antigravity CLI is unavailable on macOS: agy v1.5.13 attempts /usr/bin/security Keychain writes during OAuth onboarding and token refresh under an isolated HOME without a documented file-only credential mode, which can trigger a macOS Keychain reset prompt.';
 
 export function isAgyOnboardingSupported(platform: NodeJS.Platform = process.platform): boolean {
   return platform !== 'darwin';
@@ -183,6 +183,7 @@ export function probeAgyVersion(binPath: string): string | null {
 export interface ProbeAgyModelsOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  platform?: NodeJS.Platform;
 }
 
 export interface ProbeAgyModelsResult {
@@ -202,6 +203,14 @@ export function probeAgyProfileModels(
   binPath?: string | null,
   options?: ProbeAgyModelsOptions,
 ): Promise<ProbeAgyModelsResult> {
+  if (!isAgyOnboardingSupported(options?.platform ?? process.platform)) {
+    return Promise.resolve({
+      authenticated: false,
+      models: [],
+      error: AGY_MACOS_KEYCHAIN_LIMITATION,
+    });
+  }
+
   const exe = binPath ?? resolveAgyExecutable();
   if (!exe) {
     return Promise.resolve({
@@ -386,7 +395,12 @@ export async function verifyAgySandboxPortability(
   profileDir: string,
   worktreePath: string,
   sandbox: SandboxExecutor = defaultSandboxExecutor,
+  options?: { platform?: NodeJS.Platform },
 ): Promise<{ ok: boolean; exitCode: number; modelsCount: number; error?: string }> {
+  if (!isAgyOnboardingSupported(options?.platform ?? process.platform)) {
+    return { ok: false, exitCode: -1, modelsCount: 0, error: AGY_MACOS_KEYCHAIN_LIMITATION };
+  }
+
   const exe = resolveAgyExecutable();
   if (!exe) {
     return { ok: false, exitCode: -1, modelsCount: 0, error: 'Antigravity CLI (agy) executable not found.' };
@@ -776,7 +790,7 @@ export class AgyAuthSessionManager {
     const version = exe ? probeAgyVersion(exe) : null;
     const profileDir = resolveAgyProfileDir();
     const credentialsPresent = hasAgyAuthTokenSeed(profileDir);
-    const profileCheck = await probeAgyProfileModels(profileDir, exe);
+    const profileCheck = await probeAgyProfileModels(profileDir, exe, { platform: this.platform });
     const onboardingSupported = isAgyOnboardingSupported(this.platform);
     const onboardingUnavailableReason = onboardingSupported ? undefined : AGY_MACOS_KEYCHAIN_LIMITATION;
     const resolvedProfile = path.resolve(profileDir);
@@ -1115,6 +1129,7 @@ export class AgyAuthSessionManager {
         const check = await probeAgyProfileModels(session.profileDir, session.binPath, {
           timeoutMs: remainingMs,
           signal: session.probeAbortController.signal,
+          platform: this.platform,
         });
 
         // Re-check session identity and state after async probe in case cancel/supersede/expiry ran

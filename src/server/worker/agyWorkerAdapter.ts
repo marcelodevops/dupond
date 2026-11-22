@@ -14,9 +14,11 @@ import {
   sanitizeWorkerOutput,
 } from './opencodeWorkerAdapter.js';
 import {
+  AGY_MACOS_KEYCHAIN_LIMITATION,
   classifyAgyKeychainError,
   collectAgySandboxSeedFiles,
   hasAgyAuthTokenSeed,
+  isAgyOnboardingSupported,
   probeAgyProfileModels,
   resolveAgyExecutable,
   resolveAgyProfileDir,
@@ -252,17 +254,27 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
   readonly provider: WorkerProvider = 'agy';
   readonly model: string;
   private readonly sandbox: SandboxExecutor;
+  private readonly platform: NodeJS.Platform;
 
   constructor(
     model: string = DEFAULT_AGY_MODEL,
     sandbox: SandboxExecutor = defaultSandboxExecutor,
+    platform: NodeJS.Platform = process.platform,
   ) {
     this.model = (model || DEFAULT_AGY_MODEL).trim();
     this.sandbox = sandbox;
+    this.platform = platform;
     this.name = `agy:${this.model}`;
   }
 
   async isAvailable(): Promise<{ available: boolean; error?: string }> {
+    if (!isAgyOnboardingSupported(this.platform)) {
+      return {
+        available: false,
+        error: AGY_MACOS_KEYCHAIN_LIMITATION,
+      };
+    }
+
     const exe = resolveAgyExecutable();
     if (!exe) {
       return {
@@ -287,7 +299,7 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
       };
     }
 
-    const modelsCheck = await probeAgyProfileModels(profileDir, exe);
+    const modelsCheck = await probeAgyProfileModels(profileDir, exe, { platform: this.platform });
     if (!modelsCheck.authenticated) {
       return {
         available: false,
@@ -303,6 +315,19 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
   async execute(context: WorkerExecutionContext): Promise<WorkerExecutionResult> {
     const startTime = Date.now();
     const logs: string[] = [];
+
+    if (!isAgyOnboardingSupported(this.platform)) {
+      return {
+        success: false,
+        filesModified: [],
+        diff: '',
+        commitMessage: '',
+        logs: [AGY_MACOS_KEYCHAIN_LIMITATION],
+        durationMs: Date.now() - startTime,
+        errorMessage: AGY_MACOS_KEYCHAIN_LIMITATION,
+        nonRetryable: true,
+      };
+    }
 
     if (!isValidAgyModelId(this.model)) {
       return {

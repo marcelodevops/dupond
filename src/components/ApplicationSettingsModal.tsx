@@ -1127,7 +1127,13 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                   }}
                   className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
                 >
-                  {agyBusy ? 'Starting...' : agyAuthStatus?.profileAuthenticated ? 'Reconnect Antigravity CLI' : 'Connect Antigravity CLI'}
+                  {agyBusy
+                    ? 'Starting...'
+                    : agyAuthStatus?.onboardingSupported === false
+                      ? 'Unavailable on macOS'
+                      : agyAuthStatus?.profileAuthenticated
+                        ? 'Reconnect Antigravity CLI'
+                        : 'Connect Antigravity CLI'}
                 </button>
               </div>
             )}

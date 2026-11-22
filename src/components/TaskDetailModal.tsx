@@ -794,7 +794,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             </div>
           )}
 
-          {task.workerConfig?.provider === 'agy' && agyStatus && agyStatus.cliAvailable && agyStatus.profileAuthenticated && (
+          {task.workerConfig?.provider === 'agy' && agyStatus && agyStatus.cliAvailable && agyStatus.profileAuthenticated && agyStatus.onboardingSupported && (
             <div
               data-testid="agy-readiness-ready"
               className="p-2.5 rounded-xl border bg-emerald-950/25 border-emerald-800/50 text-emerald-200 text-xs"
@@ -803,15 +803,17 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             </div>
           )}
 
-          {task.workerConfig?.provider === 'agy' && (!agyStatus || !agyStatus.cliAvailable || !agyStatus.profileAuthenticated) && (
+          {task.workerConfig?.provider === 'agy' && (!agyStatus || !agyStatus.cliAvailable || !agyStatus.profileAuthenticated || !agyStatus.onboardingSupported) && (
             <div
               data-testid="agy-prerequisite-warning"
               className="p-3 rounded-xl border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2"
             >
               <span>
-                {agyStatus?.error || 'Antigravity CLI is not authenticated. Connect Antigravity CLI before executing.'}
+                {agyStatus?.onboardingSupported === false
+                  ? agyStatus.onboardingUnavailableReason || agyStatus.error
+                  : agyStatus?.error || 'Antigravity CLI is not authenticated. Connect Antigravity CLI before executing.'}
               </span>
-              {onOpenAppSettings && (
+              {onOpenAppSettings && agyStatus?.onboardingSupported !== false && (
                 <button
                   type="button"
                   data-testid="open-app-settings-from-task-agy-btn"
@@ -1773,7 +1775,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                 !assignee ||
                 task.workerConfig?.provider === 'gemini-cli' ||
                 (task.workerConfig?.provider === 'agy' &&
-                  (!agyStatus?.cliAvailable || !agyStatus?.profileAuthenticated))
+                  (!agyStatus?.cliAvailable || !agyStatus?.profileAuthenticated || !agyStatus?.onboardingSupported))
               }
               className="flex items-center space-x-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold shadow-md shadow-indigo-600/20 transition-all disabled:opacity-50"
             >

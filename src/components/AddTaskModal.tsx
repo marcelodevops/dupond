@@ -347,15 +347,17 @@ export const AddTaskModal: React.FC<AddTaskModalProps> = ({
             </div>
           </div>
 
-          {workerProvider === 'agy' && agyStatus && (!agyStatus.cliAvailable || !agyStatus.profileAuthenticated) && (
+          {workerProvider === 'agy' && agyStatus && (!agyStatus.cliAvailable || !agyStatus.profileAuthenticated || !agyStatus.onboardingSupported) && (
             <div
               data-testid="add-task-agy-readiness-warning"
               className="p-2.5 rounded-lg border bg-amber-950/30 border-amber-800/60 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2"
             >
               <span>
-                {agyStatus.error || 'Dedicated Antigravity profile is not authenticated. Connect Antigravity CLI before executing.'}
+                {agyStatus.onboardingSupported === false
+                  ? agyStatus.onboardingUnavailableReason || agyStatus.error
+                  : agyStatus.error || 'Dedicated Antigravity profile is not authenticated. Connect Antigravity CLI before executing.'}
               </span>
-              {onOpenAppSettings && (
+              {onOpenAppSettings && agyStatus.onboardingSupported !== false && (
                 <button
                   type="button"
                   data-testid="add-task-open-app-settings-btn"
