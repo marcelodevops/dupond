@@ -200,6 +200,52 @@ function isNonRetryableAgyError(text: string): boolean {
  * Executes inside Dupond's OS-enforced SandboxExecutor using ONLY the authenticated
  * dedicated 0700 profile tokens, never triggering automatic browser login or broad host HOME access.
  */
+const AGY_SANDBOX_SETTINGS_JSON = JSON.stringify({
+  disableSlashCommands: true,
+  trustedWorkspaces: [],
+});
+
+const AGY_SANDBOX_SEED_CONTENTS = [
+  {
+    targetRelToHome: '.gemini/antigravity-cli/settings.json',
+    content: `${AGY_SANDBOX_SETTINGS_JSON}\n`,
+    mode: 0o600,
+    required: true,
+  },
+  {
+    targetRelToHome: '.gemini/config/mcp_config.json',
+    content: '{"mcpServers":{}}\n',
+    mode: 0o600,
+    required: true,
+  },
+  {
+    targetRelToHome: '.gemini/config/hooks.json',
+    content: '{}\n',
+    mode: 0o600,
+    required: true,
+  },
+  {
+    targetRelToHome: '.gemini/antigravity-cli/mcp_config.json',
+    content: '{"mcpServers":{}}\n',
+    mode: 0o600,
+    required: true,
+  },
+  {
+    targetRelToHome: '.gemini/antigravity-cli/hooks.json',
+    content: '{}\n',
+    mode: 0o600,
+    required: true,
+  },
+];
+
+const AGY_REPO_CONFIG_DENY_READ_PATHS = [
+  '.agents',
+  '.agent',
+  '_agents',
+  '_agent',
+  '.gemini',
+];
+
 export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
   readonly name: string;
   readonly provider: WorkerProvider = 'agy';
@@ -323,7 +369,7 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
       '--mode=auto',
       '--dangerously-skip-permissions',
       '--disable-slash-commands',
-      '--settings={}',
+      `--settings=${AGY_SANDBOX_SETTINGS_JSON}`,
     ];
 
     logs.push(`[agy] Executing non-interactive coding run with model "${this.model}" in isolated sandbox`);
@@ -337,8 +383,10 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
       allowNetwork: true,
       gitReadOnly: true,
       denyWritePaths: collectDenyWritePaths(realWorktree, context.protectedPaths),
+      denyReadPaths: AGY_REPO_CONFIG_DENY_READ_PATHS,
       extraReadPaths: collectExtraReadPaths(exe),
       seedHomeFiles,
+      seedHomeContents: AGY_SANDBOX_SEED_CONTENTS,
       env: buildAgySandboxEnv(),
       abortSignal: context.abortSignal,
     });

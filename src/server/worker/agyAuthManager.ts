@@ -298,12 +298,10 @@ export function probeAgyProfileModels(
 const AGY_SANDBOX_AUTH_REL_PATHS = [
   '.gemini/antigravity-cli/antigravity-oauth-token',
   '.gemini/jetski-standalone-oauth-token',
-  '.gemini/antigravity-cli/settings.json',
   '.gemini/antigravity-cli/jetski_state.pbtxt',
   '.gemini/antigravity-cli/installation_id',
   '.gemini/antigravity-cli/cache/default_project_id.txt',
   '.gemini/antigravity-cli/cache/onboarding.json',
-  '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
 ];
 
 export function collectAgySandboxSeedFiles(
