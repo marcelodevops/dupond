@@ -6,8 +6,28 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type Locator, type Page } from 'playwright';
 import { expect as pwExpect } from 'playwright/test';
+
+async function switchProjectAndWait(
+  page: Page,
+  switcherBtn: Locator,
+  options: {
+    targetProject: string;
+    expectedCardKey: string;
+    absentCardKey: string;
+    extraAbsentTexts?: string[];
+  },
+): Promise<void> {
+  await switcherBtn.click();
+  await page.getByRole('button', { name: new RegExp(options.targetProject, 'i') }).click();
+  await pwExpect(switcherBtn).toContainText(options.targetProject);
+  await pwExpect(page.getByText(options.expectedCardKey).first()).toBeVisible();
+  await pwExpect(page.getByText(options.absentCardKey)).toHaveCount(0);
+  for (const extraText of options.extraAbsentTexts ?? []) {
+    await pwExpect(page.getByText(extraText)).toHaveCount(0);
+  }
+}
 
 const SYNTH_AUTH_TOKEN = 'e2e_run_evidence_auth_token_01';
 const SYNTH_GEMINI_KEY = 'AIzaSyE2ERunEvidenceSynthetic001';
@@ -543,9 +563,11 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.keyboard.press('Escape');
 
       // Switch back to Naviera for Review Decision -> Delivery -> Done + mobile viewport check
-      await switcherBtn.click();
-      await page.getByRole('button', { name: /Naviera/i }).click();
-      assert.strictEqual(await page.evaluate(() => document.body.innerText.includes('LEG-404')), false);
+      await switchProjectAndWait(page, switcherBtn, {
+        targetProject: 'Naviera',
+        expectedCardKey: 'NAV-101',
+        absentCardKey: 'LEG-404',
+      });
       await page.getByText('NAV-101').first().click();
       await pwExpect(page.getByTestId('run-candidate-diff')).toBeVisible();
 
@@ -560,12 +582,17 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await stopAppServer();
       await startAppServer();
       await page.reload({ waitUntil: 'networkidle' });
-      await switcherBtn.click();
-      await page.getByRole('button', { name: /Secondary/i }).click();
-      await pwExpect(switcherBtn).toContainText('Secondary');
-      assert.strictEqual(await page.evaluate(() => document.body.innerText.includes('Please verify helper export')), false);
-      await switcherBtn.click();
-      await page.getByRole('button', { name: /Naviera/i }).click();
+      await switchProjectAndWait(page, switcherBtn, {
+        targetProject: 'Secondary',
+        expectedCardKey: 'LEG-404',
+        absentCardKey: 'NAV-101',
+        extraAbsentTexts: ['Please verify helper export'],
+      });
+      await switchProjectAndWait(page, switcherBtn, {
+        targetProject: 'Naviera',
+        expectedCardKey: 'NAV-101',
+        absentCardKey: 'LEG-404',
+      });
       await page.getByText('NAV-101').first().click();
       await pwExpect(page.getByTestId('task-unresolved-review-feedback')).toContainText('Please verify helper export');
 
@@ -832,4 +859,112 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       } catch {}
     }
   }, 180000);
+
+  it('waits for a delayed project-switch response before asserting project isolation', async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await context.addInitScript((token) => {
+      window.localStorage.setItem('dupond_api_token', token);
+    }, SYNTH_AUTH_TOKEN);
+
+    const page = await context.newPage();
+    try {
+      await page.goto(serverUrl, { waitUntil: 'networkidle' });
+
+      const createAlpha = await page.request.post(`${serverUrl}/api/projects`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
+        data: { name: 'DelayAlpha', description: 'Delayed switch regression source project' },
+      });
+      assert.strictEqual(createAlpha.status(), 201);
+      const alphaId = ((await createAlpha.json()) as { id: string }).id;
+
+      const createBeta = await page.request.post(`${serverUrl}/api/projects`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
+        data: { name: 'DelayBeta', description: 'Delayed switch regression target project' },
+      });
+      assert.strictEqual(createBeta.status(), 201);
+      const betaId = ((await createBeta.json()) as { id: string }).id;
+
+      const seedState = async (projectId: string, key: string, title: string) => {
+        const getRes = await page.request.get(`${serverUrl}/api/orchestrate/state`, {
+          headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': projectId },
+        });
+        assert.strictEqual(getRes.status(), 200);
+        const state = (await getRes.json()) as { tasks?: unknown[] };
+        const putRes = await page.request.post(`${serverUrl}/api/orchestrate/state`, {
+          headers: {
+            Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`,
+            'x-dupond-project-id': projectId,
+          },
+          data: {
+            ...state,
+            tasks: [
+              ...(state.tasks || []),
+              {
+                id: `task-${key.toLowerCase()}`,
+                key,
+                title,
+                description: `Task for ${key}`,
+                status: 'todo',
+                priority: 'medium',
+                epicId: 'EPIC-1',
+                assignedAgentId: 'agent-dev',
+                estimatedHours: 1,
+                spentHours: 0,
+                subtasks: [],
+                deliverables: [],
+                dependencies: [],
+                tags: [],
+                lastUpdated: 'Just now',
+              },
+            ],
+          },
+        });
+        assert.strictEqual(putRes.status(), 200);
+      };
+
+      await seedState(alphaId, 'DLY-101', 'Alpha delayed switch card');
+      await seedState(betaId, 'DLY-201', 'Beta delayed switch card');
+
+      await page.reload({ waitUntil: 'networkidle' });
+      const switcherBtn = page.getByRole('button', { name: 'Switch Dupond Project' });
+      await switchProjectAndWait(page, switcherBtn, {
+        targetProject: 'DelayAlpha',
+        expectedCardKey: 'DLY-101',
+        absentCardKey: 'DLY-201',
+      });
+
+      let releaseSwitch!: () => void;
+      const switchGate = new Promise<void>((resolve) => {
+        releaseSwitch = resolve;
+      });
+      let markRequestSeen!: () => void;
+      const switchRequestSeen = new Promise<void>((resolve) => {
+        markRequestSeen = resolve;
+      });
+      let gated = false;
+      await page.route('**/api/**', async (route) => {
+        if (!gated && route.request().method() === 'GET') {
+          gated = true;
+          markRequestSeen();
+          await switchGate;
+        }
+        await route.continue();
+      });
+
+      const switchPromise = switchProjectAndWait(page, switcherBtn, {
+        targetProject: 'DelayBeta',
+        expectedCardKey: 'DLY-201',
+        absentCardKey: 'DLY-101',
+      });
+      await switchRequestSeen;
+
+      // While the project-switch GET response is still pending, the previous project remains active
+      await pwExpect(switcherBtn).toContainText('DelayAlpha');
+      releaseSwitch();
+      await switchPromise;
+      await page.unroute('**/api/**');
+    } finally {
+      await context.close();
+    }
+  }, 60000);
 });
