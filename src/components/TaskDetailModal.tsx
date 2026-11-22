@@ -1771,6 +1771,14 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
           </div>
 
           <div className="flex items-center space-x-2">
+            {task.status === 'done' && (
+              <span
+                data-testid="task-completed-execution-notice"
+                className="text-[11px] text-amber-200 bg-amber-950/40 border border-amber-800/50 rounded-lg px-2.5 py-1"
+              >
+                This task is completed. Reopen it before executing again.
+              </span>
+            )}
             <button
               onClick={onClose}
               className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200"
@@ -1782,6 +1790,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
               data-testid="execute-agent-step-btn"
               onClick={handleRunAgent}
               disabled={
+                task.status === 'done' ||
                 isExecutingStep ||
                 !assignee ||
                 task.workerConfig?.provider === 'gemini-cli' ||

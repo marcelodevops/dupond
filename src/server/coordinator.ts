@@ -1330,6 +1330,9 @@ export class CoordinatorEngine {
     const executionProjectRecord = defaultProjectStore.getProject(executionProjectId);
     const projectRepo = executionProjectRecord?.repository;
     let storeTask = taskStore.getTaskScoped(task.key, executionProjectId) || taskStore.getTaskScoped(task.id, executionProjectId);
+    if (storeTask?.status === 'done') {
+      throw new DomainError('This task is completed. Reopen it before executing again.');
+    }
 
     // Pre-existing static artifact files are a legacy deliverable format used by
     // tasks that live only in the JSON state. Once a task is registered in the
