@@ -251,7 +251,13 @@ export interface AgyAuthStatus {
   cliAvailable: boolean;
   executablePath: string | null;
   version: string | null;
+  credentialsPresent: boolean;
   profileAuthenticated: boolean;
+  profileAuthVerified: boolean;
+  sandboxAuthVerified: boolean;
+  executionVerified: boolean;
+  onboardingSupported: boolean;
+  onboardingUnavailableReason?: string;
   availableModelsCount: number;
   models?: string[];
   defaultModel?: string;

@@ -14,6 +14,7 @@ import {
   sanitizeWorkerOutput,
 } from './opencodeWorkerAdapter.js';
 import {
+  classifyAgyKeychainError,
   collectAgySandboxSeedFiles,
   hasAgyAuthTokenSeed,
   probeAgyProfileModels,
@@ -446,9 +447,11 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
       const detail = sanitizeWorkerOutput(
         jsonInfo.errorText || sbRes.stderr || sbRes.stdout || '',
       ).trim();
-      const nonRetryable = isNonRetryableAgyError(detail);
-      const errorMessage =
-        sbRes.exitCode !== 0 || jsonInfo.errorText
+      const keychainErr = classifyAgyKeychainError(combinedRawOutput);
+      const nonRetryable = Boolean(keychainErr) || isNonRetryableAgyError(detail);
+      const errorMessage = keychainErr
+        ? keychainErr.message
+        : sbRes.exitCode !== 0 || jsonInfo.errorText
           ? `Antigravity CLI failed (exit ${sbRes.exitCode})${detail ? `: ${detail.slice(0, 400)}` : '.'}`
           : jsonInfo.invalidReason || 'Antigravity CLI exited 0 without a verified JSON completion envelope.';
       return {
