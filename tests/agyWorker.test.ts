@@ -71,6 +71,15 @@ if (scenario === 'hang') {
 } else if (scenario === 'missing_completion_exit0') {
   console.log(JSON.stringify({ ok: true }));
   process.exit(0);
+} else if (scenario === 'refresh_keychain_cancelled') {
+  console.error('Failed keyring SaveToken: exit status 154 Bearer SYNTH_REFRESH_SECRET_333');
+  process.exit(1);
+} else if (scenario === 'refresh_keychain_missing_default') {
+  console.error('security: SecKeychainCopyDefault: A default keychain could not be found.');
+  process.exit(1);
+} else if (scenario === 'refresh_keyring_timeout') {
+  console.error('Keyring SaveToken timed out after 5s');
+  process.exit(1);
 } else if (scenario === 'config_isolation_probe') {
   const probeReport = {
     argv: args,
@@ -537,5 +546,37 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     assert.strictEqual(report.hasProfilePluginsDir, false);
     assert.strictEqual(report.hasJetboxProto, false);
     assert.deepStrictEqual(report.readableRepoMarkers, []);
+  });
+
+  it('surfaces non-retryable, sanitized errors on sandboxed token-refresh Keychain failures without altering sandbox boundaries', async () => {
+    writeProfileToken();
+    const repoDir = initGitRepo(tmpDir);
+    const sandbox = new SandboxExecutor();
+    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox);
+    const ctx = {
+      taskId: 't-kc-refresh',
+      taskKey: 'AEG-207',
+      taskTitle: 'Refresh keychain failure',
+      taskDescription: 'Verify sandboxed refresh keychain errors fail closed without retries',
+      acceptanceCriteria: [],
+      worktreePath: repoDir,
+      allowedPaths: ['src'],
+      protectedPaths: ['secrets'],
+      attemptNumber: 1,
+    };
+
+    for (const [scenario, expectedSubstr] of [
+      ['refresh_keychain_cancelled', 'cancelled'],
+      ['refresh_keychain_missing_default', 'default macOS Keychain'],
+      ['refresh_keyring_timeout', 'timed out waiting for macOS Keychain'],
+    ] as const) {
+      process.env.FAKE_AGY_SCENARIO = scenario;
+      const res = await adapter.execute(ctx);
+      assert.strictEqual(res.success, false);
+      assert.strictEqual(res.nonRetryable, true, `${scenario} must be nonRetryable`);
+      assert.ok(res.errorMessage?.includes(expectedSubstr), `Expected ${expectedSubstr}, got: ${res.errorMessage}`);
+      const serialized = JSON.stringify({ err: res.errorMessage, logs: res.logs });
+      assert.ok(!serialized.includes('SYNTH_REFRESH_SECRET_333'), 'Refresh secret must be sanitized');
+    }
   });
 });

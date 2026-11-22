@@ -36,6 +36,18 @@ if (args[0] === 'models') {
     fs.writeFileSync(process.env.FAKE_AGY_MODELS_PID_OUT, String(process.pid));
   }
   const finishModels = () => {
+    if (mode === 'models_keychain_cancelled') {
+      console.error('Failed keyring SaveToken: exit status 154 Bearer SYNTH_KC_SECRET_111');
+      process.exit(1);
+    }
+    if (mode === 'models_keychain_missing_default') {
+      console.error('security: SecKeychainCopyDefault: A default keychain could not be found.');
+      process.exit(1);
+    }
+    if (mode === 'models_keyring_timeout') {
+      console.error('Keyring SaveToken timed out after 5s');
+      process.exit(1);
+    }
     if (fs.existsSync(tokenFile)) {
       console.log('gemini-4-neon-high              Gemini 4 Neon (High)');
       console.log('gemini-3.8-flash-medium         Gemini 3.8 Flash (Medium)');
@@ -94,6 +106,18 @@ if (args.length === 0) {
     }
     if (step === 'code' && (buf.includes('\\r') || buf.includes('\\n'))) {
       const code = buf.trim();
+      if (mode === 'keychain_cancelled') {
+        process.stdout.write('Failed keyring SaveToken: exit status 154 Bearer SYNTH_LOGIN_SECRET_222\\n');
+        return;
+      }
+      if (mode === 'keychain_missing_default') {
+        process.stdout.write('security: SecKeychainCopyDefault: A default keychain could not be found.\\n');
+        return;
+      }
+      if (mode === 'keyring_timeout') {
+        process.stdout.write('Keyring SaveToken timed out after 5s\\n');
+        return;
+      }
       if (mode === 'bad_code' || code === 'BAD_CODE') {
         // Deliberately emit echoed secret code AND failure marker in ONE chunk
         process.stdout.write('ECHO_SECRET_CODE:' + code + ' Got an error: token exchange failed: oauth2: "invalid_grant" "Bad Request"\\n');
@@ -176,7 +200,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
   });
 
   it('creates a 0700 dedicated profile, enforces session binding, replay, CR/LF validation, and PTY echo secrecy', async () => {
-    const mgr = new AgyAuthSessionManager();
+    const mgr = new AgyAuthSessionManager({ platform: 'linux' });
     const tokenA = 'operator-token-A';
     const tokenB = 'operator-token-B';
 
@@ -211,7 +235,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     );
 
     // Server restart creates a fresh AgyAuthSessionManager -> previous loginSessionId is rejected clearly
-    const restartedMgr = new AgyAuthSessionManager();
+    const restartedMgr = new AgyAuthSessionManager({ platform: 'linux' });
     await assert.rejects(
       () => restartedMgr.submitCode(tokenA, session.loginSessionId, 'SYNTH_AUTH_CODE_SECRET'),
       (err: any) => err instanceof AgyAuthError && err.statusCode === 404 && /server restart/i.test(err.message),
@@ -219,7 +243,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
 
     // Concurrent / replay submission prevented
     process.env.FAKE_AGY_MODE = 'slow_exchange';
-    const mgr2 = new AgyAuthSessionManager();
+    const mgr2 = new AgyAuthSessionManager({ platform: 'linux' });
     const s2 = await mgr2.startLogin(tokenA);
     assert.ok(s2);
     const submit1 = mgr2.submitCode(tokenA, s2.loginSessionId, 'SYNTH_AUTH_CODE_SECRET_123');
@@ -268,7 +292,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
 
     // 1. Startup failure does not leak raw PTY output
     process.env.FAKE_AGY_MODE = 'startup_fail';
-    const mgrFail = new AgyAuthSessionManager();
+    const mgrFail = new AgyAuthSessionManager({ platform: 'linux' });
     await assert.rejects(
       () => mgrFail.startLogin(token),
       (err: any) => err instanceof AgyAuthError && !err.message.includes('RAW_PTY_SECRET_STARTUP_FAILURE'),
@@ -276,7 +300,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
 
     // 2. Cancellation terminates PTY process and rejects subsequent submission
     delete process.env.FAKE_AGY_MODE;
-    const mgrCancel = new AgyAuthSessionManager();
+    const mgrCancel = new AgyAuthSessionManager({ platform: 'linux' });
     const sCancel = await mgrCancel.startLogin(token);
     assert.ok(sCancel);
     await mgrCancel.cancelLogin(token, sCancel.loginSessionId);
@@ -288,7 +312,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
 
     // 3. Expiry rejects late submission with 410
     process.env.DUPOND_AGY_AUTH_TTL_MS = '600';
-    const mgrExp = new AgyAuthSessionManager();
+    const mgrExp = new AgyAuthSessionManager({ platform: 'linux' });
     const sExp = await mgrExp.startLogin(token);
     assert.ok(sExp);
     await new Promise((r) => setTimeout(r, 700));
@@ -300,7 +324,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     // 4. Bad code returns failed without exposing echoed PTY secret (even when same-chunk with failure marker)
     delete process.env.DUPOND_AGY_AUTH_TTL_MS;
     process.env.FAKE_AGY_MODE = 'bad_code';
-    const mgrBad = new AgyAuthSessionManager();
+    const mgrBad = new AgyAuthSessionManager({ platform: 'linux' });
     const sBad = await mgrBad.startLogin(token);
     assert.ok(sBad);
     const badRes = await mgrBad.submitCode(token, sBad.loginSessionId, 'SENSITIVE_BAD_CODE_999');
@@ -320,7 +344,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     process.env.DUPOND_AGY_TERM_GRACE_MS = '80';
     process.env.DUPOND_AGY_KILL_GRACE_MS = '200';
 
-    const mgr = new AgyAuthSessionManager();
+    const mgr = new AgyAuthSessionManager({ platform: 'linux' });
     const session = await mgr.startLogin(token);
     assert.ok(session);
 
@@ -349,7 +373,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     process.env.DUPOND_AGY_TERM_GRACE_MS = '30';
     process.env.DUPOND_AGY_KILL_GRACE_MS = '30';
 
-    const mgrUnconf = new AgyAuthSessionManager();
+    const mgrUnconf = new AgyAuthSessionManager({ platform: 'linux' });
     await mgrUnconf.startLogin(token);
     const active = (mgrUnconf as any).activeSession;
     // Cleanly terminate the real test subprocess before swapping in an unkillable stub child
@@ -382,7 +406,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     const tokenB = 'operator-B';
 
     // 1. Concurrent startLogin calls serialize cleanly and reject cross-owner supersede
-    const mgr = new AgyAuthSessionManager();
+    const mgr = new AgyAuthSessionManager({ platform: 'linux' });
     const [resA, resB] = await Promise.allSettled([
       mgr.startLogin(tokenA),
       mgr.startLogin(tokenB),
@@ -400,7 +424,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
 
     // 2. Cancel during slow submit never turns into completed
     process.env.FAKE_AGY_MODE = 'slow_exchange';
-    const mgrCancelSubmit = new AgyAuthSessionManager();
+    const mgrCancelSubmit = new AgyAuthSessionManager({ platform: 'linux' });
     const s1 = await mgrCancelSubmit.startLogin(tokenA);
     assert.ok(s1);
     const submitPromise = mgrCancelSubmit.submitCode(tokenA, s1.loginSessionId, 'SYNTH_CODE_CANCEL_DURING_SUBMIT');
@@ -412,7 +436,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.strictEqual((await mgrCancelSubmit.getStatus(tokenA)).session?.state, 'cancelled');
 
     // 3. Same-owner supersede during slow submit never lets old session become completed
-    const mgrSupersede = new AgyAuthSessionManager();
+    const mgrSupersede = new AgyAuthSessionManager({ platform: 'linux' });
     const sOld = await mgrSupersede.startLogin(tokenA);
     assert.ok(sOld);
     const oldSubmit = mgrSupersede.submitCode(tokenA, sOld.loginSessionId, 'SYNTH_CODE_SUPERSEDED');
@@ -430,7 +454,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     // 4. Bounded submission deadline fails cleanly
     process.env.FAKE_AGY_MODE = 'never_finish';
     process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS = '120';
-    const mgrTimeout = new AgyAuthSessionManager();
+    const mgrTimeout = new AgyAuthSessionManager({ platform: 'linux' });
     const sTimeout = await mgrTimeout.startLogin(tokenA);
     assert.ok(sTimeout);
     const timeoutRes = await mgrTimeout.submitCode(tokenA, sTimeout.loginSessionId, 'SYNTH_CODE_TIMEOUT');
@@ -446,7 +470,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     // waitForProcessTermination must yield through real timers so an event-loop heartbeat is never starved.
     process.env.DUPOND_AGY_TERM_GRACE_MS = '220';
     process.env.DUPOND_AGY_KILL_GRACE_MS = '220';
-    const mgrHeartbeat = new AgyAuthSessionManager();
+    const mgrHeartbeat = new AgyAuthSessionManager({ platform: 'linux' });
     const sHeartbeat = await mgrHeartbeat.startLogin(token);
     assert.ok(sHeartbeat);
     const activeHb = (mgrHeartbeat as any).activeSession;
@@ -507,7 +531,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     process.env.FAKE_AGY_MODELS_HANG_MS = '10000';
     process.env.FAKE_AGY_MODELS_PID_OUT = probePidFileCancel;
     delete process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS;
-    const mgrCancelProbe = new AgyAuthSessionManager();
+    const mgrCancelProbe = new AgyAuthSessionManager({ platform: 'linux' });
     const sCancelProbe = await mgrCancelProbe.startLogin(token);
     assert.ok(sCancelProbe);
     const submitCancelP = mgrCancelProbe.submitCode(token, sCancelProbe.loginSessionId, 'SYNTH_PROBE_CANCEL');
@@ -530,7 +554,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     process.env.FAKE_AGY_MODELS_HANG_MS = '10000';
     process.env.FAKE_AGY_MODELS_PID_OUT = probePidFileDeadline;
     process.env.DUPOND_AGY_SUBMIT_TIMEOUT_MS = '180';
-    const mgrDeadline = new AgyAuthSessionManager();
+    const mgrDeadline = new AgyAuthSessionManager({ platform: 'linux' });
     const sDeadline = await mgrDeadline.startLogin(token);
     assert.ok(sDeadline);
     const tDeadlineStart = Date.now();
@@ -548,7 +572,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     delete process.env.FAKE_AGY_MODELS_PID_OUT;
     process.env.FAKE_AGY_MODELS_HANG_MS = '600';
     process.env.DUPOND_AGY_AUTH_TTL_MS = '350';
-    const mgrExpireProbe = new AgyAuthSessionManager();
+    const mgrExpireProbe = new AgyAuthSessionManager({ platform: 'linux' });
     const sExpireProbe = await mgrExpireProbe.startLogin(token);
     assert.ok(sExpireProbe);
     const expireRes = await mgrExpireProbe.submitCode(token, sExpireProbe.loginSessionId, 'SYNTH_PROBE_EXPIRE');
@@ -587,7 +611,7 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
 
     // 4. Full PTY chunked flow preserves client_id, redirect_uri, response_type, state, scope, and PKCE params
     process.env.FAKE_AGY_MODE = 'wrapped_url';
-    const mgr = new AgyAuthSessionManager();
+    const mgr = new AgyAuthSessionManager({ platform: 'linux' });
     const session = await mgr.startLogin('operator-wrapped-url');
     assert.ok(session?.authUrl);
     assert.strictEqual(session.authUrl, fullUrl);
@@ -599,5 +623,67 @@ describe('Antigravity CLI (agy) PTY authentication prototype', () => {
     assert.strictEqual(parsed.searchParams.get('code_challenge'), 'SYNTH_PKCE_CHALLENGE_43_CHARS_LONG_ABCDEFG');
     assert.strictEqual(parsed.searchParams.get('code_challenge_method'), 'S256');
     await mgr.cancelLogin('operator-wrapped-url', session.loginSessionId);
+  });
+
+  it('prevents macOS Keychain prompts by disabling onboarding on darwin and surfaces sanitized Keychain failure categories without retrying', async () => {
+    // 1. On darwin, onboardingSupported is false and startLogin refuses before spawning agy
+    const darwinMgr = new AgyAuthSessionManager({ platform: 'darwin' });
+    const initialStatus = await darwinMgr.getStatus('op-darwin');
+    assert.strictEqual(initialStatus.onboardingSupported, false);
+    assert.ok(initialStatus.onboardingUnavailableReason?.includes('Keychain'));
+    assert.strictEqual(initialStatus.credentialsPresent, false);
+    assert.strictEqual(initialStatus.profileAuthVerified, false);
+    assert.strictEqual(initialStatus.sandboxAuthVerified, false);
+    assert.strictEqual(initialStatus.executionVerified, false);
+
+    await assert.rejects(
+      () => darwinMgr.startLogin('op-darwin'),
+      (err: any) =>
+        err instanceof AgyAuthError &&
+        err.code === 'AGY_ONBOARDING_UNAVAILABLE_MACOS' &&
+        err.message.includes('Keychain'),
+    );
+    assert.strictEqual((await darwinMgr.getStatus('op-darwin')).session, null);
+
+    // 2. Token file presence alone never implies profile/sandbox/execution verification
+    const profileDir = resolveAgyProfileDir();
+    fs.mkdirSync(path.join(profileDir, '.gemini', 'antigravity-cli'), { recursive: true });
+    fs.writeFileSync(path.join(profileDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'), 'synth-token');
+    process.env.FAKE_AGY_MODE = 'models_keychain_cancelled';
+    const cancelledModelsStatus = await darwinMgr.getStatus('op-darwin');
+    assert.strictEqual(cancelledModelsStatus.credentialsPresent, true);
+    assert.strictEqual(cancelledModelsStatus.profileAuthVerified, false);
+    assert.strictEqual(cancelledModelsStatus.sandboxAuthVerified, false);
+    assert.strictEqual(cancelledModelsStatus.executionVerified, false);
+    assert.ok(cancelledModelsStatus.error?.includes('cancelled'));
+    assert.ok(!cancelledModelsStatus.error?.includes('SYNTH_KC_SECRET_111'));
+
+    // 3. Probe recognizes missing default keychain & keyring timeout cleanly
+    process.env.FAKE_AGY_MODE = 'models_keychain_missing_default';
+    const missingDefaultProbe = await probeAgyProfileModels(profileDir, fakeBin);
+    assert.strictEqual(missingDefaultProbe.authenticated, false);
+    assert.ok(missingDefaultProbe.error?.includes('default macOS Keychain'));
+
+    process.env.FAKE_AGY_MODE = 'models_keyring_timeout';
+    const timeoutProbe = await probeAgyProfileModels(profileDir, fakeBin);
+    assert.strictEqual(timeoutProbe.authenticated, false);
+    assert.ok(timeoutProbe.error?.includes('timed out waiting for macOS Keychain'));
+
+    // 4. Onboarding code submission recognizes Keychain failure categories without retrying or leaking secrets
+    const linuxMgr = new AgyAuthSessionManager({ platform: 'linux' });
+    for (const [mode, expectedSubstr] of [
+      ['keychain_cancelled', 'cancelled'],
+      ['keychain_missing_default', 'default macOS Keychain'],
+      ['keyring_timeout', 'timed out waiting for macOS Keychain'],
+    ] as const) {
+      process.env.FAKE_AGY_MODE = mode;
+      const sess = await linuxMgr.startLogin('op-kc');
+      assert.ok(sess?.loginSessionId);
+      const submitRes = await linuxMgr.submitCode('op-kc', sess.loginSessionId, '4/0ASynthCode');
+      assert.strictEqual(submitRes.state, 'failed');
+      assert.strictEqual(submitRes.authenticated, false);
+      assert.ok(submitRes.error?.includes(expectedSubstr), `Expected ${expectedSubstr}, got: ${submitRes.error}`);
+      assert.ok(!submitRes.error?.includes('SYNTH_LOGIN_SECRET_222'));
+    }
   });
 });
