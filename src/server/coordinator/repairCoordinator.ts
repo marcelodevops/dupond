@@ -62,9 +62,7 @@ export class RepairCoordinator {
     const { task } = options;
     const startTime = Date.now();
 
-    const persisted =
-      this.store.getTaskScoped(task.id, task.projectId) ||
-      this.store.getTask(task.id);
+    const persisted = this.store.getTaskScoped(task.id, task.projectId);
     if (persisted?.status === 'done' || task.status === 'done') {
       throw new Error('TASK_ALREADY_DONE: This task is completed. Reopen it before executing again.');
     }
