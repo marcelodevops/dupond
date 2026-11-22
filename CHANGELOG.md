@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.18.0](https://github.com/marcelodevops/dupond/compare/v0.17.0...v0.18.0) (2026-11-22)
+
+
+### Features
+
+* **auth:** add isolated Antigravity CLI PTY OAuth onboarding prototype ([f276c8e](https://github.com/marcelodevops/dupond/commit/f276c8ee9312a967abcf9aee6bc30ce2f5feb4b7))
+* **auth:** Antigravity CLI PTY OAuth onboarding prototype ([e4c9ed6](https://github.com/marcelodevops/dupond/commit/e4c9ed6c08097aee201b4505cd9f95d8daf8e8a3))
+
+
+### Bug Fixes
+
+* **agy-auth:** confirm dual process-group teardown, serialize lifecycle, and drop raw feedback ([2c54e7b](https://github.com/marcelodevops/dupond/commit/2c54e7b9047f9117ebb0f06269b8efe1f299a148))
+* **agy-auth:** extract unwrapped OSC 8 and delimited multi-line OAuth URLs ([838573a](https://github.com/marcelodevops/dupond/commit/838573ae6a54685f8454f1ff912ee53e52328177))
+* **agy-auth:** yield on real timers during process wait and make model probes async, bounded, and cancellable ([2de55c1](https://github.com/marcelodevops/dupond/commit/2de55c1239890d2818d3feb389bf50e97c5dbd0f))
+
 ## [0.17.0](https://github.com/marcelodevops/dupond/compare/v0.16.0...v0.17.0) (2026-11-20)
 
 
