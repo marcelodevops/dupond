@@ -1092,14 +1092,20 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                   />
 
                   {showApprovalTokenField ? (
-                    <input
-                      data-testid="review-approval-token-input"
-                      type="password"
-                      value={approvalTokenInput}
-                      onChange={(e) => setApprovalTokenInput(e.target.value)}
-                      placeholder="Operator approval token (X-Dupond-Approval-Token)"
-                      className="w-full bg-slate-950/90 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
-                    />
+                    <div className="space-y-1">
+                      <input
+                        data-testid="review-approval-token-input"
+                        type="password"
+                        autoComplete="off"
+                        value={approvalTokenInput}
+                        onChange={(e) => setApprovalTokenInput(e.target.value)}
+                        placeholder="Operator approval token (X-Dupond-Approval-Token)"
+                        className="w-full bg-slate-950/90 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+                      />
+                      <p data-testid="review-approval-token-help" className="text-[10px] text-slate-400">
+                        Separate from API auth (`DUPOND_API_KEY`/`DUPOND_AUTH_TOKEN`): set `DUPOND_APPROVAL_TOKEN` on the server and restart that instance. Held in memory only.
+                      </p>
+                    </div>
                   ) : (
                     <button
                       type="button"
@@ -1111,12 +1117,17 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
                   )}
 
                   {reviewActionError && (
-                    <p
+                    <div
                       data-testid="review-delivery-error"
-                      className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/60 rounded-lg p-2"
+                      className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/60 rounded-lg p-2 space-y-1"
                     >
-                      {reviewActionError}
-                    </p>
+                      <p>{reviewActionError}</p>
+                      {/APPROVAL_CREDENTIAL_UNCONFIGURED|not configured|DUPOND_APPROVAL_TOKEN/i.test(reviewActionError) && (
+                        <p data-testid="review-approval-unconfigured-help" className="text-[10px] text-amber-200">
+                          Set DUPOND_APPROVAL_TOKEN in this instance&apos;s private 0600 server environment (outside Git) and restart that instance. Approval still requires current passing verification evidence.
+                        </p>
+                      )}
+                    </div>
                   )}
 
                   <div className="flex flex-wrap items-center gap-2">
