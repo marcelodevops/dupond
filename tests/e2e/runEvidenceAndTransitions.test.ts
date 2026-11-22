@@ -1002,51 +1002,15 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await page.getByTestId('cancel-project-settings-btn').click();
       await page.getByTestId('project-settings-modal').waitFor({ state: 'hidden' });
 
-      const getStateRes = await page.request.get(`${serverUrl}/api/orchestrate/state`, {
-        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': localProjId },
-      });
-      assert.strictEqual(getStateRes.status(), 200);
-      const state = (await getStateRes.json()) as { tasks?: unknown[] };
-      const postStateRes = await page.request.post(`${serverUrl}/api/orchestrate/state`, {
-        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': localProjId },
-        data: {
-          ...state,
-          tasks: [
-            ...(state.tasks || []),
-            {
-              id: 'task-loc-101',
-              key: 'LOC-101',
-              title: 'Local delivery payload check',
-              description: 'Verify no placeholder repoUrl is sent',
-              status: 'todo',
-              priority: 'medium',
-              epicId: 'EPIC-1',
-              assignedAgentId: 'agent-dev',
-              estimatedHours: 1,
-              spentHours: 0,
-              subtasks: [],
-              deliverables: [],
-              dependencies: [],
-              tags: [],
-              allowedPaths: ['src'],
-              acceptanceCriteria: [
-                { id: 'ac-loc-1', description: 'Passes quick check', command: 'node -e "process.exit(0)"' },
-              ],
-              lastUpdated: 'Just now',
-            },
-          ],
-        },
-      });
-      assert.strictEqual(postStateRes.status(), 200);
+      // Adopt synthetic plan into LocalOnly (which has localPath only and no repoUrl)
+      await page.getByRole('button', { name: /Ingest Plan/i }).click();
+      await page.locator('textarea').first().fill('Add a local-only delivery test.');
+      await page.getByRole('button', { name: /Decompose & Orchestrate Plan with AI/i }).click();
+      await page.getByRole('button', { name: /Adopt Plan to Kanban Board/i }).waitFor({ state: 'visible', timeout: 15000 });
+      await page.getByRole('button', { name: /Adopt Plan to Kanban Board/i }).click();
+      await page.getByText('NAV-101').first().waitFor({ state: 'visible' });
 
-      await page.reload({ waitUntil: 'networkidle' });
-      await switchProjectAndWait(page, switcherBtn, {
-        targetProject: 'LocalOnly',
-        expectedCardKey: 'LOC-101',
-        absentCardKey: 'NAV-101',
-      });
-
-      await page.getByText('LOC-101').first().click();
+      await page.getByText('NAV-101').first().click();
       mockWorkerMode = 'pass';
       const specialistSelect = page.getByTestId('task-detail-modal').locator('select').nth(2);
       await specialistSelect.selectOption({ index: 1 });
