@@ -305,6 +305,99 @@ async function main() {
   assert.strictEqual(store.getLatestRunForTask(taskDone.id), null, 'No run may be created for done task');
   console.log('✔ [PASS] Completed (done) task execution refused before run, worktree, or worker launch');
 
+  // Test 7: Overlapping task IDs across projects use explicit project scope
+  const sharedTaskId = `shared-overlap-${Date.now()}`;
+  const doneInProjectA = store.createTask({
+    id: sharedTaskId,
+    projectId: 'project-a',
+    key: 'OVL-101',
+    title: 'Done in project A',
+    description: 'Completed in project A',
+    status: 'done',
+    priority: 'medium',
+    targetRepo: task4.targetRepo,
+    baseCommit: 'HEAD',
+    acceptanceCriteria: [{ id: 'ac-ovl-a', title: 'Echo ok', completed: true, checkCommand: 'echo ok' }],
+    verificationCommands: ['echo ok'],
+    allowedPaths: ['src'],
+    protectedPaths: [],
+  });
+  const todoInProjectB = {
+    ...doneInProjectA,
+    projectId: 'project-b',
+    title: 'Todo in project B',
+    description: 'Eligible in project B despite same task ID as done task in project A',
+    status: 'todo' as const,
+  };
+
+  await assert.rejects(
+    () =>
+      coordinator.executeTaskRun({
+        task: { ...doneInProjectA, status: 'todo' },
+        worker: {
+          name: 'spy-a',
+          provider: 'gemini',
+          isAvailable: async () => ({ available: true }),
+          execute: async () => ({ success: true, filesModified: [], diff: '', commitMessage: '', logs: [], durationMs: 1 }),
+        },
+        store,
+        workspaceManager,
+        verifier,
+      }),
+    /TASK_ALREADY_DONE/,
+  );
+
+  let projectBWorkerCalled = false;
+  const runB = await coordinator.executeTaskRun({
+    task: todoInProjectB,
+    worker: {
+      name: 'worker-b',
+      provider: 'gemini',
+      isAvailable: async () => ({ available: true }),
+      execute: async (ctx) => {
+        projectBWorkerCalled = true;
+        fs.mkdirSync(path.join(ctx.worktreePath, 'src'), { recursive: true });
+        fs.writeFileSync(path.join(ctx.worktreePath, 'src', 'overlap.ts'), 'export const overlap = true;\n');
+        return {
+          success: true,
+          filesModified: ['src/overlap.ts'],
+          diff: '+export const overlap = true;\n',
+          commitMessage: 'feat: overlap b',
+          logs: ['done b'],
+          durationMs: 5,
+        };
+      },
+    },
+    store,
+    workspaceManager,
+    verifier,
+  });
+  assert.strictEqual(projectBWorkerCalled, true, 'Eligible task in project B must execute despite done task with same ID in project A');
+  assert.strictEqual(runB.status, 'completed');
+
+  const doneInProjectB = store.createTask({
+    ...todoInProjectB,
+    id: `done-b-${Date.now()}`,
+    status: 'done',
+  });
+  await assert.rejects(
+    () =>
+      coordinator.executeTaskRun({
+        task: { ...doneInProjectB, status: 'todo' },
+        worker: {
+          name: 'spy-b',
+          provider: 'gemini',
+          isAvailable: async () => ({ available: true }),
+          execute: async () => ({ success: true, filesModified: [], diff: '', commitMessage: '', logs: [], durationMs: 1 }),
+        },
+        store,
+        workspaceManager,
+        verifier,
+      }),
+    /TASK_ALREADY_DONE/,
+  );
+  console.log('✔ [PASS] Overlapping task IDs enforce done guard per explicit project scope');
+
   console.log('\n=== ALL REPAIR LOOP TESTS PASSED CLEANLY ===');
 }
 
