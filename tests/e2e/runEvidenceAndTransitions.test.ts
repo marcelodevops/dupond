@@ -623,6 +623,42 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await pwExpect(page.getByTestId('run-delivery-status')).toBeVisible({ timeout: 20000 });
       await pwExpect(page.getByTestId('run-delivery-status')).toContainText('PR:');
       await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('done');
+      await pwExpect(page.getByTestId('execute-agent-step-btn')).toBeDisabled();
+      await pwExpect(page.getByTestId('task-completed-execution-notice')).toContainText(
+        'This task is completed. Reopen it before executing again.',
+      );
+
+      // Direct API execution on a completed task must fail with 409 TASK_ALREADY_DONE and zero side effects
+      lastWorkerPrompt = '';
+      const navProjectsRes = await page.request.get(`${serverUrl}/api/projects`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
+      });
+      const navProj = ((await navProjectsRes.json()) as Array<{ id: string; name: string }>).find((p) => p.name === 'Naviera');
+      assert.ok(navProj);
+      const navStateRes = await page.request.get(`${serverUrl}/api/orchestrate/state`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': navProj.id },
+      });
+      const navState = (await navStateRes.json()) as { tasks: any[]; agents: any[] };
+      const doneNavTask = navState.tasks.find((t) => t.key === 'NAV-101');
+      assert.ok(doneNavTask);
+      const execDoneRes = await page.request.post(`${serverUrl}/api/orchestrate/agent-step`, {
+        headers: {
+          Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`,
+          'Content-Type': 'application/json',
+          'x-dupond-project-id': navProj.id,
+        },
+        data: {
+          task: { ...doneNavTask, status: 'todo' },
+          agent: navState.agents?.[0] || { id: 'agent-dev', name: 'Developer', role: 'Coding Worker' },
+        },
+      });
+      assert.strictEqual(execDoneRes.status(), 409);
+      const execDoneJson = (await execDoneRes.json()) as { code?: string; error?: string; authoritativeStatus?: string };
+      assert.strictEqual(execDoneJson.code, 'TASK_ALREADY_DONE');
+      assert.strictEqual(execDoneJson.authoritativeStatus, 'done');
+      assert.ok(execDoneJson.error?.includes('This task is completed. Reopen it before executing again.'));
+      assert.strictEqual(lastWorkerPrompt, '', 'Refused execution on done task must not invoke provider');
+      await pwExpect(page.getByTestId('run-delivery-status')).toContainText('PR:');
       if (shotDir) {
         await page.screenshot({ path: path.join(shotDir, 'review-approve-deliver-pr.png'), fullPage: false });
       }

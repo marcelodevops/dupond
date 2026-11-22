@@ -266,6 +266,45 @@ async function main() {
   assert.ok(fallbackCheck.failureReason?.includes('unmapped-crit'), 'Failure reason must mention unmet criterion');
   console.log('✔ [PASS] Acceptance criteria without checkCommand rejected fail-closed without automatic crediting');
 
+  // Test 6: Completed (done) task is refused before creating a run, worktree, or launching a worker
+  const taskDone = store.createTask({
+    id: `task-done-${Date.now()}`,
+    key: 'DONE-601',
+    title: 'Already completed task',
+    description: 'Should never re-execute once done',
+    status: 'done',
+    priority: 'medium',
+    targetRepo: task4.targetRepo,
+    baseCommit: 'HEAD',
+    acceptanceCriteria: [{ id: 'ac-done', title: 'Done check', completed: true, checkCommand: 'echo ok' }],
+    verificationCommands: ['echo ok'],
+    allowedPaths: ['src'],
+    protectedPaths: [],
+  });
+  let doneWorkerCalled = false;
+  await assert.rejects(
+    () =>
+      coordinator.executeTaskRun({
+        task: taskDone,
+        worker: {
+          name: 'spy-worker',
+          provider: 'gemini',
+          isAvailable: async () => ({ available: true }),
+          execute: async () => {
+            doneWorkerCalled = true;
+            return { success: true, filesModified: [], diff: '', commitMessage: '', logs: [], durationMs: 1 };
+          },
+        },
+        store,
+        workspaceManager,
+        verifier,
+      }),
+    /TASK_ALREADY_DONE/,
+  );
+  assert.strictEqual(doneWorkerCalled, false, 'Worker must not be called for done task');
+  assert.strictEqual(store.getLatestRunForTask(taskDone.id), null, 'No run may be created for done task');
+  console.log('✔ [PASS] Completed (done) task execution refused before run, worktree, or worker launch');
+
   console.log('\n=== ALL REPAIR LOOP TESTS PASSED CLEANLY ===');
 }
 
