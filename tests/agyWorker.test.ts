@@ -71,6 +71,38 @@ if (scenario === 'hang') {
 } else if (scenario === 'missing_completion_exit0') {
   console.log(JSON.stringify({ ok: true }));
   process.exit(0);
+} else if (scenario === 'config_isolation_probe') {
+  const probeReport = {
+    argv: args,
+    homeSettings: fs.readFileSync(path.join(homeDir, '.gemini', 'antigravity-cli', 'settings.json'), 'utf-8').trim(),
+    homeMcp: fs.readFileSync(path.join(homeDir, '.gemini', 'config', 'mcp_config.json'), 'utf-8').trim(),
+    homeHooks: fs.readFileSync(path.join(homeDir, '.gemini', 'config', 'hooks.json'), 'utf-8').trim(),
+    homeLegacyMcp: fs.readFileSync(path.join(homeDir, '.gemini', 'antigravity-cli', 'mcp_config.json'), 'utf-8').trim(),
+    homeLegacyHooks: fs.readFileSync(path.join(homeDir, '.gemini', 'antigravity-cli', 'hooks.json'), 'utf-8').trim(),
+    hasProfilePluginsDir: fs.existsSync(path.join(homeDir, '.gemini', 'config', 'plugins')) || fs.existsSync(path.join(homeDir, '.gemini', 'antigravity-cli', 'plugins')),
+    hasJetboxProto: fs.existsSync(path.join(homeDir, '.gemini', 'antigravity-cli', 'jetbox_summaries_proto.pb')),
+    readableRepoMarkers: [],
+  };
+  for (const rel of [
+    '.agents/hooks.json',
+    '.agents/plugins.json',
+    '.agents/mcp_config.json',
+    '.agent/hooks.json',
+    '_agents/hooks.json',
+    '_agent/hooks.json',
+    '.gemini/hooks.json',
+  ]) {
+    try {
+      const content = fs.readFileSync(path.join(process.cwd(), rel), 'utf-8');
+      probeReport.readableRepoMarkers.push({ rel, content });
+    } catch {
+      // Expected: EPERM/EACCES on Seatbelt or ENOENT on masked container dir
+    }
+  }
+  fs.mkdirSync(path.join(process.cwd(), 'src'), { recursive: true });
+  fs.writeFileSync(path.join(process.cwd(), 'src', 'isolation-probe.json'), JSON.stringify(probeReport, null, 2));
+  console.log(JSON.stringify({ conversation_id: 'conv-iso', status: 'SUCCESS', response: 'Done', num_turns: 1, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }));
+  process.exit(0);
 } else if (scenario === 'bad_code_exit0') {
   fs.mkdirSync(path.join(process.cwd(), 'src'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), 'src', 'feature.ts'), 'export const value = 999;\\n');
@@ -237,7 +269,7 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     assert.ok(captured.argv.some((a: string) => a.startsWith('--print=')));
     assert.ok(captured.argv.includes('--output-format=json'));
     assert.ok(captured.argv.includes('--disable-slash-commands'));
-    assert.ok(captured.argv.includes('--settings={}'));
+    assert.ok(captured.argv.includes('--settings={"disableSlashCommands":true,"trustedWorkspaces":[]}'));
 
     // Reset repoDir before RepairCoordinator run
     execFileSync('git', ['checkout', '--', 'src/feature.ts'], { cwd: repoDir });
@@ -428,5 +460,82 @@ describe('Antigravity CLI (agy) coding-worker integration & Gemini CLI removal',
     const validRes = await adapter.execute(baseCtx);
     assert.strictEqual(validRes.success, true);
     assert.strictEqual(validRes.tokenUsage?.totalTokens, 20);
+  });
+
+  it('isolates profile and repository hooks, MCP servers, plugins, and settings inside the OS sandbox', async () => {
+    writeProfileToken();
+
+    // Seed adversarial marker configs into the dedicated profile
+    fs.writeFileSync(
+      path.join(profileDir, '.gemini', 'antigravity-cli', 'settings.json'),
+      JSON.stringify({ trustedWorkspaces: ['/'], hooks: { PreToolUse: ['echo MARKER_PROFILE_SETTINGS_HOOK'] } })
+    );
+    fs.writeFileSync(
+      path.join(profileDir, '.gemini', 'antigravity-cli', 'jetbox_summaries_proto.pb'),
+      'MARKER_PROFILE_PROTO'
+    );
+    fs.mkdirSync(path.join(profileDir, '.gemini', 'config', 'plugins', 'evil-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(profileDir, '.gemini', 'config', 'hooks.json'),
+      JSON.stringify({ PreToolUse: [{ command: 'touch /tmp/marker-profile-hook-ran' }] })
+    );
+    fs.writeFileSync(
+      path.join(profileDir, '.gemini', 'config', 'mcp_config.json'),
+      JSON.stringify({ mcpServers: { markerMcp: { command: 'echo', args: ['MARKER_PROFILE_MCP'] } } })
+    );
+    fs.writeFileSync(
+      path.join(profileDir, '.gemini', 'config', 'plugins', 'evil-plugin', 'hooks.json'),
+      JSON.stringify({ SessionStart: [{ command: 'echo MARKER_PROFILE_PLUGIN' }] })
+    );
+
+    // Seed adversarial marker configs into the repository worktree
+    const repoDir = initGitRepo(tmpDir);
+    for (const dirName of ['.agents', '.agent', '_agents', '_agent', '.gemini']) {
+      fs.mkdirSync(path.join(repoDir, dirName), { recursive: true });
+      fs.writeFileSync(
+        path.join(repoDir, dirName, 'hooks.json'),
+        JSON.stringify({ PreToolUse: [{ command: `echo MARKER_REPO_HOOK_${dirName}` }] })
+      );
+    }
+    fs.writeFileSync(
+      path.join(repoDir, '.agents', 'plugins.json'),
+      JSON.stringify({ plugins: ['MARKER_REPO_PLUGIN'] })
+    );
+    fs.writeFileSync(
+      path.join(repoDir, '.agents', 'mcp_config.json'),
+      JSON.stringify({ mcpServers: { repoMcp: { command: 'echo', args: ['MARKER_REPO_MCP'] } } })
+    );
+
+    const sandbox = new SandboxExecutor();
+    const adapter = new AgyCodingWorkerAdapter('gemini-3.8-flash-medium', sandbox);
+    process.env.FAKE_AGY_SCENARIO = 'config_isolation_probe';
+
+    const res = await adapter.execute({
+      taskId: 't-iso',
+      taskKey: 'AEG-206',
+      taskTitle: 'Config isolation probe',
+      taskDescription: 'Verify profile and repo config cannot leak into sandboxed agy execution',
+      acceptanceCriteria: [],
+      worktreePath: repoDir,
+      allowedPaths: ['src'],
+      protectedPaths: ['secrets'],
+      attemptNumber: 1,
+    });
+
+    assert.strictEqual(res.success, true, `Expected isolation probe to succeed, got: ${res.errorMessage}`);
+    const reportPath = path.join(repoDir, 'src', 'isolation-probe.json');
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+
+    assert.ok(report.argv.includes('--disable-slash-commands'));
+    assert.ok(report.argv.includes('--settings={"disableSlashCommands":true,"trustedWorkspaces":[]}'));
+
+    assert.strictEqual(report.homeSettings, '{"disableSlashCommands":true,"trustedWorkspaces":[]}');
+    assert.strictEqual(report.homeMcp, '{"mcpServers":{}}');
+    assert.strictEqual(report.homeHooks, '{}');
+    assert.strictEqual(report.homeLegacyMcp, '{"mcpServers":{}}');
+    assert.strictEqual(report.homeLegacyHooks, '{}');
+    assert.strictEqual(report.hasProfilePluginsDir, false);
+    assert.strictEqual(report.hasJetboxProto, false);
+    assert.deepStrictEqual(report.readableRepoMarkers, []);
   });
 });
