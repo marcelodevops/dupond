@@ -4,30 +4,36 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
-import {
-  validateWorkerConfig,
-  resolveCodingWorker,
-  SUPPORTED_PROVIDERS,
-  SUPPORTED_MODELS,
-} from '../src/server/worker/workerRegistry.js';
-import { GeminiCodingWorkerAdapter } from '../src/server/worker/geminiWorkerAdapter.js';
-import { OpenAICodingWorkerAdapter } from '../src/server/worker/openaiWorkerAdapter.js';
-import { GeminiProviderAdapter } from '../src/server/worker/providers/geminiProvider.js';
-import { OpenAIProviderAdapter } from '../src/server/worker/providers/openaiProvider.js';
-import { runCodingWorkerLoop } from '../src/server/worker/codingWorkerLoop.js';
-import {
+import type {
   ModelProviderAdapter,
   WorkerExecutionContext,
   ProviderTurnInput,
   ProviderTurnResult,
 } from '../src/server/worker/types.js';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.js';
-import { SandboxExecutor } from '../src/server/sandbox/sandboxExecutor.js';
-import { TaskStore } from '../src/server/db/database.js';
-import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.js';
-import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.js';
+
+const isolatedProviderDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dp_provider_env_')));
+process.env.DUPOND_DB_PATH = path.join(isolatedProviderDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedProviderDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedProviderDir, '.dupond_conn_key');
+delete process.env.GEMINI_API_KEY;
+delete process.env.GOOGLE_API_KEY;
+delete process.env.OPENAI_API_KEY;
 
 async function main() {
+  const {
+    validateWorkerConfig,
+    resolveCodingWorker,
+  } = await import('../src/server/worker/workerRegistry.js');
+  const { GeminiCodingWorkerAdapter } = await import('../src/server/worker/geminiWorkerAdapter.js');
+  const { OpenAICodingWorkerAdapter } = await import('../src/server/worker/openaiWorkerAdapter.js');
+  const { GeminiProviderAdapter } = await import('../src/server/worker/providers/geminiProvider.js');
+  const { OpenAIProviderAdapter } = await import('../src/server/worker/providers/openaiProvider.js');
+  const { runCodingWorkerLoop } = await import('../src/server/worker/codingWorkerLoop.js');
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.js');
+  const { SandboxExecutor } = await import('../src/server/sandbox/sandboxExecutor.js');
+  const { TaskStore } = await import('../src/server/db/database.js');
+  const { AuthoritativeVerifier } = await import('../src/server/verification/authoritativeVerifier.js');
+  const { RepairCoordinator } = await import('../src/server/coordinator/repairCoordinator.js');
   console.log('===============================================================');
   console.log('=== PROVIDER-INDEPENDENT WORKERS & OPENAI CONTRACT SUITE ===');
   console.log('===============================================================\n');
@@ -108,26 +114,24 @@ async function main() {
     // ------------------------------------------------------------------------
     console.log('\n--- Part 2: Credential & Availability Verification ---');
 
-    const origGeminiKey = process.env.GEMINI_API_KEY;
-    const origOpenAIKey = process.env.OPENAI_API_KEY;
-
-    // Gemini missing key
+    // Gemini missing key (isolated DB + cleared env)
     delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
     const geminiNoKey = await geminiWorker.isAvailable();
     assert.strictEqual(geminiNoKey.available, false);
     assert.ok(geminiNoKey.error?.includes('GEMINI_API_KEY is not set'));
     console.log('✔ [PASS] Gemini reports unavailable with missing GEMINI_API_KEY');
 
-    // OpenAI missing key
+    // OpenAI missing key (isolated DB + cleared env)
     delete process.env.OPENAI_API_KEY;
     const openaiNoKey = await openaiWorker.isAvailable();
     assert.strictEqual(openaiNoKey.available, false);
     assert.ok(openaiNoKey.error?.includes('OPENAI_API_KEY is not set'));
     console.log('✔ [PASS] OpenAI reports unavailable with missing OPENAI_API_KEY');
 
-    // Restore keys for subsequent mock tests
-    if (origGeminiKey) process.env.GEMINI_API_KEY = origGeminiKey;
-    if (origOpenAIKey) process.env.OPENAI_API_KEY = origOpenAIKey;
+    // Set synthetic-only test keys for subsequent mock tests (never use real credentials)
+    process.env.GEMINI_API_KEY = 'AIzaSyTestSyntheticKey000000';
+    process.env.OPENAI_API_KEY = 'sk-test-synthetic-key-000000';
 
     // ------------------------------------------------------------------------
     // Part 3: Shared Contract Tests with Fixtures (Both Providers)
@@ -495,6 +499,9 @@ async function main() {
   } finally {
     try {
       fs.rmSync(tmpBase, { recursive: true, force: true });
+    } catch {}
+    try {
+      fs.rmSync(isolatedProviderDir, { recursive: true, force: true });
     } catch {}
   }
 }

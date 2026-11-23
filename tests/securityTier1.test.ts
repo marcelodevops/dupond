@@ -61,7 +61,9 @@ async function main() {
   // ------------------------------------------------------------------------
   // Test 2: read_file refuses .git metadata and .env files
   // ------------------------------------------------------------------------
-  const workspaceManager = new WorkspaceManager(process.cwd());
+  const { createDisposableRepo } = await import('./fixtures/disposableRepo.ts');
+  const repo = createDisposableRepo('dupond-tier1-');
+  const workspaceManager = new WorkspaceManager(repo.repoDir);
   const adapter = new GeminiCodingWorkerAdapter();
   const runId = `tier1-${Date.now()}`;
   const branchName = `tier1-branch-${Date.now()}`;
@@ -200,6 +202,7 @@ async function main() {
     console.log('✔ [PASS] isSafeGitRef accepts refnames and rejects option injection');
   } finally {
     workspaceManager.cleanupWorktree(worktree.worktreePath, branchName);
+    repo.cleanup();
   }
 
   console.log('\n=== ALL TIER 1 EXECUTION-BOUNDARY SECURITY TESTS PASSED ===');

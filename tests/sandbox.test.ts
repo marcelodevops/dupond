@@ -5,11 +5,14 @@ import path from 'path';
 import os from 'os';
 import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
 import { SandboxExecutor } from '../src/server/sandbox/sandboxExecutor.ts';
+import { createDisposableRepo } from './fixtures/disposableRepo.ts';
 
 async function main() {
   console.log('=== RUNNING WORKSPACE & EXECUTION SANDBOX TESTS ===\n');
 
-  const workspaceManager = new WorkspaceManager(process.cwd());
+  const repo = createDisposableRepo('dupond-sandbox-');
+  try {
+  const workspaceManager = new WorkspaceManager(repo.repoDir);
   const sandbox = new SandboxExecutor();
 
   // Test 1: Sandbox availability check
@@ -107,6 +110,9 @@ async function main() {
   console.log('✔ [PASS] Sandbox container image preparation decoupled from command timeout');
 
   console.log('\n=== ALL WORKSPACE & SANDBOX TESTS PASSED CLEANLY ===');
+  } finally {
+    repo.cleanup();
+  }
 }
 
 test('suite', main);

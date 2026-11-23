@@ -7,12 +7,15 @@ import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
 import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
 import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.ts';
 import { CodingWorkerAdapter, WorkerExecutionContext, WorkerExecutionResult } from '../src/server/worker/types.ts';
+import { createDisposableRepo } from './fixtures/disposableRepo.ts';
 
 async function main() {
   console.log('=== RUNNING REPAIR LOOP & AUTHORITATIVE VERIFICATION TESTS ===\n');
 
+  const repo = createDisposableRepo('dupond-repairloop-');
+  try {
   const store = new TaskStore(':memory:');
-  const workspaceManager = new WorkspaceManager(process.cwd());
+  const workspaceManager = new WorkspaceManager(repo.repoDir);
   const verifier = new AuthoritativeVerifier();
   const coordinator = new RepairCoordinator(store, workspaceManager, verifier);
 
@@ -63,7 +66,8 @@ async function main() {
     description: 'Implement correct add function',
     status: 'todo',
     priority: 'high',
-    targetRepo: 'marcelodevops/dupond',
+    targetRepo: 'disposable-test/repo',
+    targetRepoPath: repo.repoDir,
     baseCommit: 'HEAD',
     allowedPaths: ['mathModule.cjs'],
     protectedPaths: [],
@@ -130,7 +134,8 @@ async function main() {
     description: 'Will fail retries',
     status: 'todo',
     priority: 'medium',
-    targetRepo: 'marcelodevops/dupond',
+    targetRepo: 'disposable-test/repo',
+    targetRepoPath: repo.repoDir,
     baseCommit: 'HEAD',
     allowedPaths: ['mathModule.cjs'],
     protectedPaths: [],
@@ -177,7 +182,8 @@ async function main() {
     description: 'Runs while previous task is blocked',
     status: 'todo',
     priority: 'high',
-    targetRepo: 'marcelodevops/dupond',
+    targetRepo: 'disposable-test/repo',
+    targetRepoPath: repo.repoDir,
     baseCommit: 'HEAD',
     allowedPaths: ['src/**'],
     protectedPaths: [],
@@ -223,7 +229,8 @@ async function main() {
     description: 'Attempts to modify protected test',
     status: 'todo',
     priority: 'low',
-    targetRepo: 'marcelodevops/dupond',
+    targetRepo: 'disposable-test/repo',
+    targetRepoPath: repo.repoDir,
     baseCommit: 'HEAD',
     allowedPaths: ['tests/**'],
     protectedPaths: ['tests/acceptance/**'],
@@ -263,7 +270,7 @@ async function main() {
   workspaceManager.cleanupWorktree(fallbackWorktree.worktreePath, fallbackWorktree.branch);
   assert.strictEqual(fallbackCheck.passed, false, 'Verification must fail when criteria lack explicit check evidence');
   assert.strictEqual(fallbackCheck.criteriaVerified.includes('unmapped-crit'), false, 'Unchecked criterion must not be credited');
-  assert.ok(fallbackCheck.failureReason?.includes('unmapped-crit'), 'Failure reason must mention unmet criterion');
+  assert.ok(fallbackCheck.failureReason?.includes('unmapped-crit'), `Failure reason must mention unmet criterion (got: ${fallbackCheck.failureReason})`);
   console.log('✔ [PASS] Acceptance criteria without checkCommand rejected fail-closed without automatic crediting');
 
   // Test 6: Completed (done) task is refused before creating a run, worktree, or launching a worker
@@ -275,6 +282,7 @@ async function main() {
     status: 'done',
     priority: 'medium',
     targetRepo: task4.targetRepo,
+    targetRepoPath: repo.repoDir,
     baseCommit: 'HEAD',
     acceptanceCriteria: [{ id: 'ac-done', title: 'Done check', completed: true, checkCommand: 'echo ok' }],
     verificationCommands: ['echo ok'],
@@ -316,6 +324,7 @@ async function main() {
     status: 'done',
     priority: 'medium',
     targetRepo: task4.targetRepo,
+    targetRepoPath: repo.repoDir,
     baseCommit: 'HEAD',
     acceptanceCriteria: [{ id: 'ac-ovl-a', title: 'Echo ok', completed: true, checkCommand: 'echo ok' }],
     verificationCommands: ['echo ok'],
@@ -399,6 +408,9 @@ async function main() {
   console.log('✔ [PASS] Overlapping task IDs enforce done guard per explicit project scope');
 
   console.log('\n=== ALL REPAIR LOOP TESTS PASSED CLEANLY ===');
+  } finally {
+    repo.cleanup();
+  }
 }
 
 test('suite', main);

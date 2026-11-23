@@ -5,11 +5,13 @@ import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { GeminiCodingWorkerAdapter } from '../src/server/worker/geminiWorkerAdapter.ts';
 import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
+import { createDisposableRepo } from './fixtures/disposableRepo.ts';
 
 async function main() {
   console.log('=== RUNNING CODING WORKER ADAPTER TESTS ===\n');
 
-  const workspaceManager = new WorkspaceManager(process.cwd());
+  const repo = createDisposableRepo('dupond-worker-adapter-');
+  const workspaceManager = new WorkspaceManager(repo.repoDir);
   const adapter = new GeminiCodingWorkerAdapter();
 
   // Test 1: Availability check
@@ -109,6 +111,7 @@ async function main() {
 
   } finally {
     workspaceManager.cleanupWorktree(worktree.worktreePath, branchName);
+    repo.cleanup();
   }
 
   console.log('\n=== ALL CODING WORKER ADAPTER TESTS PASSED CLEANLY ===');
