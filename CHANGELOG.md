@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.1](https://github.com/marcelodevops/dupond/compare/v0.19.0...v0.19.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* describe shared-ref deltas as concurrent changes with unknown attribution ([65a06cd](https://github.com/marcelodevops/dupond/commit/65a06cd183547697b4cf4e851ffdac3860effc68))
+* **tests:** isolate test suites from live repo/storage and clarify shared-ref attribution ([2236bc0](https://github.com/marcelodevops/dupond/commit/2236bc038b6ba30fd2825326df175d31be4752ab))
+
 ## [0.19.0](https://github.com/marcelodevops/dupond/compare/v0.18.0...v0.19.0) (2026-11-23)
 
 
