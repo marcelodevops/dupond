@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.19.0](https://github.com/marcelodevops/dupond/compare/v0.18.0...v0.19.0) (2026-11-23)
+
+
+### Features
+
+* integrate Antigravity CLI coding worker and remove Gemini CLI ([#82](https://github.com/marcelodevops/dupond/issues/82)) ([b40ff64](https://github.com/marcelodevops/dupond/commit/b40ff6422b774a985fa9c00cd87148f4af489df5))
+* **ui:** add inline help for operator approval credential and unconfigured state ([b228833](https://github.com/marcelodevops/dupond/commit/b228833519410a6df31d049852c307e74119eb16))
+
+
+### Bug Fixes
+
+* **agy:** enforce profile and repository config isolation in OS sandbox ([6e47230](https://github.com/marcelodevops/dupond/commit/6e4723017b0eb22c8da89766ae1fa60d5e89cb62))
+* **agy:** gate macOS probes and coding execution before spawning agy ([ed05186](https://github.com/marcelodevops/dupond/commit/ed05186dd4fefe0535ef77d51b0220b002a953b4))
+* **agy:** prevent macOS keychain prompts and surface sanitized auth states ([fcab2d6](https://github.com/marcelodevops/dupond/commit/fcab2d61e05efa93e3bff72aa4d004995a18f551))
+* **delivery:** avoid sending placeholder repoUrl when project uses localPath ([5fe186c](https://github.com/marcelodevops/dupond/commit/5fe186cfef6a3320aa69fe832c68b455c466a6c5))
+* **lifecycle:** block execution on completed (done) tasks in UI and API ([8eecd4c](https://github.com/marcelodevops/dupond/commit/8eecd4cc0d63f7361df412f555882e9a82a8c74d))
+* **lifecycle:** remove unscoped getTask fallback in RepairCoordinator done guard ([5e234ef](https://github.com/marcelodevops/dupond/commit/5e234ef80d6449e4695f3c28d390061670e5f066))
+
 ## [0.18.0](https://github.com/marcelodevops/dupond/compare/v0.17.0...v0.18.0) (2026-11-22)
 
 
