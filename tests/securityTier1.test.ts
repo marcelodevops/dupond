@@ -1,16 +1,23 @@
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
-import { GeminiCodingWorkerAdapter } from '../src/server/worker/geminiWorkerAdapter.ts';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
-import { validatePermittedCommand } from '../src/server/worker/tools.ts';
-import { isSafeGitRef } from '../src/server/utils/gitRefs.ts';
-import { defaultGitHubDelivery } from '../src/server/delivery/githubDelivery.ts';
+
+const isolatedStorageDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-tier1-env-')));
+process.env.DUPOND_DB_PATH = path.join(isolatedStorageDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedStorageDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedStorageDir, '.dupond_conn_key');
 
 async function main() {
   console.log('=== RUNNING TIER 1 EXECUTION-BOUNDARY SECURITY TESTS ===\n');
+
+  const { GeminiCodingWorkerAdapter } = await import('../src/server/worker/geminiWorkerAdapter.ts');
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.ts');
+  const { validatePermittedCommand } = await import('../src/server/worker/tools.ts');
+  const { isSafeGitRef } = await import('../src/server/utils/gitRefs.ts');
+  const { defaultGitHubDelivery } = await import('../src/server/delivery/githubDelivery.ts');
 
   // ------------------------------------------------------------------------
   // Test 1: run_permitted_command validates the whole command line
@@ -203,6 +210,7 @@ async function main() {
   } finally {
     workspaceManager.cleanupWorktree(worktree.worktreePath, branchName);
     repo.cleanup();
+    fs.rmSync(isolatedStorageDir, { recursive: true, force: true });
   }
 
   console.log('\n=== ALL TIER 1 EXECUTION-BOUNDARY SECURITY TESTS PASSED ===');

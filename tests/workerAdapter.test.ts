@@ -1,14 +1,21 @@
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
-import { GeminiCodingWorkerAdapter } from '../src/server/worker/geminiWorkerAdapter.ts';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
 import { createDisposableRepo } from './fixtures/disposableRepo.ts';
+
+const isolatedStorageDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-worker-adapter-env-')));
+process.env.DUPOND_DB_PATH = path.join(isolatedStorageDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedStorageDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedStorageDir, '.dupond_conn_key');
 
 async function main() {
   console.log('=== RUNNING CODING WORKER ADAPTER TESTS ===\n');
+
+  const { GeminiCodingWorkerAdapter } = await import('../src/server/worker/geminiWorkerAdapter.ts');
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.ts');
 
   const repo = createDisposableRepo('dupond-worker-adapter-');
   const workspaceManager = new WorkspaceManager(repo.repoDir);
@@ -112,6 +119,7 @@ async function main() {
   } finally {
     workspaceManager.cleanupWorktree(worktree.worktreePath, branchName);
     repo.cleanup();
+    fs.rmSync(isolatedStorageDir, { recursive: true, force: true });
   }
 
   console.log('\n=== ALL CODING WORKER ADAPTER TESTS PASSED CLEANLY ===');

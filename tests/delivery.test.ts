@@ -1,17 +1,24 @@
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
-import { TaskStore } from '../src/server/db/database.ts';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
-import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
-import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.ts';
-import { computeEvidenceBinding } from '../src/server/verification/evidenceBinding.ts';
 import { createDisposableRepo } from './fixtures/disposableRepo.ts';
+
+const isolatedStorageDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-delivery-env-')));
+process.env.DUPOND_DB_PATH = path.join(isolatedStorageDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedStorageDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedStorageDir, '.dupond_conn_key');
 
 async function main() {
   console.log('=== RUNNING GITHUB DELIVERY & RECONCILIATION TESTS ===\n');
+
+  const { TaskStore } = await import('../src/server/db/database.ts');
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.ts');
+  const { AuthoritativeVerifier } = await import('../src/server/verification/authoritativeVerifier.ts');
+  const { GitHubDeliveryService } = await import('../src/server/delivery/githubDelivery.ts');
+  const { computeEvidenceBinding } = await import('../src/server/verification/evidenceBinding.ts');
 
   const repo = createDisposableRepo('dupond-delivery-');
   const store = new TaskStore(':memory:');
@@ -190,6 +197,7 @@ async function main() {
   } finally {
     workspaceManager.cleanupWorktree(worktree.worktreePath, branchName);
     repo.cleanup();
+    fs.rmSync(isolatedStorageDir, { recursive: true, force: true });
   }
 
   console.log('\n=== ALL DELIVERY & RECONCILIATION TESTS PASSED CLEANLY ===');

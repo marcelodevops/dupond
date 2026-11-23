@@ -588,7 +588,7 @@ async function runAcceptanceSuite() {
       status: 'completed',
       baseCommit: 'HEAD',
       targetBranch: 'dupond/approval-branch',
-      worktreePath: process.cwd(),
+      worktreePath: repo.repoDir,
       currentAttempt: 1,
       durationMs: 100,
     });
@@ -630,8 +630,9 @@ async function runAcceptanceSuite() {
     // ------------------------------------------------------------------------
     // Scenario 13: Dupond CI configuration passes.
     // ------------------------------------------------------------------------
-    assert.ok(fs.existsSync(path.resolve(process.cwd(), '.github/workflows/ci.yml')));
-    const ciContent = fs.readFileSync(path.resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf-8');
+    const ciWorkflowPath = path.resolve(import.meta.dirname, '..', '.github/workflows/ci.yml');
+    assert.ok(fs.existsSync(ciWorkflowPath));
+    const ciContent = fs.readFileSync(ciWorkflowPath, 'utf-8');
     assert.ok(ciContent.includes('npm run lint'));
     assert.ok(ciContent.includes('npm run build'));
     assert.ok(ciContent.includes('npm test'));

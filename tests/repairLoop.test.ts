@@ -1,16 +1,23 @@
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { TaskStore } from '../src/server/db/database.ts';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
-import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
-import { RepairCoordinator } from '../src/server/coordinator/repairCoordinator.ts';
-import { CodingWorkerAdapter, WorkerExecutionContext, WorkerExecutionResult } from '../src/server/worker/types.ts';
+import type { CodingWorkerAdapter, WorkerExecutionContext, WorkerExecutionResult } from '../src/server/worker/types.ts';
 import { createDisposableRepo } from './fixtures/disposableRepo.ts';
+
+const isolatedStorageDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-repairloop-env-')));
+process.env.DUPOND_DB_PATH = path.join(isolatedStorageDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedStorageDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedStorageDir, '.dupond_conn_key');
 
 async function main() {
   console.log('=== RUNNING REPAIR LOOP & AUTHORITATIVE VERIFICATION TESTS ===\n');
+
+  const { TaskStore } = await import('../src/server/db/database.ts');
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.ts');
+  const { AuthoritativeVerifier } = await import('../src/server/verification/authoritativeVerifier.ts');
+  const { RepairCoordinator } = await import('../src/server/coordinator/repairCoordinator.ts');
 
   const repo = createDisposableRepo('dupond-repairloop-');
   try {
@@ -410,6 +417,7 @@ async function main() {
   console.log('\n=== ALL REPAIR LOOP TESTS PASSED CLEANLY ===');
   } finally {
     repo.cleanup();
+    fs.rmSync(isolatedStorageDir, { recursive: true, force: true });
   }
 }
 
