@@ -1,19 +1,28 @@
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
-import { TaskStore } from '../src/server/db/database.ts';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
-import { AuthoritativeVerifier } from '../src/server/verification/authoritativeVerifier.ts';
-import { GitHubDeliveryService } from '../src/server/delivery/githubDelivery.ts';
-import { computeEvidenceBinding } from '../src/server/verification/evidenceBinding.ts';
+import { createDisposableRepo } from './fixtures/disposableRepo.ts';
+
+const isolatedStorageDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-delivery-env-')));
+process.env.DUPOND_DB_PATH = path.join(isolatedStorageDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedStorageDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedStorageDir, '.dupond_conn_key');
 
 async function main() {
   console.log('=== RUNNING GITHUB DELIVERY & RECONCILIATION TESTS ===\n');
 
+  const { TaskStore } = await import('../src/server/db/database.ts');
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.ts');
+  const { AuthoritativeVerifier } = await import('../src/server/verification/authoritativeVerifier.ts');
+  const { GitHubDeliveryService } = await import('../src/server/delivery/githubDelivery.ts');
+  const { computeEvidenceBinding } = await import('../src/server/verification/evidenceBinding.ts');
+
+  const repo = createDisposableRepo('dupond-delivery-');
   const store = new TaskStore(':memory:');
-  const workspaceManager = new WorkspaceManager(process.cwd());
+  const workspaceManager = new WorkspaceManager(repo.repoDir);
   const verifier = new AuthoritativeVerifier();
   const deliveryService = new GitHubDeliveryService(store, verifier);
 
@@ -30,11 +39,11 @@ async function main() {
   const deliveredCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree.worktreePath, encoding: 'utf-8' }).trim();
 
   // Create disposable bare repository to safely test push operations without touching remote
-  const disposableRemote = path.resolve(process.cwd(), `.dupond_worktrees/disposable-remote-${Date.now()}.git`);
+  const disposableRemote = path.join(repo.tmpBase, `disposable-remote-${Date.now()}.git`);
   fs.mkdirSync(disposableRemote, { recursive: true });
   execFileSync('git', ['init', '--bare'], { cwd: disposableRemote });
   execFileSync('git', ['--git-dir', disposableRemote, 'config', 'receive.shallowUpdate', 'true']);
-  execFileSync('git', ['push', disposableRemote, `${worktree.baseCommit}:refs/heads/main`], { cwd: process.cwd() });
+  execFileSync('git', ['push', disposableRemote, `${worktree.baseCommit}:refs/heads/main`], { cwd: repo.repoDir });
 
   const task = store.createTask({
     key: 'AEG-801',
@@ -42,7 +51,8 @@ async function main() {
     description: 'Ensure PR delivery policies and reconciliation work',
     status: 'review',
     priority: 'high',
-    targetRepo: 'marcelodevops/dupond',
+    targetRepo: 'disposable-test/repo',
+    targetRepoPath: repo.repoDir,
     baseCommit: worktree.baseCommit,
     allowedPaths: ['*'],
     protectedPaths: [],
@@ -156,7 +166,7 @@ async function main() {
       isApproved: true,
       approvedBy: 'lead-devops-operator',
       disposableRemoteDir: disposableRemote,
-      repoUrl: 'marcelodevops/dupond',
+      repoUrl: 'disposable-test/repo',
       candidateBinding,
     });
 
@@ -186,9 +196,8 @@ async function main() {
 
   } finally {
     workspaceManager.cleanupWorktree(worktree.worktreePath, branchName);
-    if (fs.existsSync(disposableRemote)) {
-      fs.rmSync(disposableRemote, { recursive: true, force: true });
-    }
+    repo.cleanup();
+    fs.rmSync(isolatedStorageDir, { recursive: true, force: true });
   }
 
   console.log('\n=== ALL DELIVERY & RECONCILIATION TESTS PASSED CLEANLY ===');

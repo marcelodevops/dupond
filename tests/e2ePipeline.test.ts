@@ -32,18 +32,20 @@ async function runAcceptanceSuite() {
   const { validateAuthToken, getExpectedToken } = await import('../src/server/auth.ts');
   const { logger } = await import('../src/server/utils/logger.ts');
   const { coordinator, isMaskedSecret } = await import('../src/server/coordinator.ts');
+  const { createDisposableRepo } = await import('./fixtures/disposableRepo.ts');
+  const repo = createDisposableRepo('dupond-e2e-repo-');
   const store = new TaskStore(':memory:');
-  const workspaceManager = new WorkspaceManager(process.cwd());
+  const workspaceManager = new WorkspaceManager(repo.repoDir);
   const sandbox = new SandboxExecutor();
   const verifier = new AuthoritativeVerifier(sandbox);
   const repairCoordinator = new RepairCoordinator(store, workspaceManager, verifier);
   const deliveryService = new GitHubDeliveryService(store, verifier);
 
-  const disposableRemote = path.resolve(process.cwd(), `.dupond_worktrees/e2e-disposable-remote-${Date.now()}.git`);
+  const disposableRemote = path.join(repo.tmpBase, `e2e-disposable-remote-${Date.now()}.git`);
   fs.mkdirSync(disposableRemote, { recursive: true });
   execFileSync('git', ['init', '--bare', '-b', 'main'], { cwd: disposableRemote });
   execFileSync('git', ['--git-dir', disposableRemote, 'config', 'receive.shallowUpdate', 'true']);
-  execFileSync('git', ['push', disposableRemote, 'HEAD:refs/heads/main'], { cwd: process.cwd() });
+  execFileSync('git', ['push', disposableRemote, 'HEAD:refs/heads/main'], { cwd: repo.repoDir });
 
   try {
     // ------------------------------------------------------------------------
@@ -76,7 +78,8 @@ async function runAcceptanceSuite() {
       description: 'Create multiplication utility from scratch without any pre-existing artifacts',
       status: 'todo',
       priority: 'high',
-      targetRepo: 'marcelodevops/dupond',
+      targetRepo: 'disposable-test/repo',
+      targetRepoPath: repo.repoDir,
       baseCommit: 'HEAD',
       allowedPaths: ['src/**'],
       protectedPaths: ['tests/protected/**'],
@@ -181,7 +184,8 @@ async function runAcceptanceSuite() {
       description: 'Needs repair on attempt 2',
       status: 'todo',
       priority: 'high',
-      targetRepo: 'marcelodevops/dupond',
+      targetRepo: 'disposable-test/repo',
+      targetRepoPath: repo.repoDir,
       baseCommit: 'HEAD',
       allowedPaths: ['src/**'],
       protectedPaths: [],
@@ -241,7 +245,8 @@ async function runAcceptanceSuite() {
       description: 'Fails verification across all attempts',
       status: 'todo',
       priority: 'medium',
-      targetRepo: 'marcelodevops/dupond',
+      targetRepo: 'disposable-test/repo',
+      targetRepoPath: repo.repoDir,
       baseCommit: 'HEAD',
       allowedPaths: ['src/**'],
       protectedPaths: [],
@@ -285,7 +290,8 @@ async function runAcceptanceSuite() {
       description: 'Can be claimed and executed while AEG-903 is blocked',
       status: 'todo',
       priority: 'high',
-      targetRepo: 'marcelodevops/dupond',
+      targetRepo: 'disposable-test/repo',
+      targetRepoPath: repo.repoDir,
       baseCommit: 'HEAD',
       allowedPaths: ['src/**'],
       protectedPaths: [],
@@ -453,7 +459,8 @@ async function runAcceptanceSuite() {
       description: 'Will be cancelled mid-execution while running child process',
       status: 'todo',
       priority: 'low',
-      targetRepo: 'marcelodevops/dupond',
+      targetRepo: 'disposable-test/repo',
+      targetRepoPath: repo.repoDir,
       baseCommit: 'HEAD',
       allowedPaths: ['*'],
       protectedPaths: [],
@@ -563,7 +570,8 @@ async function runAcceptanceSuite() {
       description: 'Requires explicit approval before PR',
       status: 'review',
       priority: 'critical',
-      targetRepo: 'marcelodevops/dupond',
+      targetRepo: 'disposable-test/repo',
+      targetRepoPath: repo.repoDir,
       baseCommit: 'HEAD',
       allowedPaths: ['*'],
       protectedPaths: [],
@@ -580,7 +588,7 @@ async function runAcceptanceSuite() {
       status: 'completed',
       baseCommit: 'HEAD',
       targetBranch: 'dupond/approval-branch',
-      worktreePath: process.cwd(),
+      worktreePath: repo.repoDir,
       currentAttempt: 1,
       durationMs: 100,
     });
@@ -622,8 +630,9 @@ async function runAcceptanceSuite() {
     // ------------------------------------------------------------------------
     // Scenario 13: Dupond CI configuration passes.
     // ------------------------------------------------------------------------
-    assert.ok(fs.existsSync(path.resolve(process.cwd(), '.github/workflows/ci.yml')));
-    const ciContent = fs.readFileSync(path.resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf-8');
+    const ciWorkflowPath = path.resolve(import.meta.dirname, '..', '.github/workflows/ci.yml');
+    assert.ok(fs.existsSync(ciWorkflowPath));
+    const ciContent = fs.readFileSync(ciWorkflowPath, 'utf-8');
     assert.ok(ciContent.includes('npm run lint'));
     assert.ok(ciContent.includes('npm run build'));
     assert.ok(ciContent.includes('npm test'));
@@ -634,9 +643,7 @@ async function runAcceptanceSuite() {
     console.log(`===============================================================\n`);
 
   } finally {
-    if (fs.existsSync(disposableRemote)) {
-      fs.rmSync(disposableRemote, { recursive: true, force: true });
-    }
+    repo.cleanup();
     if (fs.existsSync(isolatedE2eDir)) {
       fs.rmSync(isolatedE2eDir, { recursive: true, force: true });
     }

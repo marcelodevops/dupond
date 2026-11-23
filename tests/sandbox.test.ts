@@ -3,13 +3,22 @@ import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { WorkspaceManager } from '../src/server/workspace/workspaceManager.ts';
-import { SandboxExecutor } from '../src/server/sandbox/sandboxExecutor.ts';
+import { createDisposableRepo } from './fixtures/disposableRepo.ts';
+
+const isolatedStorageDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-sandbox-env-')));
+process.env.DUPOND_DB_PATH = path.join(isolatedStorageDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedStorageDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedStorageDir, '.dupond_conn_key');
 
 async function main() {
   console.log('=== RUNNING WORKSPACE & EXECUTION SANDBOX TESTS ===\n');
 
-  const workspaceManager = new WorkspaceManager(process.cwd());
+  const { WorkspaceManager } = await import('../src/server/workspace/workspaceManager.ts');
+  const { SandboxExecutor } = await import('../src/server/sandbox/sandboxExecutor.ts');
+
+  const repo = createDisposableRepo('dupond-sandbox-');
+  try {
+  const workspaceManager = new WorkspaceManager(repo.repoDir);
   const sandbox = new SandboxExecutor();
 
   // Test 1: Sandbox availability check
@@ -107,6 +116,10 @@ async function main() {
   console.log('✔ [PASS] Sandbox container image preparation decoupled from command timeout');
 
   console.log('\n=== ALL WORKSPACE & SANDBOX TESTS PASSED CLEANLY ===');
+  } finally {
+    repo.cleanup();
+    fs.rmSync(isolatedStorageDir, { recursive: true, force: true });
+  }
 }
 
 test('suite', main);
