@@ -133,7 +133,7 @@ cp .env.example .env
 | :--- | :---: | :--- | :--- |
 | `DUPOND_API_KEY` | Optional* | *(none)* | Bearer token required for API access. Takes highest precedence over `DUPOND_AUTH_TOKEN`. |
 | `DUPOND_AUTH_TOKEN` | Optional* | *(persisted token)* | Bearer token required for API access (used if `DUPOND_API_KEY` is unset). If neither is set, Dupond generates a random token (`dp_<hex>`) and persists it to `data/.dupond_auth_token` with `0600` permissions. |
-| `DUPOND_APPROVAL_TOKEN` | No | *(none)* | Distinct operator approval credential. Delivery-dispatch requests with `isApproved: true` must additionally present it via `X-Dupond-Approval-Token`; approval attempts fail closed (503) when unset. Keep it separate from the API token so execution callers cannot self-approve. |
+| `DUPOND_APPROVAL_TOKEN` | No | *(none)* | Distinct operator approval credential. Protected review/delivery approvals must additionally present it via `X-Dupond-Approval-Token`; approval attempts fail closed (`503`) when unset. See [Operator Approval Credentials](docs/approval-credentials.md). |
 | `GEMINI_API_KEY` | Optional* | *(none)* | Google GenAI API key for Gemini coding workers. Required if using Gemini. |
 | `GEMINI_MODEL` | No | `gemini-3.5-flash` | Default Gemini model identifier (`gemini-3.5-flash` or `gemini-3.8-flash`). |
 | `OPENAI_API_KEY` | Optional* | *(none)* | OpenAI API key for OpenAI coding workers. Required if using OpenAI. |
@@ -223,6 +223,7 @@ npm run prepare:sandbox
 ## 📚 Documentation Index
 
 - [Acceptance Evidence & Approval Contract](docs/acceptance-evidence.md): Authoritative verification, evidence fingerprinting, base drift protocol, and operator approval gates.
+- [Operator Approval Credentials](docs/approval-credentials.md): Configuring, retrieving, and troubleshooting `DUPOND_APPROVAL_TOKEN` separately from `DUPOND_API_KEY` / `DUPOND_AUTH_TOKEN`.
 - [Provider-Independent Coding Workers](docs/providers.md): Architecture, Gemini/OpenAI configuration, platform billing prerequisites, and live parity audit.
 - [Practical API Walkthrough](docs/walkthrough.md): Step-by-step API guide with concrete `curl` requests.
 - [Architecture & Sandbox Guide](docs/architecture-and-sandbox.md): Deep-dive into worktree management, Seatbelt profiles, Linux containers, and persistence schemas.

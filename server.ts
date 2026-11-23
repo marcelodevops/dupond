@@ -392,6 +392,22 @@ app.post('/api/orchestrate/agent-step', async (req: Request, res: Response) => {
     const projectId = projectContext(req, res, taskProjectId);
     if (!projectId) return;
 
+    const authoritativeTask =
+      taskStore.getTaskScoped(task.id || '', projectId) ||
+      taskStore.getTaskScoped(task.key || '', projectId);
+    const projectedTask = !authoritativeTask
+      ? coordinator.getState(projectId).tasks.find((t) => t.id === task.id || t.key === task.key)
+      : undefined;
+    if (authoritativeTask?.status === 'done' || projectedTask?.status === 'done') {
+      return res.status(409).json({
+        success: false,
+        blocked: true,
+        code: 'TASK_ALREADY_DONE',
+        authoritativeStatus: 'done',
+        error: 'This task is completed. Reopen it before executing again.',
+      });
+    }
+
     try {
       // Execute the real worker step through the central coordinator
       const workerResult = await coordinator.executeWorkerStep(task as any, agent as any, projectId);

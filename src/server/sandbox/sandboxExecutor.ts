@@ -21,6 +21,7 @@ export interface SandboxOptions {
   gitReadOnly?: boolean;
   /** Specific paths (e.g. protected files/dirs inside worktree) denied write access */
   denyWritePaths?: string[];
+  denyReadPaths?: string[];
   /** Specific env keys from options.env to preserve past secret-name filtering */
   preserveEnvKeys?: string[];
   /** Explicit host files to copy into the sandbox's private HOME (e.g. auth.json) */
@@ -339,6 +340,7 @@ export class SandboxExecutor {
       extraReadPaths?: string[];
       gitReadOnly?: boolean;
       denyWritePaths?: string[];
+  denyReadPaths?: string[];
     }
   ): string {
     const home = os.homedir();
@@ -372,7 +374,23 @@ export class SandboxExecutor {
       const translated = this.resolveProtectedPathRules(realWorktree, extra.denyWritePaths, 'darwin');
       denyWriteRuleLines.push(...translated.seatbeltRules);
     }
-    const denyWriteRules = denyWriteRuleLines.map((r) => `\n${r}`).join('');
+    const denyReadRuleLines: string[] = [];
+    for (const raw of extra?.denyReadPaths ?? []) {
+      const normalized = raw.trim().replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
+      if (!normalized || normalized.split('/').includes('..') || /[*?{}\[\]]/.test(normalized)) {
+        throw new DomainError(`Unsafe denyReadPaths entry "${raw}": only concrete relative paths inside worktree are permitted.`);
+      }
+      const absPath = path.resolve(realWorktree, normalized);
+      if (absPath !== realWorktree && !absPath.startsWith(`${realWorktree}${path.sep}`)) {
+        throw new DomainError(`Unsafe denyReadPaths entry "${raw}": resolves outside worktree.`);
+      }
+      const escaped = absPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      denyReadRuleLines.push(`(deny file-read-data (literal "${escaped}"))`);
+      denyReadRuleLines.push(`(deny file-read-data (subpath "${escaped}"))`);
+      denyReadRuleLines.push(`(deny file-write* (literal "${escaped}"))`);
+      denyReadRuleLines.push(`(deny file-write* (subpath "${escaped}"))`);
+    }
+    const denyWriteRules = [...denyWriteRuleLines, ...denyReadRuleLines].map((r) => `\n${r}`).join('');
 
     return `(version 1)
 (allow default)
@@ -562,6 +580,7 @@ ${networkRule}
           extraReadPaths: options.extraReadPaths,
           gitReadOnly: options.gitReadOnly,
           denyWritePaths: options.denyWritePaths,
+          denyReadPaths: options.denyReadPaths,
         }
       );
       execCmd = 'sandbox-exec';
@@ -612,6 +631,24 @@ ${networkRule}
         const translated = this.resolveProtectedPathRules(realWorktree, options.denyWritePaths, 'container');
         for (const roPath of translated.containerReadOnlyPaths) {
           containerMounts.push('-v', `${roPath}:${roPath}:ro`);
+        }
+      }
+      if (options.denyReadPaths?.length) {
+        const emptyMaskDir = path.join(realTmp, '.dp_empty_ro_mask');
+        fs.mkdirSync(emptyMaskDir, { recursive: true, mode: 0o555 });
+        for (const raw of options.denyReadPaths) {
+          const normalized = raw.trim().replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
+          if (!normalized || normalized.split('/').includes('..') || /[*?{}\[\]]/.test(normalized)) {
+            throw new DomainError(`Unsafe denyReadPaths entry "${raw}": only concrete relative paths inside worktree are permitted.`);
+          }
+          const absPath = path.resolve(realWorktree, normalized);
+          if (absPath !== realWorktree && !absPath.startsWith(`${realWorktree}${path.sep}`)) {
+            throw new DomainError(`Unsafe denyReadPaths entry "${raw}": resolves outside worktree.`);
+          }
+          if (fs.existsSync(absPath)) {
+            const isDir = fs.statSync(absPath).isDirectory();
+            containerMounts.push('-v', `${isDir ? emptyMaskDir : '/dev/null'}:${absPath}:ro`);
+          }
         }
       }
 

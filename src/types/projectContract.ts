@@ -251,23 +251,18 @@ export interface AgyAuthStatus {
   cliAvailable: boolean;
   executablePath: string | null;
   version: string | null;
+  credentialsPresent: boolean;
   profileAuthenticated: boolean;
+  profileAuthVerified: boolean;
+  sandboxAuthVerified: boolean;
+  executionVerified: boolean;
+  onboardingSupported: boolean;
+  onboardingUnavailableReason?: string;
   availableModelsCount: number;
-  session: AgyAuthSessionInfo | null;
-}
-
-export interface GeminiCliWorkerStatus {
-  available: boolean;
-  executablePath: string | null;
-  version: string | null;
-  supportedVersion: boolean;
-  authReady: boolean;
-  authenticationStatus?: 'unverified';
-  modelAccess?: 'unverified';
-  authMethod: 'oauth-personal' | 'vertex-ai' | 'adc' | 'none';
-  models: string[];
-  defaultModel: string;
+  models?: string[];
+  defaultModel?: string;
   error?: string;
+  session: AgyAuthSessionInfo | null;
 }
 
 export interface PlanningReadiness {

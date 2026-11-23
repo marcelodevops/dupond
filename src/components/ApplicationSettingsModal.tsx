@@ -977,6 +977,27 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
               )}
             </div>
 
+            {agyAuthStatus && (
+              <div
+                data-testid="agy-auth-verification-states"
+                className="grid grid-cols-2 gap-1.5 text-[10px] text-slate-300 bg-slate-900/70 border border-slate-800/80 rounded-lg p-2"
+              >
+                <div>Credentials present: {agyAuthStatus.credentialsPresent ? 'Yes' : 'No'}</div>
+                <div>Profile auth verified: {agyAuthStatus.profileAuthVerified ? 'Yes' : 'No'}</div>
+                <div>Sandbox auth verified: {agyAuthStatus.sandboxAuthVerified ? 'Yes' : 'Unverified'}</div>
+                <div>Coding execution verified: {agyAuthStatus.executionVerified ? 'Yes' : 'Unverified'}</div>
+              </div>
+            )}
+
+            {agyAuthStatus?.onboardingSupported === false && agyAuthStatus.onboardingUnavailableReason && (
+              <div
+                data-testid="agy-auth-unavailable-reason"
+                className="p-2 rounded-lg bg-amber-950/40 border border-amber-800/60 text-amber-200 text-[11px]"
+              >
+                {agyAuthStatus.onboardingUnavailableReason}
+              </div>
+            )}
+
             {agyError && (
               <div
                 data-testid="agy-auth-error"
@@ -1089,7 +1110,7 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                 <button
                   type="button"
                   data-testid="agy-auth-start-btn"
-                  disabled={agyBusy || agyAuthStatus?.cliAvailable === false}
+                  disabled={agyBusy || agyAuthStatus?.cliAvailable === false || agyAuthStatus?.onboardingSupported === false}
                   onClick={async () => {
                     setAgyCodeInput('');
                     setAgyBusy(true);
@@ -1106,7 +1127,13 @@ export const ApplicationSettingsModal: React.FC<ApplicationSettingsModalProps> =
                   }}
                   className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
                 >
-                  {agyBusy ? 'Starting...' : agyAuthStatus?.profileAuthenticated ? 'Reconnect Antigravity CLI' : 'Connect Antigravity CLI'}
+                  {agyBusy
+                    ? 'Starting...'
+                    : agyAuthStatus?.onboardingSupported === false
+                      ? 'Unavailable on macOS'
+                      : agyAuthStatus?.profileAuthenticated
+                        ? 'Reconnect Antigravity CLI'
+                        : 'Connect Antigravity CLI'}
                 </button>
               </div>
             )}

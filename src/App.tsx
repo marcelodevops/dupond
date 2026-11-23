@@ -762,7 +762,7 @@ function AppWorkspace() {
           runId,
           isApproved,
           approvedBy: isApproved ? 'operator' : undefined,
-          repoUrl: currentProject?.repository?.repoUrl || integrationConfig?.repository?.repoUrl || undefined,
+          repoUrl: currentProject?.repository?.repoUrl || undefined,
           targetBaseBranch: currentProject?.repository?.defaultBranch || integrationConfig?.repository?.defaultBranch || undefined,
           ...(candidateBinding || {}),
         },
@@ -1235,6 +1235,7 @@ function AppWorkspace() {
         agents={agents}
         epics={epics}
         existingTasksCount={tasks.length}
+        onOpenAppSettings={() => setIsAppSettingsModalOpen(true)}
       />
 
       {/* Project Wizard Modal */}

@@ -9,11 +9,10 @@ import {
   OpenCodeCodingWorkerAdapter,
 } from './opencodeWorkerAdapter.js';
 import {
-  DEFAULT_GEMINI_CLI_MODEL,
-  GeminiCliCodingWorkerAdapter,
-  isValidGeminiCliModelId,
-  SUPPORTED_GEMINI_CLI_MODELS,
-} from './geminiCliWorkerAdapter.js';
+  AgyCodingWorkerAdapter,
+  DEFAULT_AGY_MODEL,
+  isValidAgyModelId,
+} from './agyWorkerAdapter.js';
 import { SUPPORTED_GEMINI_MODELS } from './providers/geminiProvider.js';
 import { SUPPORTED_OPENAI_MODELS } from './providers/openaiProvider.js';
 
@@ -21,14 +20,14 @@ export const SUPPORTED_PROVIDERS: readonly WorkerProvider[] = [
   'gemini',
   'openai',
   'opencode',
-  'gemini-cli',
+  'agy',
 ] as const;
 
 export const SUPPORTED_MODELS: Record<WorkerProvider, readonly string[]> = {
   gemini: SUPPORTED_GEMINI_MODELS,
   openai: SUPPORTED_OPENAI_MODELS,
   opencode: [DEFAULT_OPENCODE_MODEL],
-  'gemini-cli': SUPPORTED_GEMINI_CLI_MODELS,
+  agy: [DEFAULT_AGY_MODEL],
 };
 
 export const DEFAULT_PROVIDER: WorkerProvider = 'gemini';
@@ -36,7 +35,7 @@ export const DEFAULT_MODELS: Record<WorkerProvider, string> = {
   gemini: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
   openai: 'gpt-4o-mini',
   opencode: DEFAULT_OPENCODE_MODEL,
-  'gemini-cli': DEFAULT_GEMINI_CLI_MODEL,
+  agy: DEFAULT_AGY_MODEL,
 };
 
 export interface WorkerConfigValidationResult {
@@ -61,6 +60,14 @@ export function validateWorkerConfig(config?: { provider?: string; model?: strin
   }
 
   const rawProvider = (config.provider || DEFAULT_PROVIDER).toLowerCase().trim() as WorkerProvider;
+  if (rawProvider === ('gemini-cli' as string)) {
+    return {
+      valid: false,
+      provider: DEFAULT_PROVIDER,
+      model: '',
+      error: 'Provider removed—select another provider.',
+    };
+  }
   if (!SUPPORTED_PROVIDERS.includes(rawProvider)) {
     return {
       valid: false,
@@ -75,8 +82,8 @@ export function validateWorkerConfig(config?: { provider?: string; model?: strin
       ? (process.env.GEMINI_MODEL || DEFAULT_MODELS.gemini)
       : rawProvider === 'opencode'
         ? (process.env.DUPOND_OPENCODE_MODEL || DEFAULT_MODELS.opencode)
-        : rawProvider === 'gemini-cli'
-          ? (process.env.DUPOND_GEMINI_CLI_MODEL || DEFAULT_MODELS['gemini-cli'])
+        : rawProvider === 'agy'
+          ? (process.env.DUPOND_AGY_MODEL || DEFAULT_MODELS.agy)
           : DEFAULT_MODELS[rawProvider];
   const rawModel = (config.model || defaultModel).trim();
 
@@ -96,13 +103,13 @@ export function validateWorkerConfig(config?: { provider?: string; model?: strin
     };
   }
 
-  if (rawProvider === 'gemini-cli') {
-    if (!isValidGeminiCliModelId(rawModel)) {
+  if (rawProvider === 'agy') {
+    if (!isValidAgyModelId(rawModel)) {
       return {
         valid: false,
         provider: rawProvider,
         model: rawModel,
-        error: `Invalid model "${config.model}" for provider "gemini-cli". Expected a Gemini model identifier (e.g. ${DEFAULT_GEMINI_CLI_MODEL}).`,
+        error: `Invalid model "${config.model}" for provider "agy". Expected an Antigravity model identifier (e.g. ${DEFAULT_AGY_MODEL}).`,
       };
     }
     return {
@@ -150,8 +157,8 @@ export function resolveCodingWorker(
     return new OpenCodeCodingWorkerAdapter(validation.model, sandbox);
   }
 
-  if (validation.provider === 'gemini-cli') {
-    return new GeminiCliCodingWorkerAdapter(validation.model, sandbox);
+  if (validation.provider === 'agy') {
+    return new AgyCodingWorkerAdapter(validation.model, sandbox);
   }
 
   return new GeminiCodingWorkerAdapter(validation.model, sandbox);

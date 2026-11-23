@@ -144,6 +144,16 @@ if (args.length === 0) {
       await page.goto(serverUrl, { waitUntil: 'networkidle' });
       await page.getByTestId('open-app-settings-btn').click();
       await pwExpect(page.getByTestId('agy-auth-badge')).toContainText('Not Signed In');
+      await pwExpect(page.getByTestId('agy-auth-verification-states')).toContainText('Credentials present: No');
+      await pwExpect(page.getByTestId('agy-auth-verification-states')).toContainText('Profile auth verified: No');
+      await pwExpect(page.getByTestId('agy-auth-verification-states')).toContainText('Sandbox auth verified: Unverified');
+      await pwExpect(page.getByTestId('agy-auth-verification-states')).toContainText('Coding execution verified: Unverified');
+
+      if (process.platform === 'darwin') {
+        await pwExpect(page.getByTestId('agy-auth-unavailable-reason')).toContainText('Keychain');
+        await pwExpect(page.getByTestId('agy-auth-start-btn')).toBeDisabled();
+        return;
+      }
 
       await page.getByTestId('agy-auth-start-btn').click();
       await pwExpect(page.getByTestId('agy-auth-url')).toContainText('https://accounts.google.com/o/oauth2/auth?');

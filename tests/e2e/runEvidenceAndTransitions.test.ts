@@ -623,6 +623,42 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await pwExpect(page.getByTestId('run-delivery-status')).toBeVisible({ timeout: 20000 });
       await pwExpect(page.getByTestId('run-delivery-status')).toContainText('PR:');
       await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('done');
+      await pwExpect(page.getByTestId('execute-agent-step-btn')).toBeDisabled();
+      await pwExpect(page.getByTestId('task-completed-execution-notice')).toContainText(
+        'This task is completed. Reopen it before executing again.',
+      );
+
+      // Direct API execution on a completed task must fail with 409 TASK_ALREADY_DONE and zero side effects
+      lastWorkerPrompt = '';
+      const navProjectsRes = await page.request.get(`${serverUrl}/api/projects`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
+      });
+      const navProj = ((await navProjectsRes.json()) as Array<{ id: string; name: string }>).find((p) => p.name === 'Naviera');
+      assert.ok(navProj);
+      const navStateRes = await page.request.get(`${serverUrl}/api/orchestrate/state`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`, 'x-dupond-project-id': navProj.id },
+      });
+      const navState = (await navStateRes.json()) as { tasks: any[]; agents: any[] };
+      const doneNavTask = navState.tasks.find((t) => t.key === 'NAV-101');
+      assert.ok(doneNavTask);
+      const execDoneRes = await page.request.post(`${serverUrl}/api/orchestrate/agent-step`, {
+        headers: {
+          Authorization: `Bearer ${SYNTH_AUTH_TOKEN}`,
+          'Content-Type': 'application/json',
+          'x-dupond-project-id': navProj.id,
+        },
+        data: {
+          task: { ...doneNavTask, status: 'todo' },
+          agent: navState.agents?.[0] || { id: 'agent-dev', name: 'Developer', role: 'Coding Worker' },
+        },
+      });
+      assert.strictEqual(execDoneRes.status(), 409);
+      const execDoneJson = (await execDoneRes.json()) as { code?: string; error?: string; authoritativeStatus?: string };
+      assert.strictEqual(execDoneJson.code, 'TASK_ALREADY_DONE');
+      assert.strictEqual(execDoneJson.authoritativeStatus, 'done');
+      assert.ok(execDoneJson.error?.includes('This task is completed. Reopen it before executing again.'));
+      assert.strictEqual(lastWorkerPrompt, '', 'Refused execution on done task must not invoke provider');
+      await pwExpect(page.getByTestId('run-delivery-status')).toContainText('PR:');
       if (shotDir) {
         await page.screenshot({ path: path.join(shotDir, 'review-approve-deliver-pr.png'), fullPage: false });
       }
@@ -967,4 +1003,79 @@ describe('Authoritative task transitions & read-only run evidence browser E2E (s
       await context.close();
     }
   }, 60000);
+
+  it('omits placeholder repoUrl from delivery requests when a project uses localPath only', async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.addInitScript((token) => {
+      window.localStorage.setItem('dupond_api_token', token);
+    }, SYNTH_AUTH_TOKEN);
+
+    const page = await context.newPage();
+    try {
+      await page.goto(serverUrl, { waitUntil: 'networkidle' });
+
+      const createProj = await page.request.post(`${serverUrl}/api/projects`, {
+        headers: { Authorization: `Bearer ${SYNTH_AUTH_TOKEN}` },
+        data: { name: 'LocalOnly', description: 'Local-path project without repoUrl' },
+      });
+      assert.strictEqual(createProj.status(), 201);
+      const localProjId = ((await createProj.json()) as { id: string }).id;
+
+      await page.reload({ waitUntil: 'networkidle' });
+      const switcherBtn = page.getByRole('button', { name: 'Switch Dupond Project' });
+      await switcherBtn.click();
+      await page.getByRole('button', { name: /LocalOnly/i }).click();
+      await pwExpect(switcherBtn).toContainText('LocalOnly');
+
+      // Configure localPath and defaultBranch only, leaving repoUrl empty
+      await page.getByTestId('open-project-settings-btn').click();
+      await page.getByTestId('project-tab-repository').click();
+      await page.getByTestId('project-local-path-input').fill(targetRepoDir);
+      await page.getByTestId('project-target-branch-input').fill('main');
+      await page.getByTestId('project-repo-url-input').fill('');
+      await page.getByTestId('save-project-settings-btn').click();
+      await pwExpect(page.getByTestId('save-project-settings-btn')).toBeDisabled();
+      await page.getByTestId('cancel-project-settings-btn').click();
+      await page.getByTestId('project-settings-modal').waitFor({ state: 'hidden' });
+
+      // Adopt synthetic plan into LocalOnly (which has localPath only and no repoUrl)
+      await page.getByRole('button', { name: /Ingest Plan/i }).click();
+      await page.locator('textarea').first().fill('Add a local-only delivery test.');
+      await page.getByRole('button', { name: /Decompose & Orchestrate Plan with AI/i }).click();
+      await page.getByRole('button', { name: /Adopt Plan to Kanban Board/i }).waitFor({ state: 'visible', timeout: 15000 });
+      await page.getByRole('button', { name: /Adopt Plan to Kanban Board/i }).click();
+      await page.getByText('NAV-101').first().waitFor({ state: 'visible' });
+
+      await page.getByText('NAV-101').first().click();
+      mockWorkerMode = 'pass';
+      const specialistSelect = page.getByTestId('task-detail-modal').locator('select').nth(2);
+      await specialistSelect.selectOption({ index: 1 });
+      await page.getByRole('button', { name: /Execute Agent Step on This Task/i }).click();
+      await pwExpect(page.getByTestId('task-execution-status-banner')).toBeVisible({ timeout: 90000 });
+      await pwExpect(page.getByTestId('task-detail-status-select')).toHaveValue('review');
+
+      let capturedPayload: Record<string, unknown> | null = null;
+      await page.route('**/api/delivery/dispatch', async (route) => {
+        capturedPayload = route.request().postDataJSON() as Record<string, unknown>;
+        await route.fulfill({
+          status: 403,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'Approval required', code: 'APPROVAL_CREDENTIAL_REQUIRED' }),
+        });
+      });
+
+      await page.getByTestId('approve-deliver-pr-btn').click();
+      await pwExpect(page.getByTestId('review-delivery-error')).toBeVisible();
+      assert.ok(capturedPayload, 'Expected delivery dispatch request payload to be captured');
+      assert.strictEqual((capturedPayload as Record<string, unknown>).repoUrl, undefined);
+      assert.strictEqual(
+        JSON.stringify(capturedPayload).includes('acme-corp/dupond-core-system'),
+        false,
+        'Delivery request must not include placeholder repoUrl',
+      );
+      await page.unroute('**/api/delivery/dispatch');
+    } finally {
+      await context.close();
+    }
+  }, 120000);
 });

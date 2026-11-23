@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { SandboxExecutor, defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
+import { sanitizeWorkerOutput } from './opencodeWorkerAdapter.js';
 
 const DEFAULT_LOGIN_TTL_MS = 55_000;
 const PROBE_TIMEOUT_MS = 10_000;
@@ -21,12 +22,63 @@ export type AgyAuthSessionState =
   | 'expired'
   | 'failed';
 
+export const AGY_MACOS_KEYCHAIN_LIMITATION =
+  'Antigravity CLI is unavailable on macOS: agy v1.5.13 attempts /usr/bin/security Keychain writes during OAuth onboarding and token refresh under an isolated HOME without a documented file-only credential mode, which can trigger a macOS Keychain reset prompt.';
+
+export function isAgyOnboardingSupported(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== 'darwin';
+}
+
+export type AgyKeychainFailureCategory =
+  | 'keychain_cancelled'
+  | 'keychain_missing_default'
+  | 'keyring_timeout';
+
+export function classifyAgyKeychainError(
+  rawOutput: string,
+): { category: AgyKeychainFailureCategory; message: string } | null {
+  const clean = sanitizeWorkerOutput(rawOutput || '');
+  if (!clean) return null;
+
+  if (/keyring\s+(?:SaveToken|Get|Set|Delete)?\s*timed out|keyring timeout|timed out.*keychain/i.test(clean)) {
+    return {
+      category: 'keyring_timeout',
+      message:
+        'Antigravity CLI timed out waiting for macOS Keychain access. Dupond aborted without retrying or modifying any Keychain.',
+    };
+  }
+  if (/SecKeychainCopyDefault|A default keychain could not be found|errSecNoDefaultKeychain|errSecNoSuchKeychain/i.test(clean)) {
+    return {
+      category: 'keychain_missing_default',
+      message:
+        'Antigravity CLI failed to access a default macOS Keychain under the isolated profile. No Keychain was created or modified.',
+    };
+  }
+  if (/exit status 154|user cancelled|interaction not allowed|errSecUserCanceled|-128/i.test(clean)) {
+    return {
+      category: 'keychain_cancelled',
+      message:
+        'Antigravity CLI macOS Keychain access was cancelled. Dupond aborted without retrying or modifying any Keychain.',
+    };
+  }
+  return null;
+}
+
 export interface AgyAuthStatusResponse {
   cliAvailable: boolean;
   executablePath: string | null;
   version: string | null;
+  credentialsPresent: boolean;
   profileAuthenticated: boolean;
+  profileAuthVerified: boolean;
+  sandboxAuthVerified: boolean;
+  executionVerified: boolean;
+  onboardingSupported: boolean;
+  onboardingUnavailableReason?: string;
   availableModelsCount: number;
+  models: string[];
+  defaultModel: string;
+  error?: string;
   session: {
     loginSessionId: string;
     state: AgyAuthSessionState;
@@ -131,6 +183,7 @@ export function probeAgyVersion(binPath: string): string | null {
 export interface ProbeAgyModelsOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  platform?: NodeJS.Platform;
 }
 
 export interface ProbeAgyModelsResult {
@@ -150,6 +203,14 @@ export function probeAgyProfileModels(
   binPath?: string | null,
   options?: ProbeAgyModelsOptions,
 ): Promise<ProbeAgyModelsResult> {
+  if (!isAgyOnboardingSupported(options?.platform ?? process.platform)) {
+    return Promise.resolve({
+      authenticated: false,
+      models: [],
+      error: AGY_MACOS_KEYCHAIN_LIMITATION,
+    });
+  }
+
   const exe = binPath ?? resolveAgyExecutable();
   if (!exe) {
     return Promise.resolve({
@@ -282,14 +343,48 @@ export function probeAgyProfileModels(
         resolve({ authenticated: models.length > 0, models });
         return;
       }
-      const msg = stderr || 'Not signed in';
+      const msg = sanitizeWorkerOutput(`${stderr}\n${stdout}`.trim() || 'Not signed in');
+      const keychainErr = classifyAgyKeychainError(msg);
       resolve({
         authenticated: false,
         models: [],
-        error: msg.includes('Please sign in') ? 'Dedicated Antigravity profile is not signed in.' : 'Failed to list models.',
+        error: keychainErr
+          ? keychainErr.message
+          : msg.includes('Please sign in')
+            ? 'Dedicated Antigravity profile is not signed in.'
+            : 'Failed to list models.',
       });
     });
   });
+}
+
+const AGY_SANDBOX_AUTH_REL_PATHS = [
+  '.gemini/antigravity-cli/antigravity-oauth-token',
+  '.gemini/jetski-standalone-oauth-token',
+  '.gemini/antigravity-cli/jetski_state.pbtxt',
+  '.gemini/antigravity-cli/installation_id',
+  '.gemini/antigravity-cli/cache/default_project_id.txt',
+  '.gemini/antigravity-cli/cache/onboarding.json',
+];
+
+export function collectAgySandboxSeedFiles(
+  profileDir: string,
+): Array<{ sourcePath: string; targetRelToHome: string }> {
+  const seedHomeFiles: Array<{ sourcePath: string; targetRelToHome: string }> = [];
+  for (const rel of AGY_SANDBOX_AUTH_REL_PATHS) {
+    const full = path.join(profileDir, rel);
+    if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+      seedHomeFiles.push({ sourcePath: full, targetRelToHome: rel });
+    }
+  }
+  return seedHomeFiles;
+}
+
+export function hasAgyAuthTokenSeed(profileDir: string): boolean {
+  return (
+    fs.existsSync(path.join(profileDir, '.gemini/antigravity-cli/antigravity-oauth-token')) ||
+    fs.existsSync(path.join(profileDir, '.gemini/jetski-standalone-oauth-token'))
+  );
 }
 
 /**
@@ -300,26 +395,18 @@ export async function verifyAgySandboxPortability(
   profileDir: string,
   worktreePath: string,
   sandbox: SandboxExecutor = defaultSandboxExecutor,
+  options?: { platform?: NodeJS.Platform },
 ): Promise<{ ok: boolean; exitCode: number; modelsCount: number; error?: string }> {
+  if (!isAgyOnboardingSupported(options?.platform ?? process.platform)) {
+    return { ok: false, exitCode: -1, modelsCount: 0, error: AGY_MACOS_KEYCHAIN_LIMITATION };
+  }
+
   const exe = resolveAgyExecutable();
   if (!exe) {
     return { ok: false, exitCode: -1, modelsCount: 0, error: 'Antigravity CLI (agy) executable not found.' };
   }
 
-  const seedHomeFiles: Array<{ sourcePath: string; targetRelToHome: string }> = [];
-  const candidateRelPaths = [
-    '.gemini/jetski-standalone-oauth-token',
-    '.gemini/antigravity-cli/settings.json',
-    '.gemini/antigravity-cli/jetski_state.pbtxt',
-    '.gemini/antigravity-cli/installation_id',
-    '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
-  ];
-  for (const rel of candidateRelPaths) {
-    const full = path.join(profileDir, rel);
-    if (fs.existsSync(full) && fs.statSync(full).isFile()) {
-      seedHomeFiles.push({ sourcePath: full, targetRelToHome: rel });
-    }
-  }
+  const seedHomeFiles = collectAgySandboxSeedFiles(profileDir);
 
   const realBin = fs.realpathSync(exe);
   const res = await sandbox.execute({
@@ -344,11 +431,17 @@ export async function verifyAgySandboxPortability(
     .filter((l) => /^[a-z0-9][a-z0-9._-]+\s+\S+/.test(l))
     .map((l) => l.split(/\s+/)[0]);
 
+  const ok = res.exitCode === 0 && models.length > 0;
+  const keychainErr = ok ? null : classifyAgyKeychainError(`${res.stderr}\n${res.stdout}`);
   return {
-    ok: res.exitCode === 0 && models.length > 0,
+    ok,
     exitCode: res.exitCode,
     modelsCount: models.length,
-    error: res.exitCode === 0 && models.length > 0 ? undefined : 'Sandbox execution could not authenticate from seeded profile files.',
+    error: ok
+      ? undefined
+      : keychainErr
+        ? keychainErr.message
+        : 'Sandbox execution could not authenticate from seeded profile files.',
   };
 }
 
@@ -550,6 +643,25 @@ export class AgyAuthSessionManager {
   private activeSession: PendingAgyLoginSession | null = null;
   private unconfirmedProcesses: UnconfirmedAgyProcessRecord[] = [];
   private opQueue: Promise<unknown> = Promise.resolve();
+  private readonly platform: NodeJS.Platform;
+  private readonly sandboxVerifiedProfiles = new Set<string>();
+  private readonly executionVerifiedProfiles = new Set<string>();
+
+  constructor(options?: { platform?: NodeJS.Platform }) {
+    this.platform = options?.platform ?? process.platform;
+  }
+
+  public recordSandboxAuthResult(profileDir: string, verified: boolean): void {
+    const resolved = path.resolve(profileDir);
+    if (verified) this.sandboxVerifiedProfiles.add(resolved);
+    else this.sandboxVerifiedProfiles.delete(resolved);
+  }
+
+  public recordExecutionVerified(profileDir: string, verified: boolean): void {
+    const resolved = path.resolve(profileDir);
+    if (verified) this.executionVerifiedProfiles.add(resolved);
+    else this.executionVerifiedProfiles.delete(resolved);
+  }
 
   private runSerialized<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.opQueue.then(fn, fn);
@@ -677,7 +789,13 @@ export class AgyAuthSessionManager {
     const exe = resolveAgyExecutable();
     const version = exe ? probeAgyVersion(exe) : null;
     const profileDir = resolveAgyProfileDir();
-    const profileCheck = await probeAgyProfileModels(profileDir, exe);
+    const credentialsPresent = hasAgyAuthTokenSeed(profileDir);
+    const profileCheck = await probeAgyProfileModels(profileDir, exe, { platform: this.platform });
+    const onboardingSupported = isAgyOnboardingSupported(this.platform);
+    const onboardingUnavailableReason = onboardingSupported ? undefined : AGY_MACOS_KEYCHAIN_LIMITATION;
+    const resolvedProfile = path.resolve(profileDir);
+    const sandboxAuthVerified = profileCheck.authenticated && this.sandboxVerifiedProfiles.has(resolvedProfile);
+    const executionVerified = profileCheck.authenticated && this.executionVerifiedProfiles.has(resolvedProfile);
 
     let sessionView: AgyAuthStatusResponse['session'] = null;
     if (this.activeSession) {
@@ -696,18 +814,45 @@ export class AgyAuthSessionManager {
       }
     }
 
+    const fallbackDefault = process.env.DUPOND_AGY_MODEL?.trim() || 'gemini-3.8-flash-medium';
+    const defaultModel = profileCheck.models[0] || fallbackDefault;
+    const readinessError = !exe
+      ? 'Antigravity CLI (agy) executable not found. Install agy or set DUPOND_AGY_BIN.'
+      : !profileCheck.authenticated
+        ? profileCheck.error ||
+          (onboardingSupported
+            ? 'Dedicated Antigravity profile is not authenticated. Connect Antigravity CLI in Application Settings.'
+            : onboardingUnavailableReason)
+        : undefined;
+
     return {
       cliAvailable: Boolean(exe),
       executablePath: exe,
       version,
+      credentialsPresent,
       profileAuthenticated: profileCheck.authenticated,
+      profileAuthVerified: profileCheck.authenticated,
+      sandboxAuthVerified,
+      executionVerified,
+      onboardingSupported,
+      ...(onboardingUnavailableReason ? { onboardingUnavailableReason } : {}),
       availableModelsCount: profileCheck.models.length,
+      models: profileCheck.models,
+      defaultModel,
+      ...(readinessError ? { error: readinessError } : {}),
       session: sessionView,
     };
   }
 
   public async startLogin(operatorToken?: string): Promise<AgyAuthStatusResponse['session']> {
     return this.runSerialized(async () => {
+      if (!isAgyOnboardingSupported(this.platform)) {
+        throw new AgyAuthError(
+          409,
+          'AGY_ONBOARDING_UNAVAILABLE_MACOS',
+          AGY_MACOS_KEYCHAIN_LIMITATION,
+        );
+      }
       if (this.unconfirmedProcesses.length > 0) {
         throw new AgyAuthError(
           409,
@@ -891,7 +1036,8 @@ export class AgyAuthSessionManager {
     rawCode: unknown,
   ): Promise<{ state: AgyAuthSessionState; authenticated: boolean; modelsCount: number; error?: string }> {
     const code = validateSubmittedAuthCode(rawCode);
-    let exchangeFailureCategory: 'invalid_grant' | 'exchange_failed' | null = null;
+    let exchangeFailureCategory: 'invalid_grant' | 'exchange_failed' | AgyKeychainFailureCategory | null = null;
+    let exchangeFailureMessage: string | undefined;
     let feedbackListener: ((chunk: Buffer) => void) | undefined;
 
     // Phase 1: serialize initial state validation, lock, and PTY code write
@@ -933,7 +1079,11 @@ export class AgyAuthSessionManager {
       // Never retain raw PTY chunks (which may contain echoed code); record only a fixed failure category
       feedbackListener = (chunk: Buffer) => {
         const clean = stripAnsiAndControls(chunk.toString('utf-8'));
-        if (/invalid_grant/i.test(clean)) {
+        const keychainErr = classifyAgyKeychainError(clean);
+        if (keychainErr) {
+          exchangeFailureCategory = keychainErr.category;
+          exchangeFailureMessage = keychainErr.message;
+        } else if (/invalid_grant/i.test(clean)) {
           exchangeFailureCategory = 'invalid_grant';
         } else if (/Got an error:|token exchange failed|OAuth setup failed/i.test(clean)) {
           exchangeFailureCategory = 'exchange_failed';
@@ -979,6 +1129,7 @@ export class AgyAuthSessionManager {
         const check = await probeAgyProfileModels(session.profileDir, session.binPath, {
           timeoutMs: remainingMs,
           signal: session.probeAbortController.signal,
+          platform: this.platform,
         });
 
         // Re-check session identity and state after async probe in case cancel/supersede/expiry ran
@@ -1031,9 +1182,10 @@ export class AgyAuthSessionManager {
         if (exchangeFailureCategory) {
           session.state = 'failed';
           session.error =
-            exchangeFailureCategory === 'invalid_grant'
+            exchangeFailureMessage ||
+            (exchangeFailureCategory === 'invalid_grant'
               ? 'Antigravity OAuth rejected the authorization code (invalid_grant). Start a new login.'
-              : 'Antigravity OAuth token exchange failed. Verify the authorization code and start a new login.';
+              : 'Antigravity OAuth token exchange failed. Verify the authorization code and start a new login.');
           await this.terminateSessionProcess(session);
           return { state: 'failed', authenticated: false, modelsCount: 0, error: session.error };
         }
