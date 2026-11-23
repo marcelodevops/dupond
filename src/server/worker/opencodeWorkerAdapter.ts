@@ -433,7 +433,15 @@ export function inspectAndVerifyRepoChanges(
   const allRefNames = new Set([...baseline.refs.keys(), ...afterGit.refs.keys()]);
   for (const refName of allRefNames) {
     if (baseline.refs.get(refName) !== afterGit.refs.get(refName)) {
-      violations.push(`Unauthorized Git ref modification: ${refName}`);
+      if (baseline.headRef !== 'DETACHED' && refName === baseline.headRef) {
+        violations.push(`Unauthorized Git ref modification: ${refName}`);
+      } else {
+        // Shared refs live in the common .git directory across all worktrees;
+        // fail closed while acknowledging attribution is unknown without per-worker Git isolation.
+        violations.push(
+          `Shared Git ref changed concurrently with unknown attribution (worker or external process): ${refName}`
+        );
+      }
     }
   }
 
