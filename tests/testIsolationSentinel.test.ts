@@ -1,15 +1,18 @@
 import assert from 'node:assert';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { describe, it } from 'vitest';
+import { afterAll, describe, it } from 'vitest';
 import { createDisposableRepo } from './fixtures/disposableRepo.js';
-import { TaskStore } from '../src/server/db/database.js';
-import {
-  captureRepoBaseline,
-  inspectAndVerifyRepoChanges,
-} from '../src/server/worker/opencodeWorkerAdapter.js';
+
+const isolatedParentStorageDir = fs.realpathSync(
+  fs.mkdtempSync(path.join(os.tmpdir(), 'dupond-sentinel-parent-env-')),
+);
+process.env.DUPOND_DB_PATH = path.join(isolatedParentStorageDir, 'dupond.db');
+process.env.DUPOND_STATE_FILE = path.join(isolatedParentStorageDir, 'dupond_state.json');
+process.env.DUPOND_CONN_KEY_PATH = path.join(isolatedParentStorageDir, '.dupond_conn_key');
 
 function snapshotFile(filePath: string): { exists: boolean; size?: number; sha256?: string } {
   if (!fs.existsSync(filePath)) {
@@ -38,9 +41,16 @@ function captureInvokingRepoSentinel(repoDir: string) {
 }
 
 describe('Test isolation sentinel and shared Git-ref attribution', () => {
+  afterAll(() => {
+    try {
+      fs.rmSync(isolatedParentStorageDir, { recursive: true, force: true });
+    } catch {}
+  });
+
   it(
     'runs all seven repaired suites from a disposable invoking repo without mutating its refs, worktrees, or storage/WAL/SHM files',
-    () => {
+    async () => {
+      const { TaskStore } = await import('../src/server/db/database.js');
       const repoRoot = path.resolve(import.meta.dirname, '..');
       const invokingRepo = createDisposableRepo('dupond-invoking-sentinel-');
 
@@ -69,9 +79,10 @@ describe('Test isolation sentinel and shared Git-ref attribution', () => {
         );
         fs.writeFileSync(path.join(dataDir, '.dupond_conn_key'), '0'.repeat(64) + '\n');
 
-        const before = captureInvokingRepoSentinel(invokingRepo.repoDir);
-
-        const vitestBin = path.join(repoRoot, 'node_modules', '.bin', 'vitest');
+        // Setup file + Vitest config executed inside every child Vitest worker to prove effective worker process.cwd()
+        const cwdProbeSetupFile = path.join(invokingRepo.tmpBase, 'verifyWorkerCwdSetup.mjs');
+        const cwdMarkerFile = path.join(invokingRepo.tmpBase, 'cwd-probe-markers.log');
+        const vitestSentinelConfig = path.join(invokingRepo.tmpBase, 'vitest.sentinel.config.mjs');
         const repairedSuites = [
           path.join(repoRoot, 'tests', 'repairLoop.test.ts'),
           path.join(repoRoot, 'tests', 'delivery.test.ts'),
@@ -81,12 +92,34 @@ describe('Test isolation sentinel and shared Git-ref attribution', () => {
           path.join(repoRoot, 'tests', 'e2ePipeline.test.ts'),
           path.join(repoRoot, 'tests', 'providerWorkers.test.ts'),
         ];
+        fs.writeFileSync(
+          cwdProbeSetupFile,
+          [
+            `import assert from 'node:assert';`,
+            `import fs from 'node:fs';`,
+            `const actual = fs.realpathSync(process.cwd());`,
+            `const expected = fs.realpathSync(process.env.DUPOND_EXPECTED_CWD);`,
+            `assert.strictEqual(actual, expected, \`Child worker cwd \${actual} !== expected \${expected}\`);`,
+            `fs.appendFileSync(process.env.DUPOND_CWD_MARKER_FILE, actual + '\\n');`,
+            ``,
+          ].join('\n'),
+        );
+        fs.writeFileSync(
+          vitestSentinelConfig,
+          `export default { test: { include: ${JSON.stringify(repairedSuites)}, fileParallelism: false, testTimeout: 900_000, setupFiles: [${JSON.stringify(cwdProbeSetupFile)}] } };\n`,
+        );
+
+        const before = captureInvokingRepoSentinel(invokingRepo.repoDir);
+
+        const vitestBin = path.join(repoRoot, 'node_modules', '.bin', 'vitest');
 
         // Build clean child env: synthetic credentials only, no ambient storage overrides
         const childEnv: Record<string, string | undefined> = {
           ...process.env,
           GEMINI_API_KEY: 'AIzaSyTestSyntheticKey000000',
           OPENAI_API_KEY: 'sk-test-synthetic-key-000000',
+          DUPOND_EXPECTED_CWD: invokingRepo.repoDir,
+          DUPOND_CWD_MARKER_FILE: cwdMarkerFile,
         };
         delete childEnv.GOOGLE_API_KEY;
         delete childEnv.DUPOND_DB_PATH;
@@ -97,7 +130,7 @@ describe('Test isolation sentinel and shared Git-ref attribution', () => {
 
         const child = spawnSync(
           vitestBin,
-          ['run', '--root', repoRoot, ...repairedSuites],
+          ['run', '--root', repoRoot, '--config', vitestSentinelConfig, ...repairedSuites],
           {
             cwd: invokingRepo.repoDir,
             env: childEnv as NodeJS.ProcessEnv,
@@ -111,6 +144,16 @@ describe('Test isolation sentinel and shared Git-ref attribution', () => {
           0,
           `Child vitest run failed (status=${child.status}):\n${child.stdout}\n${child.stderr}`,
         );
+        assert.ok(fs.existsSync(cwdMarkerFile), 'Expected child worker cwd setup probe to record markers');
+        const recordedCwds = fs.readFileSync(cwdMarkerFile, 'utf-8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(
+          recordedCwds.length,
+          repairedSuites.length,
+          `Expected ${repairedSuites.length} child worker cwd assertions, got ${recordedCwds.length}`,
+        );
+        for (const recorded of recordedCwds) {
+          assert.strictEqual(recorded, fs.realpathSync(invokingRepo.repoDir));
+        }
 
         const after = captureInvokingRepoSentinel(invokingRepo.repoDir);
         assert.strictEqual(after.refs, before.refs, 'Invoking repo Git refs must remain unchanged');
@@ -128,7 +171,11 @@ describe('Test isolation sentinel and shared Git-ref attribution', () => {
     120_000,
   );
 
-  it('blocks genuine worker ref edits and describes concurrent shared-ref deltas with unknown attribution', () => {
+  it('blocks genuine worker ref edits and describes concurrent shared-ref deltas with unknown attribution', async () => {
+    const {
+      captureRepoBaseline,
+      inspectAndVerifyRepoChanges,
+    } = await import('../src/server/worker/opencodeWorkerAdapter.js');
     const repo = createDisposableRepo('dupond-ref-attr-');
     const wtWorker = path.join(repo.tmpBase, 'wt-worker');
     const wtOther = path.join(repo.tmpBase, 'wt-other');
