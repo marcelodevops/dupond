@@ -190,6 +190,66 @@ describe('Dedicated Antigravity macOS Keychain prototype', () => {
         );
         assert.notStrictEqual(sbPersonal.code, 0);
 
+        // 4b. Actual SandboxExecutor with prepareSandboxHome configuring/unlocking inside SandboxExecutor's exact ephemeral HOME
+        const { SandboxExecutor } = await import('../src/server/sandbox/sandboxExecutor.js');
+        const executor = new SandboxExecutor();
+        const worktreeGitDir = path.join(worktree, '.git');
+        if (!fs.existsSync(worktreeGitDir)) {
+          execFileSync('git', ['init', '-b', 'main', '--template='], { cwd: worktree });
+        }
+
+        const realExecRead = await executor.execute({
+          worktreePath: worktree,
+          command: '/usr/bin/security',
+          args: ['find-generic-password', '-s', svc, '-a', acct, '-w'],
+          rawArgv: true,
+          timeoutMs: 4000,
+          prepareSandboxHome: async (sandboxTmpHome) => {
+            await prepareSandboxKeychainCopy(profileDir, sandboxTmpHome);
+          },
+        });
+        assert.strictEqual(realExecRead.exitCode, 0, `SandboxExecutor read failed: ${realExecRead.stderr}`);
+        assert.strictEqual(realExecRead.stdout.trim(), val2);
+
+        const realExecUpdate = await executor.execute({
+          worktreePath: worktree,
+          command: '/usr/bin/security',
+          args: ['add-generic-password', '-U', '-s', svc, '-a', acct, '-w', val3],
+          rawArgv: true,
+          timeoutMs: 4000,
+          prepareSandboxHome: async (sandboxTmpHome) => {
+            await prepareSandboxKeychainCopy(profileDir, sandboxTmpHome);
+          },
+        });
+        assert.strictEqual(realExecUpdate.exitCode, 0, `SandboxExecutor update failed: ${realExecUpdate.stderr}`);
+
+        const realExecPersonal = await executor.execute({
+          worktreePath: worktree,
+          command: '/bin/ls',
+          args: [path.join(realUserHome, 'Library', 'Keychains')],
+          rawArgv: true,
+          timeoutMs: 4000,
+          prepareSandboxHome: async (sandboxTmpHome) => {
+            await prepareSandboxKeychainCopy(profileDir, sandboxTmpHome);
+          },
+        });
+        assert.notStrictEqual(realExecPersonal.exitCode, 0);
+
+        await assert.rejects(
+          () =>
+            executor.execute({
+              worktreePath: worktree,
+              command: '/bin/echo',
+              args: ['should-not-run'],
+              rawArgv: true,
+              timeoutMs: 4000,
+              prepareSandboxHome: async () => {
+                throw new Error('forced prepare failure');
+              },
+            }),
+          /Required sandbox initialization failed/,
+        );
+
         // 5. Cleanup removes ephemeral copy
         await ephemeral.cleanup();
         assert.strictEqual(fs.existsSync(ephemeral.sandboxKeychainPath), false);

@@ -28,6 +28,8 @@ export interface SandboxOptions {
   seedHomeFiles?: Array<{ sourcePath: string; targetRelToHome: string; required?: boolean }>;
   /** Explicit synthesized files to write into the sandbox's private HOME (e.g. hardened settings.json) */
   seedHomeContents?: Array<{ content: string; targetRelToHome: string; mode?: number; required?: boolean }>;
+  /** Optional host-side hook invoked with the exact ephemeral sandbox HOME before spawning */
+  prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void> | void;
 }
 
 export interface SandboxExecutionResult {
@@ -553,6 +555,9 @@ ${networkRule}
         } catch {
           if (seed.required !== false) throw new Error('Required sandbox policy initialization failed');
         }
+      }
+      if (options.prepareSandboxHome) {
+        await options.prepareSandboxHome(realTmp);
       }
     } catch {
       fs.rmSync(realTmp, { recursive: true, force: true });
