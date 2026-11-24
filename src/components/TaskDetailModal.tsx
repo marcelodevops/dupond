@@ -228,6 +228,8 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
   const [isLoadingRuns, setIsLoadingRuns] = useState(true);
   const [runsLoadError, setRunsLoadError] = useState<string | null>(null);
+  const [showLiveLogs, setShowLiveLogs] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -249,6 +251,34 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   }, [onClose]);
 
   useEffect(() => {
+    if (isExecutingStep) {
+      setSelectedRunId(undefined);
+    }
+  }, [isExecutingStep]);
+
+  const isRunActivelyExecuting =
+    isExecutingStep ||
+    runEvidence?.run?.status === 'running' ||
+    runEvidence?.run?.status === 'pending';
+
+  useEffect(() => {
+    if (!isRunActivelyExecuting) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const anchorMs =
+      runEvidence?.run?.status === 'running' && runEvidence.run.createdAt
+        ? new Date(runEvidence.run.createdAt).getTime()
+        : Date.now();
+    const updateElapsed = () => {
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - anchorMs) / 1000)));
+    };
+    updateElapsed();
+    const interval = setInterval(updateElapsed, 1000);
+    return () => clearInterval(interval);
+  }, [isRunActivelyExecuting, runEvidence?.run?.status, runEvidence?.run?.createdAt]);
+
+  useEffect(() => {
     const controller = new AbortController();
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let active = true;
@@ -265,12 +295,15 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
         setAuthoritativeTaskRegistered(res.authoritativeTaskRegistered);
         setRunsLoadError(null);
 
-        if (res.evidence && (res.evidence.run.status === 'pending' || res.evidence.run.status === 'running')) {
+        if (
+          isExecutingStep ||
+          (res.evidence && (res.evidence.run.status === 'pending' || res.evidence.run.status === 'running'))
+        ) {
           pollTimer = setTimeout(() => {
             if (active && mountedRef.current && !controller.signal.aborted) {
               void loadRuns(false);
             }
-          }, 2500);
+          }, 2000);
         }
       } catch (err: any) {
         if (!active || !mountedRef.current || controller.signal.aborted || err?.name === 'AbortError') {
@@ -291,7 +324,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
       controller.abort();
       if (pollTimer) clearTimeout(pollTimer);
     };
-  }, [projectId, task.id, selectedRunId, runRefreshKey]);
+  }, [projectId, task.id, selectedRunId, runRefreshKey, isExecutingStep]);
 
   const assignee = agents.find((a) => a.id === task.assignedAgentId);
   const epic = epics.find((e) => e.id === task.epicId);
@@ -1755,6 +1788,61 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
             )}
           </div>
         </div>
+
+        {/* Live Execution Progress & Logs Drawer */}
+        {isRunActivelyExecuting && (() => {
+          const activeAttempt =
+            runEvidence?.attempts?.find((a) => a.status === 'running') ||
+            runEvidence?.attempts?.[runEvidence.attempts.length - 1];
+          const logLines = (activeAttempt?.logs || '').split('\n').filter(Boolean);
+          const latestLine = logLines[logLines.length - 1] || 'Preparing workspace & launching worker...';
+          const mins = Math.floor(elapsedSeconds / 60);
+          const secs = elapsedSeconds % 60;
+          const elapsedLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          return (
+            <div
+              data-testid="live-execution-progress"
+              className="px-6 py-2.5 border-t border-indigo-900/60 bg-indigo-950/30 text-xs space-y-2"
+            >
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
+                  <RotateCw className="w-3.5 h-3.5 text-indigo-400 animate-spin shrink-0" />
+                  <span className="font-semibold text-indigo-200 shrink-0">
+                    {activeAttempt
+                      ? `Attempt #${activeAttempt.attemptNumber} · ${activeAttempt.workerType}`
+                      : 'Starting worker...'}
+                  </span>
+                  <span className="text-[11px] font-mono text-indigo-300/80 shrink-0">
+                    ({elapsedLabel})
+                  </span>
+                  <span
+                    data-testid="live-execution-latest-line"
+                    className="text-[11px] font-mono text-slate-300 truncate"
+                    title={latestLine}
+                  >
+                    {latestLine}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  data-testid="toggle-live-logs-btn"
+                  onClick={() => setShowLiveLogs((v) => !v)}
+                  className="px-2.5 py-1 rounded border border-indigo-700/70 bg-indigo-950/60 hover:bg-indigo-900/60 text-[11px] font-semibold text-indigo-200 shrink-0"
+                >
+                  {showLiveLogs ? 'Hide Live Logs' : 'Show Live Logs'}
+                </button>
+              </div>
+              {showLiveLogs && (
+                <pre
+                  data-testid="live-execution-logs"
+                  className="bg-slate-950/90 border border-slate-800 rounded p-2.5 text-[10px] font-mono text-slate-300 whitespace-pre-wrap overflow-x-auto max-h-40 overflow-y-auto"
+                >
+                  {activeAttempt?.logs || 'Waiting for worker output...'}
+                </pre>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Modal Bottom Bar: Run Agent Action */}
         <div className="px-6 py-3.5 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between">
