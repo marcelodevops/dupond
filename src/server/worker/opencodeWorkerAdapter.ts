@@ -608,9 +608,50 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
       prompt,
     ];
 
-    const logs: string[] = [
-      `[OpenCode] Executing ${binPath} in OS sandbox with model ${this.model} in ${realWorktree}`,
-    ];
+    const initialLog = `[OpenCode] Executing ${binPath} in OS sandbox with model ${this.model} in ${realWorktree}`;
+    const logs: string[] = [initialLog];
+    try {
+      context.onLog?.(initialLog);
+    } catch {}
+
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+    const emitStreamLine = (rawLine: string, stream: 'stdout' | 'stderr') => {
+      const trimmed = rawLine.trim();
+      if (!trimmed) return;
+      if (stream === 'stderr') {
+        const msg = `[OpenCode stderr] ${trimmed.slice(0, 200)}`;
+        try {
+          context.onLog?.(msg);
+        } catch {}
+        return;
+      }
+      try {
+        const evt = JSON.parse(trimmed);
+        const type = typeof evt?.type === 'string' ? evt.type : 'event';
+        let summary = `[OpenCode] ${type}`;
+        if (type === 'tool_use' || evt?.part?.type === 'tool') {
+          const toolName = evt?.part?.tool || evt?.tool || 'tool';
+          const status = evt?.part?.state?.status ? ` (${evt.part.state.status})` : '';
+          summary = `[OpenCode] tool: ${toolName}${status}`;
+        } else if (type === 'text') {
+          const snippet = String(evt?.part?.text || evt?.text || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+          if (snippet) summary = `[OpenCode] ${snippet}`;
+        } else if (type === 'step_finish' && evt?.part?.reason) {
+          summary = `[OpenCode] step_finish (${evt.part.reason})`;
+        } else if (type === 'error') {
+          const errText = String(evt?.error?.message || evt?.message || 'error').slice(0, 160);
+          summary = `[OpenCode] error: ${errText}`;
+        }
+        try {
+          context.onLog?.(summary);
+        } catch {}
+      } catch {
+        try {
+          context.onLog?.(`[OpenCode] ${trimmed.slice(0, 160)}`);
+        } catch {}
+      }
+    };
 
     const sandboxResult = await this.sandbox.execute({
       worktreePath: realWorktree,
@@ -627,6 +668,19 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
       denyWritePaths: collectDenyWritePaths(realWorktree, context.protectedPaths),
       seedHomeFiles: collectOpenCodeAuthSeedFiles(),
       preserveEnvKeys: ['GITHUB_TOKEN'],
+      onOutput: (stream, chunk) => {
+        if (stream === 'stdout') {
+          stdoutBuffer += chunk;
+          const lines = stdoutBuffer.split(/\r?\n/);
+          stdoutBuffer = lines.pop() ?? '';
+          for (const line of lines) emitStreamLine(line, 'stdout');
+        } else {
+          stderrBuffer += chunk;
+          const lines = stderrBuffer.split(/\r?\n/);
+          stderrBuffer = lines.pop() ?? '';
+          for (const line of lines) emitStreamLine(line, 'stderr');
+        }
+      },
     });
 
     // Always inspect repo baseline vs post-execution state on success, failure, timeout, and cancellation.

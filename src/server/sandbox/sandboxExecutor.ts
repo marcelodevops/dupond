@@ -28,6 +28,8 @@ export interface SandboxOptions {
   seedHomeFiles?: Array<{ sourcePath: string; targetRelToHome: string; required?: boolean }>;
   /** Explicit synthesized files to write into the sandbox's private HOME (e.g. hardened settings.json) */
   seedHomeContents?: Array<{ content: string; targetRelToHome: string; mode?: number; required?: boolean }>;
+  /** Optional incremental output callback fired as stdout/stderr chunks arrive */
+  onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
 }
 
 export interface SandboxExecutionResult {
@@ -739,11 +741,19 @@ ${networkRule}
       }
 
       child.stdout?.on('data', (data) => {
-        stdout += data.toString('utf-8');
+        const text = data.toString('utf-8');
+        stdout += text;
+        try {
+          options.onOutput?.('stdout', text);
+        } catch {}
       });
 
       child.stderr?.on('data', (data) => {
-        stderr += data.toString('utf-8');
+        const text = data.toString('utf-8');
+        stderr += text;
+        try {
+          options.onOutput?.('stderr', text);
+        } catch {}
       });
 
       const timer = setTimeout(() => {

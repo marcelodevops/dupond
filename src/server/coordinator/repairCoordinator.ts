@@ -214,6 +214,44 @@ export class RepairCoordinator {
 
         this.store.updateRun(run.id, { currentAttempt: attemptNum });
 
+        const attemptLogLines: string[] = [];
+        let attemptLogChars = 0;
+        let flushTimer: ReturnType<typeof setTimeout> | undefined;
+        let lastFlushAt = 0;
+        const flushAttemptLogs = () => {
+          if (flushTimer !== undefined) {
+            clearTimeout(flushTimer);
+            flushTimer = undefined;
+          }
+          lastFlushAt = Date.now();
+          try {
+            this.store.updateAttempt(attempt.id, { logs: attemptLogLines.join('\n') });
+          } catch {
+            // Never allow live log persistence errors to abort execution
+          }
+        };
+        const appendAttemptLog = (rawLine: string) => {
+          const line = String(rawLine ?? '').trimEnd();
+          if (!line) return;
+          const bounded = line.length > 500 ? `${line.slice(0, 500)}...` : line;
+          attemptLogLines.push(bounded);
+          attemptLogChars += bounded.length + 1;
+          while (attemptLogLines.length > 300 || attemptLogChars > 32_768) {
+            const removed = attemptLogLines.shift();
+            if (!removed) break;
+            attemptLogChars -= removed.length + 1;
+          }
+          const now = Date.now();
+          if (lastFlushAt === 0 || now - lastFlushAt >= 400) {
+            flushAttemptLogs();
+          } else if (flushTimer === undefined) {
+            flushTimer = setTimeout(flushAttemptLogs, 400);
+            flushTimer.unref();
+          }
+        };
+
+        appendAttemptLog(`[${new Date().toISOString()}] Starting attempt ${attemptNum}/${maxAttempts} (${workerIdentifier})`);
+
         // Invoke real coding worker
         const workerContext: WorkerExecutionContext = {
           taskId: task.id,
@@ -231,15 +269,23 @@ export class RepairCoordinator {
           runId,
           abortSignal: abortController.signal,
           workerConfig: task.workerConfig,
+          onLog: appendAttemptLog,
         };
 
         let workerResult;
         try {
           workerResult = await worker.execute(workerContext);
+          appendAttemptLog(`[${new Date().toISOString()}] Worker finished; committing & running authoritative verification...`);
+          flushAttemptLogs();
         } catch (workerErr: any) {
+          if (flushTimer !== undefined) {
+            clearTimeout(flushTimer);
+            flushTimer = undefined;
+          }
           const wasCancelled = this.isCancelled(runId) || abortController.signal.aborted;
           this.store.updateAttempt(attempt.id, {
             status: 'failed',
+            logs: attemptLogLines.join('\n'),
             errorMessage: wasCancelled ? 'Cancelled by user' : workerErr.message,
             durationMs: Date.now() - attemptStartTime,
             completedAt: new Date().toISOString(),
