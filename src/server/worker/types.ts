@@ -40,6 +40,8 @@ export interface WorkerExecutionContext {
   runId?: string;
   abortSignal?: AbortSignal;
   workerConfig?: WorkerConfig;
+  /** Optional incremental log sink called while a worker attempt is running */
+  onLog?: (line: string) => void;
 }
 
 export interface WorkerExecutionResult {
