@@ -617,7 +617,7 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
     let stdoutBuffer = '';
     let stderrBuffer = '';
     const emitStreamLine = (rawLine: string, stream: 'stdout' | 'stderr') => {
-      const trimmed = rawLine.trim();
+      const trimmed = sanitizeWorkerOutput(rawLine).trim();
       if (!trimmed) return;
       if (stream === 'stderr') {
         const msg = `[OpenCode stderr] ${trimmed.slice(0, 200)}`;
@@ -635,16 +635,19 @@ export class OpenCodeCodingWorkerAdapter implements CodingWorkerAdapter {
           const status = evt?.part?.state?.status ? ` (${evt.part.state.status})` : '';
           summary = `[OpenCode] tool: ${toolName}${status}`;
         } else if (type === 'text') {
-          const snippet = String(evt?.part?.text || evt?.text || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+          const snippet = sanitizeWorkerOutput(String(evt?.part?.text || evt?.text || ''))
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 140);
           if (snippet) summary = `[OpenCode] ${snippet}`;
         } else if (type === 'step_finish' && evt?.part?.reason) {
           summary = `[OpenCode] step_finish (${evt.part.reason})`;
         } else if (type === 'error') {
-          const errText = String(evt?.error?.message || evt?.message || 'error').slice(0, 160);
+          const errText = sanitizeWorkerOutput(String(evt?.error?.message || evt?.message || 'error')).slice(0, 160);
           summary = `[OpenCode] error: ${errText}`;
         }
         try {
-          context.onLog?.(summary);
+          context.onLog?.(sanitizeWorkerOutput(summary));
         } catch {}
       } catch {
         try {
