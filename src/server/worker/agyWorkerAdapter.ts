@@ -402,7 +402,10 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
     logs.push(`[agy] Executing non-interactive coding run with model "${this.model}" in isolated sandbox`);
     context.onLog?.(logs[logs.length - 1]);
 
-    const runSandbox = (prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void>) =>
+    const runSandbox = (
+      prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void>,
+      onExecutionStarted?: (identity: import('../sandbox/sandboxExecutor.js').SandboxExecutionIdentity) => void,
+    ) =>
       this.sandbox.execute({
         worktreePath: realWorktree,
         command: exe,
@@ -417,6 +420,7 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
         seedHomeFiles,
         seedHomeContents: [...AGY_SANDBOX_SEED_CONTENTS, AGY_MINIMAL_SANDBOX_CONFIG],
         ...(prepareSandboxHome ? { prepareSandboxHome, preserveSandboxHome: true } : {}),
+        ...(onExecutionStarted ? { onExecutionStarted } : {}),
         env: buildAgySandboxEnv(),
         abortSignal: context.abortSignal,
         onOutput: context.onLog
@@ -431,8 +435,8 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
     try {
       sbRes =
         this.platform === 'darwin'
-          ? await runWithIsolatedAgyProfile(profileDir, ({ prepareSandboxHome }) =>
-              runSandbox(prepareSandboxHome),
+          ? await runWithIsolatedAgyProfile(profileDir, ({ prepareSandboxHome, onExecutionStarted }) =>
+              runSandbox(prepareSandboxHome, onExecutionStarted),
             )
           : await runSandbox();
     } catch (err: any) {

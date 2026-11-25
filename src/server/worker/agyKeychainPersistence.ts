@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { decryptSecret, encryptSecret } from '../projects/secretCrypto.js';
+import type { SandboxExecutionIdentity } from '../sandbox/sandboxExecutor.js';
 import {
   ensureIsolatedProfileKeychain,
   profileKeychainPath,
@@ -56,6 +57,7 @@ export interface AgyActiveRunRecord {
   boundEmail?: string;
   boundUserScope?: string;
   hostPid: number;
+  executionIdentity?: SandboxExecutionIdentity;
   startedAt: string;
 }
 
@@ -67,6 +69,7 @@ export interface AgyRecoveryBundle {
   authEpoch: string;
   boundEmail?: string;
   boundUserScope?: string;
+  executionIdentity?: SandboxExecutionIdentity;
   keychainPayloadB64: string;
   authFiles: Record<string, string>;
   stagedAt: string;
@@ -89,7 +92,9 @@ export type FaultInjectionStage =
 export interface PersistenceOptions {
   timeoutMs?: number;
   onFault?: (stage: FaultInjectionStage) => void | Promise<void>;
-  confirmProcessesStopped?: (sandboxHomeDir: string, hostPid?: number) => Promise<{ stopped: boolean; reason?: string }>;
+  confirmProcessesStopped?: (
+    identity: SandboxExecutionIdentity | undefined,
+  ) => Promise<{ stopped: boolean; reason?: string }>;
 }
 
 function metaPath(profileDir: string): string {
@@ -303,23 +308,80 @@ export async function countAgyKeychainItems(
   return matches;
 }
 
-export async function defaultConfirmProcessesStopped(
-  sandboxHomeDir: string,
-  hostPid?: number,
+async function checkContainerStopped(
+  runtime: 'docker' | 'podman',
+  containerName: string,
 ): Promise<{ stopped: boolean; reason?: string }> {
-  if (hostPid && hostPid !== process.pid) {
-    try {
-      process.kill(hostPid, 0);
-      return { stopped: false, reason: `Host process ${hostPid} is still alive.` };
-    } catch (err: any) {
-      if (err?.code !== 'ESRCH') {
-        return { stopped: false, reason: `Unable to confirm host process ${hostPid} stopped: ${err?.code || err}` };
+  return new Promise((resolve) => {
+    const child = spawn(runtime, ['inspect', '-f', '{{.State.Running}}', containerName], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let timedOut = false;
+    child.stdout.on('data', (d) => (stdout += d.toString('utf-8')));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+    }, 3_000);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        resolve({ stopped: false, reason: `Timed out inspecting container ${containerName}.` });
+        return;
       }
+      if (code !== 0) {
+        // Container no longer exists.
+        resolve({ stopped: true });
+        return;
+      }
+      const running = stdout.trim().toLowerCase();
+      if (running === 'false') {
+        resolve({ stopped: true });
+        return;
+      }
+      resolve({ stopped: false, reason: `Container ${containerName} is still running (state=${running || 'unknown'}).` });
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve({ stopped: false, reason: `Failed to inspect container ${containerName}.` });
+    });
+  });
+}
+
+export async function defaultConfirmExecutionStopped(
+  identity: SandboxExecutionIdentity | undefined,
+): Promise<{ stopped: boolean; reason?: string }> {
+  if (!identity) {
+    return { stopped: false, reason: 'Missing tracked execution identity; failing closed.' };
+  }
+
+  if (identity.mode === 'container') {
+    if (!identity.containerName || !identity.containerRuntime) {
+      return { stopped: false, reason: 'Missing container execution identity; failing closed.' };
+    }
+    const containerCheck = await checkContainerStopped(identity.containerRuntime, identity.containerName);
+    if (!containerCheck.stopped) {
+      return containerCheck;
+    }
+    if (!identity.pgid) {
+      return { stopped: true };
     }
   }
 
+  if (typeof identity.pgid !== 'number' || !Number.isInteger(identity.pgid) || identity.pgid <= 0) {
+    return { stopped: false, reason: 'Missing tracked process-group identity (pgid); failing closed.' };
+  }
+  if (typeof identity.startedAtMs !== 'number' || !Number.isFinite(identity.startedAtMs)) {
+    return { stopped: false, reason: 'Missing execution start timestamp; failing closed.' };
+  }
+
+  const targetPgid = identity.pgid;
+  const recordedLeaderStartMs = identity.processStartTime ? Date.parse(identity.processStartTime) : NaN;
+
   return new Promise((resolve) => {
-    const child = spawn('/bin/ps', ['-eo', 'pid=,command='], {
+    const child = spawn('/bin/ps', ['-eo', 'pid=,pgid=,lstart='], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -334,22 +396,38 @@ export async function defaultConfirmProcessesStopped(
     child.on('close', (code) => {
       clearTimeout(timer);
       if (timedOut || code !== 0) {
-        resolve({ stopped: false, reason: 'Failed to verify descendant process termination via ps.' });
+        resolve({ stopped: false, reason: 'Failed to verify tracked process-group termination via ps.' });
         return;
       }
-      const resolvedSandbox = path.resolve(sandboxHomeDir);
-      const activeLine = stdout
-        .split(/\r?\n/)
-        .find((line) => line.includes(resolvedSandbox) && !line.includes('/bin/ps -eo'));
-      if (activeLine) {
-        resolve({ stopped: false, reason: `Process referencing ${resolvedSandbox} is still running.` });
-        return;
+      for (const rawLine of stdout.split(/\r?\n/)) {
+        const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(rawLine);
+        if (!match) continue;
+        const pid = Number(match[1]);
+        const pgid = Number(match[2]);
+        const lstartStr = match[3];
+        if (pgid !== targetPgid) continue;
+
+        const lstartMs = Date.parse(lstartStr);
+        // PID/PGID reuse safeguard for the leader process when exact lstart was recorded.
+        if (pid === identity.pid && Number.isFinite(recordedLeaderStartMs) && Number.isFinite(lstartMs)) {
+          if (Math.abs(lstartMs - recordedLeaderStartMs) > 2_000) {
+            continue;
+          }
+        }
+        // If lstart is unparseable or within the tracked execution window, fail closed.
+        if (!Number.isFinite(lstartMs) || (lstartMs >= identity.startedAtMs - 5_000 && lstartMs <= identity.startedAtMs + 24 * 60 * 60 * 1_000)) {
+          resolve({
+            stopped: false,
+            reason: `Process ${pid} in tracked process group ${targetPgid} is still running.`,
+          });
+          return;
+        }
       }
       resolve({ stopped: true });
     });
     child.on('error', () => {
       clearTimeout(timer);
-      resolve({ stopped: false, reason: 'Failed to execute ps for descendant verification.' });
+      resolve({ stopped: false, reason: 'Failed to execute ps for process-group verification.' });
     });
   });
 }
@@ -540,16 +618,28 @@ async function reconcileLocked(profileDir: string, options?: PersistenceOptions)
 
   if (fs.existsSync(recFile)) {
     let stagedSandboxHome: string | null = null;
+    let activeIdentity: SandboxExecutionIdentity | undefined;
     if (fs.existsSync(activeFile)) {
       try {
         const active = JSON.parse(fs.readFileSync(activeFile, 'utf-8')) as Partial<AgyActiveRunRecord>;
         if (typeof active.sandboxHomeDir === 'string' && active.sandboxHomeDir) {
           stagedSandboxHome = active.sandboxHomeDir;
         }
+        if (active.executionIdentity) {
+          activeIdentity = active.executionIdentity;
+        }
       } catch {}
     }
     const encrypted = fs.readFileSync(recFile, 'utf-8').trim();
     const bundle = JSON.parse(decryptSecret(encrypted)) as AgyRecoveryBundle;
+    const stopCheck = await (options?.confirmProcessesStopped ?? defaultConfirmExecutionStopped)(
+      bundle.executionIdentity ?? activeIdentity,
+    );
+    if (!stopCheck.stopped) {
+      throw new Error(
+        `Cannot replay staged Antigravity recovery while execution may still be active: ${stopCheck.reason || 'unknown process state'}`,
+      );
+    }
     await commitRecoveryBundleLocked(resolvedProfile, bundle, options);
     if (stagedSandboxHome) {
       try {
@@ -562,9 +652,8 @@ async function reconcileLocked(profileDir: string, options?: PersistenceOptions)
     const active = JSON.parse(fs.readFileSync(activeFile, 'utf-8')) as AgyActiveRunRecord;
     const meta = readAgyProfileMeta(resolvedProfile);
 
-    const stopCheck = await (options?.confirmProcessesStopped ?? defaultConfirmProcessesStopped)(
-      active.sandboxHomeDir,
-      active.hostPid,
+    const stopCheck = await (options?.confirmProcessesStopped ?? defaultConfirmExecutionStopped)(
+      active.executionIdentity,
     );
     if (!stopCheck.stopped) {
       throw new Error(
@@ -601,6 +690,7 @@ async function reconcileLocked(profileDir: string, options?: PersistenceOptions)
       authEpoch: active.authEpoch,
       boundEmail: active.boundEmail ?? extracted.credential.idTokenEmail,
       boundUserScope: active.boundUserScope ?? extracted.userScope,
+      ...(active.executionIdentity ? { executionIdentity: active.executionIdentity } : {}),
       keychainPayloadB64: extracted.credential.rawPayloadB64,
       authFiles: extracted.authFiles,
       stagedAt: new Date().toISOString(),
@@ -699,6 +789,7 @@ export async function runWithIsolatedAgyProfile<T>(
   profileDir: string,
   executeFn: (hooks: {
     prepareSandboxHome: (sandboxHomeDir: string) => Promise<void>;
+    onExecutionStarted: (identity: SandboxExecutionIdentity) => void;
   }) => Promise<T>,
   options?: PersistenceOptions,
 ): Promise<T> {
@@ -714,6 +805,7 @@ export async function runWithIsolatedAgyProfile<T>(
     const runId = crypto.randomUUID();
     let capturedSandboxHome: string | null = null;
     let capturedSandboxKc: string | null = null;
+    let capturedIdentity: SandboxExecutionIdentity | undefined;
 
     let result!: T;
     let execErr: unknown = null;
@@ -729,15 +821,26 @@ export async function runWithIsolatedAgyProfile<T>(
             timeoutMs,
           );
         },
+        onExecutionStarted: (identity: SandboxExecutionIdentity) => {
+          capturedIdentity = identity;
+          const activeFile = activeRunPath(resolvedProfile);
+          if (fs.existsSync(activeFile)) {
+            const current = JSON.parse(fs.readFileSync(activeFile, 'utf-8')) as AgyActiveRunRecord;
+            atomicWriteFileSync(
+              activeFile,
+              JSON.stringify({ ...current, executionIdentity: identity }, null, 2),
+              0o600,
+            );
+          }
+        },
       });
     } catch (err) {
       execErr = err;
     }
 
     if (capturedSandboxHome) {
-      const stopCheck = await (options?.confirmProcessesStopped ?? defaultConfirmProcessesStopped)(
-        capturedSandboxHome,
-        process.pid,
+      const stopCheck = await (options?.confirmProcessesStopped ?? defaultConfirmExecutionStopped)(
+        capturedIdentity,
       );
       if (!stopCheck.stopped) {
         // Preserve active-run workspace & throw actionable error rather than discarding rotated tokens.
@@ -769,6 +872,7 @@ export async function runWithIsolatedAgyProfile<T>(
           authEpoch: meta.authEpoch,
           boundEmail: meta.boundEmail ?? extracted.credential.idTokenEmail,
           boundUserScope: meta.boundUserScope ?? extracted.userScope,
+          ...(capturedIdentity ? { executionIdentity: capturedIdentity } : {}),
           keychainPayloadB64: extracted.credential.rawPayloadB64,
           authFiles: extracted.authFiles,
           stagedAt: new Date().toISOString(),

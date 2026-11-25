@@ -454,7 +454,10 @@ export async function verifyAgySandboxPortability(
   const seedHomeFiles = collectAgySandboxSeedFiles(profileDir);
   const realBin = fs.realpathSync(exe);
 
-  const runProbe = async (prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void>) =>
+  const runProbe = async (
+    prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void>,
+    onExecutionStarted?: (identity: import('../sandbox/sandboxExecutor.js').SandboxExecutionIdentity) => void,
+  ) =>
     sandbox.execute({
       worktreePath,
       command: exe,
@@ -467,6 +470,7 @@ export async function verifyAgySandboxPortability(
       seedHomeFiles,
       seedHomeContents: [AGY_MINIMAL_SANDBOX_CONFIG],
       ...(prepareSandboxHome ? { prepareSandboxHome, preserveSandboxHome: true } : {}),
+      ...(onExecutionStarted ? { onExecutionStarted } : {}),
       env: {
         ANTIGRAVITY_DISABLE_EMBEDDED_RIPGREP: 'true',
         TERM: 'dumb',
@@ -475,7 +479,9 @@ export async function verifyAgySandboxPortability(
 
   const res =
     platform === 'darwin'
-      ? await runWithIsolatedAgyProfile(profileDir, ({ prepareSandboxHome }) => runProbe(prepareSandboxHome))
+      ? await runWithIsolatedAgyProfile(profileDir, ({ prepareSandboxHome, onExecutionStarted }) =>
+          runProbe(prepareSandboxHome, onExecutionStarted),
+        )
       : await runProbe();
 
   const models = res.stdout
