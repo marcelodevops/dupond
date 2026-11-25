@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.20.0](https://github.com/marcelodevops/dupond/compare/v0.19.1...v0.20.0) (2026-11-25)
+
+
+### Features
+
+* live execution progress status and streaming worker logs ([33c4820](https://github.com/marcelodevops/dupond/commit/33c4820994bd8ba546c6d048c447fb2d1eb1e5b0))
+* stream incremental worker progress and logs to running attempts ([4ab0f18](https://github.com/marcelodevops/dupond/commit/4ab0f1805f3e58f731ad88bef6773b64e280baf8))
+* **ui:** add live execution progress bar and Show Live Logs drawer ([a772aea](https://github.com/marcelodevops/dupond/commit/a772aea220ac48f66ef374d2b898ff298908792f))
+
+
+### Bug Fixes
+
+* redact secrets before log persistence and guard post-finalization flushes ([5860e22](https://github.com/marcelodevops/dupond/commit/5860e2207c9c914f7cd4df0ced6cbc3ca2fd4bad))
+* **ui:** preserve historical run selection and avoid stale attempt preview ([acb5d20](https://github.com/marcelodevops/dupond/commit/acb5d20f84771885fda649fdd3c82eb1d2ad35cd))
+
 ## [0.19.1](https://github.com/marcelodevops/dupond/compare/v0.19.0...v0.19.1) (2026-11-23)
 
 
