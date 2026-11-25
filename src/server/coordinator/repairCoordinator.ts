@@ -12,6 +12,7 @@ import { AuthoritativeVerifier, defaultAuthoritativeVerifier } from '../verifica
 import { verifiedRefForRun } from '../verification/evidenceBinding.js';
 import { LifecycleService } from '../lifecycle/lifecycleService.js';
 import { defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
+import { sanitizeWorkerOutput } from '../worker/opencodeWorkerAdapter.js';
 
 export interface ExecutionLoopOptions {
   task: TaskRecord;
@@ -214,6 +215,55 @@ export class RepairCoordinator {
 
         this.store.updateRun(run.id, { currentAttempt: attemptNum });
 
+        const attemptLogLines: string[] = [];
+        let attemptLogChars = 0;
+        let flushTimer: ReturnType<typeof setTimeout> | undefined;
+        let lastFlushAt = 0;
+        let attemptClosed = false;
+        const getSanitizedLogs = () => sanitizeWorkerOutput(attemptLogLines.join('\n'));
+        const closeAttemptLogs = () => {
+          attemptClosed = true;
+          if (flushTimer !== undefined) {
+            clearTimeout(flushTimer);
+            flushTimer = undefined;
+          }
+        };
+        const flushAttemptLogs = () => {
+          if (attemptClosed) return;
+          if (flushTimer !== undefined) {
+            clearTimeout(flushTimer);
+            flushTimer = undefined;
+          }
+          lastFlushAt = Date.now();
+          try {
+            this.store.updateAttempt(attempt.id, { logs: getSanitizedLogs() });
+          } catch {
+            // Never allow live log persistence errors to abort execution
+          }
+        };
+        const appendAttemptLog = (rawLine: string) => {
+          if (attemptClosed) return;
+          const sanitizedLine = sanitizeWorkerOutput(String(rawLine ?? '')).trimEnd();
+          if (!sanitizedLine) return;
+          const bounded = sanitizedLine.length > 500 ? `${sanitizedLine.slice(0, 500)}...` : sanitizedLine;
+          attemptLogLines.push(bounded);
+          attemptLogChars += bounded.length + 1;
+          while (attemptLogLines.length > 300 || attemptLogChars > 32_768) {
+            const removed = attemptLogLines.shift();
+            if (!removed) break;
+            attemptLogChars -= removed.length + 1;
+          }
+          const now = Date.now();
+          if (lastFlushAt === 0 || now - lastFlushAt >= 400) {
+            flushAttemptLogs();
+          } else if (flushTimer === undefined) {
+            flushTimer = setTimeout(flushAttemptLogs, 400);
+            flushTimer.unref();
+          }
+        };
+
+        appendAttemptLog(`[${new Date().toISOString()}] Starting attempt ${attemptNum}/${maxAttempts} (${workerIdentifier})`);
+
         // Invoke real coding worker
         const workerContext: WorkerExecutionContext = {
           taskId: task.id,
@@ -231,16 +281,21 @@ export class RepairCoordinator {
           runId,
           abortSignal: abortController.signal,
           workerConfig: task.workerConfig,
+          onLog: appendAttemptLog,
         };
 
         let workerResult;
         try {
           workerResult = await worker.execute(workerContext);
+          appendAttemptLog(`[${new Date().toISOString()}] Worker finished; committing & running authoritative verification...`);
+          flushAttemptLogs();
         } catch (workerErr: any) {
+          closeAttemptLogs();
           const wasCancelled = this.isCancelled(runId) || abortController.signal.aborted;
           this.store.updateAttempt(attempt.id, {
             status: 'failed',
-            errorMessage: wasCancelled ? 'Cancelled by user' : workerErr.message,
+            logs: getSanitizedLogs(),
+            errorMessage: wasCancelled ? 'Cancelled by user' : sanitizeWorkerOutput(workerErr.message || ''),
             durationMs: Date.now() - attemptStartTime,
             completedAt: new Date().toISOString(),
           });
@@ -266,10 +321,11 @@ export class RepairCoordinator {
         }
 
         if (!workerResult.success && workerResult.errorMessage) {
+          closeAttemptLogs();
           this.store.updateAttempt(attempt.id, {
             status: 'failed',
-            errorMessage: workerResult.errorMessage,
-            logs: workerResult.logs.join('\n'),
+            errorMessage: sanitizeWorkerOutput(workerResult.errorMessage),
+            logs: sanitizeWorkerOutput(workerResult.logs.join('\n')),
             durationMs: workerResult.durationMs,
             completedAt: new Date().toISOString(),
           });
@@ -305,8 +361,10 @@ export class RepairCoordinator {
             encoding: 'utf-8',
           }).trim();
         } catch (gitErr: any) {
+          closeAttemptLogs();
           this.store.updateAttempt(attempt.id, {
             status: 'failed',
+            logs: getSanitizedLogs(),
             errorMessage: `Git commit failed: ${gitErr.message}`,
             durationMs: Date.now() - attemptStartTime,
             completedAt: new Date().toISOString(),
@@ -329,6 +387,14 @@ export class RepairCoordinator {
         });
 
         if (this.isCancelled(runId) || abortController.signal.aborted) {
+          closeAttemptLogs();
+          this.store.updateAttempt(attempt.id, {
+            status: 'failed',
+            logs: getSanitizedLogs(),
+            errorMessage: 'Cancelled by user',
+            durationMs: Date.now() - attemptStartTime,
+            completedAt: new Date().toISOString(),
+          });
           lastFailureReason = 'Run cancelled by user';
           lastFailureType = 'cancelled';
           break;
@@ -354,11 +420,12 @@ export class RepairCoordinator {
         }
 
         // Update attempt record with verified outcomes
+        closeAttemptLogs();
         this.store.updateAttempt(attempt.id, {
           status: verification.passed ? 'succeeded' : 'failed',
           diff: workerResult.diff,
           filesModified: workerResult.filesModified,
-          logs: workerResult.logs.join('\n'),
+          logs: sanitizeWorkerOutput(workerResult.logs.join('\n')),
           tokenUsage: workerResult.tokenUsage,
           durationMs: Date.now() - attemptStartTime,
           errorMessage: verification.failureReason,

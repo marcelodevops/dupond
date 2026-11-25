@@ -31,7 +31,13 @@ export async function runCodingWorkerLoop(
 
   const logs: string[] = [];
   const log = (msg: string) => {
-    logs.push(`[${new Date().toISOString()}] ${msg}`);
+    const entry = `[${new Date().toISOString()}] ${msg}`;
+    logs.push(entry);
+    try {
+      context.onLog?.(entry);
+    } catch {
+      // Never allow UI/log sink errors to abort worker execution
+    }
   };
 
   log(`Starting coding worker loop [provider: ${provider.provider}, model: ${provider.model}] for task ${context.taskKey} (Attempt ${context.attemptNumber})`);
