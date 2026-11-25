@@ -2,7 +2,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { afterEach, describe, it } from 'vitest';
 import { SandboxExecutor } from '../src/server/sandbox/sandboxExecutor.js';
 import {
@@ -119,8 +119,15 @@ describe('Antigravity macOS Keychain persistence, fault injection, and wiring', 
           () =>
             runWithIsolatedAgyProfile(
               profileDir,
-              async ({ prepareSandboxHome }) => {
+              async ({ prepareSandboxHome, onExecutionStarted }) => {
                 await prepareSandboxHome(sandboxHome);
+                onExecutionStarted({
+                  sandboxHomeDir: sandboxHome,
+                  mode: 'process_group',
+                  pid: 999999,
+                  pgid: 999999,
+                  startedAtMs: Date.now(),
+                });
                 // Verify minimal synthesized config excludes plugins/hooks.
                 const cfg = fs.readFileSync(
                   path.join(sandboxHome, AGY_MINIMAL_SANDBOX_CONFIG.targetRelToHome),
@@ -189,8 +196,15 @@ describe('Antigravity macOS Keychain persistence, fault injection, and wiring', 
         () =>
           runWithIsolatedAgyProfile(
             profileDir,
-            async ({ prepareSandboxHome }) => {
+            async ({ prepareSandboxHome, onExecutionStarted }) => {
               await prepareSandboxHome(sandboxHome);
+              onExecutionStarted({
+                sandboxHomeDir: sandboxHome,
+                mode: 'process_group',
+                pid: 999997,
+                pgid: 999997,
+                startedAtMs: Date.now(),
+              });
               await writeSyntheticKeychainItem(sandboxHome, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT, userARotated);
               return 'ok';
             },
@@ -219,8 +233,15 @@ describe('Antigravity macOS Keychain persistence, fault injection, and wiring', 
       fs.mkdirSync(sbConflict, { recursive: true, mode: 0o700 });
       await assert.rejects(
         () =>
-          runWithIsolatedAgyProfile(profileDir, async ({ prepareSandboxHome }) => {
+          runWithIsolatedAgyProfile(profileDir, async ({ prepareSandboxHome, onExecutionStarted }) => {
             await prepareSandboxHome(sbConflict);
+            onExecutionStarted({
+              sandboxHomeDir: sbConflict,
+              mode: 'process_group',
+              pid: 999998,
+              pgid: 999998,
+              startedAtMs: Date.now(),
+            });
             await writeSyntheticKeychainItem(sbConflict, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT, userACred);
             return 'ok';
           }),
@@ -306,6 +327,127 @@ exit 1
       const personalAfter = getPersonalKeychainState();
       assert.deepStrictEqual(personalAfter, personalBefore);
       await runBoundedSecurity(['default-keychain'], profileDir, 1500);
+    },
+  );
+
+  it.skipIf(process.platform !== 'darwin')(
+    'blocks active-run and staged recovery when a tracked process-group descendant survives without sandboxHomeDir in argv',
+    async () => {
+      process.env.DUPOND_CONN_KEY = 'test-conn-key-persistence-04';
+      const root = makeTempRoot();
+      const profileDir = path.join(root, 'profile');
+      fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
+
+      await ensureIsolatedProfileKeychain(profileDir);
+      const initialCred = makeCredentialB64({ refreshToken: '1//pgid-initial' });
+      await writeSyntheticKeychainItem(profileDir, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT, initialCred);
+
+      // 1. Active-run-only recovery with a surviving descendant (`/bin/sleep 30`, no sandboxHomeDir in argv).
+      const sbActive = path.join(root, 'sb-active-pgid');
+      fs.mkdirSync(sbActive, { recursive: true, mode: 0o700 });
+      const activeRotated = makeCredentialB64({ refreshToken: '1//pgid-active-rotated' });
+
+      const sleeper1 = spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' });
+      const pgid1 = sleeper1.pid!;
+      try {
+        await assert.rejects(
+          () =>
+            runWithIsolatedAgyProfile(profileDir, async ({ prepareSandboxHome, onExecutionStarted }) => {
+              await prepareSandboxHome(sbActive);
+              onExecutionStarted({
+                sandboxHomeDir: sbActive,
+                mode: 'process_group',
+                pid: pgid1,
+                pgid: pgid1,
+                startedAtMs: Date.now(),
+              });
+              await writeSyntheticKeychainItem(sbActive, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT, activeRotated);
+              return 'ok';
+            }),
+          /did not confirm termination/i,
+        );
+
+        // Must fail closed on reconcile while sleeper1 is alive: zero credential mutation, sandbox preserved.
+        await assert.rejects(() => reconcileAgyProfileRecovery(profileDir), /still active|still running/i);
+        assert.strictEqual(
+          await readSyntheticKeychainItem(profileDir, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT),
+          initialCred,
+        );
+        assert.strictEqual(fs.existsSync(sbActive), true);
+      } finally {
+        try {
+          process.kill(-pgid1, 'SIGKILL');
+        } catch {}
+        await new Promise((r) => sleeper1.once('close', r));
+      }
+
+      // Once confirmed stopped, recovery commits rotated token and cleans up sandbox.
+      await reconcileAgyProfileRecovery(profileDir);
+      assert.strictEqual(
+        await readSyntheticKeychainItem(profileDir, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT),
+        activeRotated,
+      );
+      assert.strictEqual(fs.existsSync(sbActive), false);
+
+      // 2. Staged recovery (.dupond-agy-recovery.json.enc) with tracked execution still alive.
+      const sbStaged = path.join(root, 'sb-staged-pgid');
+      fs.mkdirSync(sbStaged, { recursive: true, mode: 0o700 });
+      const stagedRotated = makeCredentialB64({ refreshToken: '1//pgid-staged-rotated' });
+
+      // Create staged recovery bundle via fault injection, then spawn a live process claiming that pgid.
+      const sleeper2 = spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' });
+      const pgid2 = sleeper2.pid!;
+      try {
+        await assert.rejects(
+          () =>
+            runWithIsolatedAgyProfile(
+              profileDir,
+              async ({ prepareSandboxHome, onExecutionStarted }) => {
+                await prepareSandboxHome(sbStaged);
+                onExecutionStarted({
+                  sandboxHomeDir: sbStaged,
+                  mode: 'process_group',
+                  pid: pgid2,
+                  pgid: pgid2,
+                  startedAtMs: Date.now(),
+                });
+                await writeSyntheticKeychainItem(sbStaged, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT, stagedRotated);
+                return 'ok';
+              },
+              {
+                // Bypass stop check only during initial run so we can stage the bundle while sleeper2 stays alive.
+                confirmProcessesStopped: async () => ({ stopped: true }),
+                onFault: (stage) => {
+                  if (stage === 'after_stage_before_keychain') throw new Error('INJECTED_STAGED_CRASH');
+                },
+              },
+            ),
+          /INJECTED_STAGED_CRASH/,
+        );
+
+        // Real recovery check MUST block staged replay while pgid2 is alive: zero mutation, sandbox preserved.
+        await assert.rejects(() => reconcileAgyProfileRecovery(profileDir), /still active|still running/i);
+        assert.strictEqual(
+          await readSyntheticKeychainItem(profileDir, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT),
+          activeRotated,
+        );
+        assert.strictEqual(fs.existsSync(sbStaged), true);
+        assert.strictEqual(fs.existsSync(path.join(profileDir, '.dupond-agy-recovery.json.enc')), true);
+      } finally {
+        try {
+          process.kill(-pgid2, 'SIGKILL');
+        } catch {}
+        await new Promise((r) => sleeper2.once('close', r));
+      }
+
+      // Once confirmed stopped, staged replay commits stagedRotated and cleans up.
+      await reconcileAgyProfileRecovery(profileDir);
+      assert.strictEqual(
+        await readSyntheticKeychainItem(profileDir, AGY_KEYCHAIN_SERVICE, AGY_KEYCHAIN_ACCOUNT),
+        stagedRotated,
+      );
+      assert.strictEqual(fs.existsSync(sbStaged), false);
+      assert.strictEqual(fs.existsSync(path.join(profileDir, '.dupond-agy-recovery.json.enc')), false);
     },
   );
 });
