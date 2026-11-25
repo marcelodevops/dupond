@@ -5,6 +5,18 @@ import path from 'node:path';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { SandboxExecutor, defaultSandboxExecutor } from '../sandbox/sandboxExecutor.js';
 import { sanitizeWorkerOutput } from './opencodeWorkerAdapter.js';
+import {
+  AGY_CREDENTIAL_USER_SCOPE_REL,
+  AGY_MINIMAL_SANDBOX_CONFIG,
+  AGY_SYNCED_AUTH_REL_PATHS,
+  extractAndValidateFromHome,
+  readAgyProfileMeta,
+  reconcileAgyProfileRecovery,
+  rotateAgyProfileAuthEpoch,
+  runWithIsolatedAgyProfile,
+  writeAgyProfileMeta,
+} from './agyKeychainPersistence.js';
+import { ensureIsolatedProfileKeychain, profileKeychainPath } from './agyKeychainPrototype.js';
 
 const DEFAULT_LOGIN_TTL_MS = 55_000;
 const PROBE_TIMEOUT_MS = 10_000;
@@ -25,8 +37,16 @@ export type AgyAuthSessionState =
 export const AGY_MACOS_KEYCHAIN_LIMITATION =
   'Antigravity CLI is unavailable on macOS: agy v1.5.13 attempts /usr/bin/security Keychain writes during OAuth onboarding and token refresh under an isolated HOME without a documented file-only credential mode, which can trigger a macOS Keychain reset prompt.';
 
-export function isAgyOnboardingSupported(platform: NodeJS.Platform = process.platform): boolean {
-  return platform !== 'darwin';
+export function isAgyMacosKeychainEnabled(): boolean {
+  return process.env.DUPOND_AGY_MACOS_KEYCHAIN === '1';
+}
+
+export function isAgyOnboardingSupported(
+  platform: NodeJS.Platform = process.platform,
+  options?: { allowDarwinKeychain?: boolean },
+): boolean {
+  if (platform !== 'darwin') return true;
+  return options?.allowDarwinKeychain ?? isAgyMacosKeychainEnabled();
 }
 
 export type AgyKeychainFailureCategory =
@@ -198,35 +218,49 @@ export interface ProbeAgyModelsResult {
  * Non-inference check: lists available models using ONLY the dedicated profile directory.
  * Executes asynchronously with bounded timeout, cancellation propagation, and process-tree reaping.
  */
-export function probeAgyProfileModels(
+export async function probeAgyProfileModels(
   profileDir: string,
   binPath?: string | null,
   options?: ProbeAgyModelsOptions,
 ): Promise<ProbeAgyModelsResult> {
-  if (!isAgyOnboardingSupported(options?.platform ?? process.platform)) {
-    return Promise.resolve({
+  const platform = options?.platform ?? process.platform;
+  if (!isAgyOnboardingSupported(platform)) {
+    return {
       authenticated: false,
       models: [],
       error: AGY_MACOS_KEYCHAIN_LIMITATION,
-    });
+    };
   }
 
   const exe = binPath ?? resolveAgyExecutable();
   if (!exe) {
-    return Promise.resolve({
+    return {
       authenticated: false,
       models: [],
       error: 'Antigravity CLI (agy) executable not found.',
-    });
+    };
   }
 
   if (options?.signal?.aborted) {
-    return Promise.resolve({
+    return {
       authenticated: false,
       models: [],
       error: 'Model probe cancelled.',
       aborted: true,
-    });
+    };
+  }
+
+  if (platform === 'darwin') {
+    try {
+      await reconcileAgyProfileRecovery(profileDir);
+      await ensureIsolatedProfileKeychain(profileDir);
+    } catch (err: any) {
+      return {
+        authenticated: false,
+        models: [],
+        error: `Dedicated macOS profile Keychain preparation failed: ${sanitizeWorkerOutput(err?.message || String(err))}`,
+      };
+    }
   }
 
   const timeoutMs = Math.max(1, options?.timeoutMs ?? PROBE_TIMEOUT_MS);
@@ -361,10 +395,7 @@ export function probeAgyProfileModels(
 const AGY_SANDBOX_AUTH_REL_PATHS = [
   '.gemini/antigravity-cli/antigravity-oauth-token',
   '.gemini/jetski-standalone-oauth-token',
-  '.gemini/antigravity-cli/jetski_state.pbtxt',
-  '.gemini/antigravity-cli/installation_id',
-  '.gemini/antigravity-cli/cache/default_project_id.txt',
-  '.gemini/antigravity-cli/cache/onboarding.json',
+  ...AGY_SYNCED_AUTH_REL_PATHS,
 ];
 
 export function collectAgySandboxSeedFiles(
@@ -380,11 +411,24 @@ export function collectAgySandboxSeedFiles(
   return seedHomeFiles;
 }
 
-export function hasAgyAuthTokenSeed(profileDir: string): boolean {
-  return (
+export function hasAgyAuthTokenSeed(
+  profileDir: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (
     fs.existsSync(path.join(profileDir, '.gemini/antigravity-cli/antigravity-oauth-token')) ||
     fs.existsSync(path.join(profileDir, '.gemini/jetski-standalone-oauth-token'))
-  );
+  ) {
+    return true;
+  }
+  if (platform === 'darwin') {
+    return (
+      fs.existsSync(profileKeychainPath(profileDir)) &&
+      fs.existsSync(path.join(profileDir, '.dupond-keychain-secret.enc')) &&
+      fs.existsSync(path.join(profileDir, AGY_CREDENTIAL_USER_SCOPE_REL))
+    );
+  }
+  return false;
 }
 
 /**
@@ -397,7 +441,8 @@ export async function verifyAgySandboxPortability(
   sandbox: SandboxExecutor = defaultSandboxExecutor,
   options?: { platform?: NodeJS.Platform },
 ): Promise<{ ok: boolean; exitCode: number; modelsCount: number; error?: string }> {
-  if (!isAgyOnboardingSupported(options?.platform ?? process.platform)) {
+  const platform = options?.platform ?? process.platform;
+  if (!isAgyOnboardingSupported(platform)) {
     return { ok: false, exitCode: -1, modelsCount: 0, error: AGY_MACOS_KEYCHAIN_LIMITATION };
   }
 
@@ -407,23 +452,37 @@ export async function verifyAgySandboxPortability(
   }
 
   const seedHomeFiles = collectAgySandboxSeedFiles(profileDir);
-
   const realBin = fs.realpathSync(exe);
-  const res = await sandbox.execute({
-    worktreePath,
-    command: exe,
-    args: ['models'],
-    rawArgv: true,
-    timeoutMs: 12_000,
-    allowNetwork: true,
-    gitReadOnly: true,
-    extraReadPaths: [exe, path.dirname(exe), realBin, path.dirname(realBin)],
-    seedHomeFiles,
-    env: {
-      ANTIGRAVITY_DISABLE_EMBEDDED_RIPGREP: 'true',
-      TERM: 'dumb',
-    },
-  });
+
+  const runProbe = async (
+    prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void>,
+    onExecutionStarted?: (identity: import('../sandbox/sandboxExecutor.js').SandboxExecutionIdentity) => void,
+  ) =>
+    sandbox.execute({
+      worktreePath,
+      command: exe,
+      args: ['models'],
+      rawArgv: true,
+      timeoutMs: 12_000,
+      allowNetwork: true,
+      gitReadOnly: true,
+      extraReadPaths: [exe, path.dirname(exe), realBin, path.dirname(realBin)],
+      seedHomeFiles,
+      seedHomeContents: [AGY_MINIMAL_SANDBOX_CONFIG],
+      ...(prepareSandboxHome ? { prepareSandboxHome, preserveSandboxHome: true } : {}),
+      ...(onExecutionStarted ? { onExecutionStarted } : {}),
+      env: {
+        ANTIGRAVITY_DISABLE_EMBEDDED_RIPGREP: 'true',
+        TERM: 'dumb',
+      },
+    });
+
+  const res =
+    platform === 'darwin'
+      ? await runWithIsolatedAgyProfile(profileDir, ({ prepareSandboxHome, onExecutionStarted }) =>
+          runProbe(prepareSandboxHome, onExecutionStarted),
+        )
+      : await runProbe();
 
   const models = res.stdout
     .split(/\r?\n/)
@@ -789,7 +848,7 @@ export class AgyAuthSessionManager {
     const exe = resolveAgyExecutable();
     const version = exe ? probeAgyVersion(exe) : null;
     const profileDir = resolveAgyProfileDir();
-    const credentialsPresent = hasAgyAuthTokenSeed(profileDir);
+    const credentialsPresent = hasAgyAuthTokenSeed(profileDir, this.platform);
     const profileCheck = await probeAgyProfileModels(profileDir, exe, { platform: this.platform });
     const onboardingSupported = isAgyOnboardingSupported(this.platform);
     const onboardingUnavailableReason = onboardingSupported ? undefined : AGY_MACOS_KEYCHAIN_LIMITATION;
@@ -891,6 +950,12 @@ export class AgyAuthSessionManager {
 
       const ttlMs = this.getTtlMs();
       const loginSessionId = crypto.randomUUID();
+
+      if (this.platform === 'darwin') {
+        await reconcileAgyProfileRecovery(profileDir);
+        await ensureIsolatedProfileKeychain(profileDir);
+        rotateAgyProfileAuthEpoch(profileDir);
+      }
 
       // Login-only invocation: run `agy` with NO prompt/arguments inside a PTY so no inference runs.
       const child = spawn('python3', ['-c', PTY_BRIDGE_PY, exe], {
@@ -1193,6 +1258,18 @@ export class AgyAuthSessionManager {
         if (authenticated && Date.now() < session.expiresAt) {
           session.state = 'completed';
           await this.terminateSessionProcess(session);
+          if (this.platform === 'darwin') {
+            const extracted = await extractAndValidateFromHome(session.profileDir);
+            const meta = readAgyProfileMeta(session.profileDir);
+            writeAgyProfileMeta(session.profileDir, {
+              version: 1,
+              generation: meta.generation + 1,
+              authEpoch: meta.authEpoch,
+              boundEmail: extracted.credential.idTokenEmail,
+              ...(extracted.userScope ? { boundUserScope: extracted.userScope } : {}),
+              updatedAt: new Date().toISOString(),
+            });
+          }
           return { state: 'completed', authenticated: true, modelsCount };
         }
 

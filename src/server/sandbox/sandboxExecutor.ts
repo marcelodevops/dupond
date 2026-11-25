@@ -1,5 +1,5 @@
 import { DomainError } from '../utils/errors';
-import { spawn, spawnSync, ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, ChildProcess } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -28,8 +28,25 @@ export interface SandboxOptions {
   seedHomeFiles?: Array<{ sourcePath: string; targetRelToHome: string; required?: boolean }>;
   /** Explicit synthesized files to write into the sandbox's private HOME (e.g. hardened settings.json) */
   seedHomeContents?: Array<{ content: string; targetRelToHome: string; mode?: number; required?: boolean }>;
+  /** Optional host-side hook invoked with the exact ephemeral sandbox HOME before spawning */
+  prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void> | void;
+  /** Keep the ephemeral sandbox HOME on disk after execution so host recovery/sync can extract state */
+  preserveSandboxHome?: boolean;
+  /** Invoked synchronously right after spawn with the actual process-group / container identity */
+  onExecutionStarted?: (identity: SandboxExecutionIdentity) => void;
   /** Optional incremental output callback fired as stdout/stderr chunks arrive */
   onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
+}
+
+export interface SandboxExecutionIdentity {
+  sandboxHomeDir: string;
+  mode: 'process_group' | 'container';
+  pid?: number;
+  pgid?: number;
+  startedAtMs: number;
+  processStartTime?: string;
+  containerName?: string;
+  containerRuntime?: 'docker' | 'podman';
 }
 
 export interface SandboxExecutionResult {
@@ -556,6 +573,9 @@ ${networkRule}
           if (seed.required !== false) throw new Error('Required sandbox policy initialization failed');
         }
       }
+      if (options.prepareSandboxHome) {
+        await options.prepareSandboxHome(realTmp);
+      }
     } catch {
       fs.rmSync(realTmp, { recursive: true, force: true });
       throw new DomainError('Prerequisite missing: Required sandbox initialization failed; no worker launched');
@@ -719,6 +739,29 @@ ${networkRule}
         this.activeProcesses.set(options.runId, child);
       }
 
+      if (options.onExecutionStarted && child.pid) {
+        let processStartTime: string | undefined;
+        try {
+          processStartTime = execFileSync('/bin/ps', ['-p', String(child.pid), '-o', 'lstart='], {
+            encoding: 'utf-8',
+            timeout: 1_000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          }).trim() || undefined;
+        } catch {}
+        try {
+          options.onExecutionStarted({
+            sandboxHomeDir: realTmp,
+            mode: containerName ? 'container' : 'process_group',
+            pid: child.pid,
+            pgid: child.pid,
+            startedAtMs: Date.now(),
+            ...(processStartTime ? { processStartTime } : {}),
+            ...(containerName ? { containerName } : {}),
+            ...(containerName ? { containerRuntime: this.hasPodman ? 'podman' : 'docker' } : {}),
+          });
+        } catch {}
+      }
+
       let settled = false;
       const onAbort = () => {
         killed = true;
@@ -778,10 +821,12 @@ ${networkRule}
             this.activeContainers.delete(options.runId);
           }
         }
-        try {
-          fs.rmSync(sandboxTmp, { recursive: true, force: true });
-        } catch {
-          // ignore cleanup errors
+        if (!options.preserveSandboxHome) {
+          try {
+            fs.rmSync(sandboxTmp, { recursive: true, force: true });
+          } catch {
+            // ignore cleanup errors
+          }
         }
 
         const durationMs = Date.now() - startTime;
@@ -807,10 +852,12 @@ ${networkRule}
             this.activeContainers.delete(options.runId);
           }
         }
-        try {
-          fs.rmSync(sandboxTmp, { recursive: true, force: true });
-        } catch {
-          // ignore
+        if (!options.preserveSandboxHome) {
+          try {
+            fs.rmSync(sandboxTmp, { recursive: true, force: true });
+          } catch {
+            // ignore
+          }
         }
 
         const durationMs = Date.now() - startTime;

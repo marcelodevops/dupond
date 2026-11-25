@@ -23,6 +23,7 @@ import {
   resolveAgyExecutable,
   resolveAgyProfileDir,
 } from './agyAuthManager.js';
+import { AGY_MINIMAL_SANDBOX_CONFIG, runWithIsolatedAgyProfile } from './agyKeychainPersistence.js';
 
 export const DEFAULT_AGY_MODEL =
   process.env.DUPOND_AGY_MODEL?.trim() || 'gemini-3.8-flash-medium';
@@ -291,7 +292,7 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
     }
 
     const profileDir = resolveAgyProfileDir();
-    if (!hasAgyAuthTokenSeed(profileDir)) {
+    if (!hasAgyAuthTokenSeed(profileDir, this.platform)) {
       return {
         available: false,
         error:
@@ -358,7 +359,7 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
 
     const profileDir = resolveAgyProfileDir();
     const seedHomeFiles = collectAgySandboxSeedFiles(profileDir);
-    if (!hasAgyAuthTokenSeed(profileDir) || seedHomeFiles.length === 0) {
+    if (!hasAgyAuthTokenSeed(profileDir, this.platform) || seedHomeFiles.length === 0) {
       return {
         success: false,
         filesModified: [],
@@ -399,23 +400,59 @@ export class AgyCodingWorkerAdapter implements CodingWorkerAdapter {
     ];
 
     logs.push(`[agy] Executing non-interactive coding run with model "${this.model}" in isolated sandbox`);
+    context.onLog?.(logs[logs.length - 1]);
 
-    const sbRes = await this.sandbox.execute({
-      worktreePath: realWorktree,
-      command: exe,
-      args,
-      rawArgv: true,
-      timeoutMs: context.timeoutMs || 180_000,
-      allowNetwork: true,
-      gitReadOnly: true,
-      denyWritePaths: collectDenyWritePaths(realWorktree, context.protectedPaths),
-      denyReadPaths: AGY_REPO_CONFIG_DENY_READ_PATHS,
-      extraReadPaths: collectExtraReadPaths(exe),
-      seedHomeFiles,
-      seedHomeContents: AGY_SANDBOX_SEED_CONTENTS,
-      env: buildAgySandboxEnv(),
-      abortSignal: context.abortSignal,
-    });
+    const runSandbox = (
+      prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void>,
+      onExecutionStarted?: (identity: import('../sandbox/sandboxExecutor.js').SandboxExecutionIdentity) => void,
+    ) =>
+      this.sandbox.execute({
+        worktreePath: realWorktree,
+        command: exe,
+        args,
+        rawArgv: true,
+        timeoutMs: context.timeoutMs || 180_000,
+        allowNetwork: true,
+        gitReadOnly: true,
+        denyWritePaths: collectDenyWritePaths(realWorktree, context.protectedPaths),
+        denyReadPaths: AGY_REPO_CONFIG_DENY_READ_PATHS,
+        extraReadPaths: collectExtraReadPaths(exe),
+        seedHomeFiles,
+        seedHomeContents: [...AGY_SANDBOX_SEED_CONTENTS, AGY_MINIMAL_SANDBOX_CONFIG],
+        ...(prepareSandboxHome ? { prepareSandboxHome, preserveSandboxHome: true } : {}),
+        ...(onExecutionStarted ? { onExecutionStarted } : {}),
+        env: buildAgySandboxEnv(),
+        abortSignal: context.abortSignal,
+        onOutput: context.onLog
+          ? (_stream, chunk) => {
+              const sanitized = sanitizeWorkerOutput(chunk);
+              if (sanitized) context.onLog?.(sanitized);
+            }
+          : undefined,
+      });
+
+    let sbRes: Awaited<ReturnType<SandboxExecutor['execute']>>;
+    try {
+      sbRes =
+        this.platform === 'darwin'
+          ? await runWithIsolatedAgyProfile(profileDir, ({ prepareSandboxHome, onExecutionStarted }) =>
+              runSandbox(prepareSandboxHome, onExecutionStarted),
+            )
+          : await runSandbox();
+    } catch (err: any) {
+      const msg = sanitizeWorkerOutput(err?.message || String(err));
+      logs.push(`[agy] Keychain/persistence error: ${msg}`);
+      return {
+        success: false,
+        filesModified: [],
+        diff: '',
+        commitMessage: '',
+        logs,
+        durationMs: Date.now() - startTime,
+        errorMessage: msg,
+        nonRetryable: true,
+      };
+    }
 
     const jsonInfo = extractAgyJsonPayload(sbRes.stdout);
     const combinedRawOutput = [sbRes.stdout, sbRes.stderr, jsonInfo.errorText || '']
