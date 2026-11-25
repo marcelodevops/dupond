@@ -251,10 +251,9 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   }, [onClose]);
 
   useEffect(() => {
-    if (isExecutingStep) {
-      setSelectedRunId(undefined);
-    }
-  }, [isExecutingStep]);
+    setSelectedRunId(undefined);
+    setShowLiveLogs(false);
+  }, [projectId, task.id]);
 
   const isRunActivelyExecuting =
     isExecutingStep ||
@@ -440,6 +439,7 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
   // Run agent execution step on this task
   const handleRunAgent = async () => {
     if (!assignee) return;
+    setSelectedRunId(undefined);
     await onExecuteAgentOnTask(task, assignee);
   };
 
@@ -1791,9 +1791,12 @@ const TaskDetailModalBody: React.FC<Omit<TaskDetailModalProps, 'task' | 'project
 
         {/* Live Execution Progress & Logs Drawer */}
         {isRunActivelyExecuting && (() => {
-          const activeAttempt =
-            runEvidence?.attempts?.find((a) => a.status === 'running') ||
-            runEvidence?.attempts?.[runEvidence.attempts.length - 1];
+          const isCurrentRunActive =
+            runEvidence?.run?.status === 'running' || runEvidence?.run?.status === 'pending';
+          const activeAttempt = isCurrentRunActive
+            ? runEvidence?.attempts?.find((a) => a.status === 'running') ||
+              runEvidence?.attempts?.[runEvidence.attempts.length - 1]
+            : undefined;
           const logLines = (activeAttempt?.logs || '').split('\n').filter(Boolean);
           const latestLine = logLines[logLines.length - 1] || 'Preparing workspace & launching worker...';
           const mins = Math.floor(elapsedSeconds / 60);
