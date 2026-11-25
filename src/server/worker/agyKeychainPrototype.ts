@@ -108,8 +108,34 @@ export async function withProfileKeychainLock<T>(
     while (lockFd === null) {
       try {
         lockFd = fs.openSync(lockPath, 'wx', 0o600);
+        fs.writeFileSync(lockFd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
       } catch (err: any) {
-        if (err?.code !== 'EEXIST' || Date.now() >= deadline) {
+        if (err?.code !== 'EEXIST') {
+          throw new Error(`Failed to acquire profile Keychain lock at ${lockPath}: ${err?.message || err}`);
+        }
+        // Check whether a crashed process left a stale lockfile behind.
+        try {
+          const rawLock = fs.readFileSync(lockPath, 'utf-8').trim();
+          const parsed = rawLock ? JSON.parse(rawLock) : null;
+          const ownerPid = typeof parsed?.pid === 'number' ? parsed.pid : null;
+          if (ownerPid !== null && ownerPid !== process.pid) {
+            let alive = true;
+            try {
+              process.kill(ownerPid, 0);
+            } catch (killErr: any) {
+              if (killErr?.code === 'ESRCH') {
+                alive = false;
+              }
+            }
+            if (!alive) {
+              try {
+                fs.unlinkSync(lockPath);
+                continue;
+              } catch {}
+            }
+          }
+        } catch {}
+        if (Date.now() >= deadline) {
           throw new Error(`Timed out waiting for profile Keychain lock at ${lockPath}`);
         }
         await new Promise((r) => setTimeout(r, 25));

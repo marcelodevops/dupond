@@ -30,6 +30,8 @@ export interface SandboxOptions {
   seedHomeContents?: Array<{ content: string; targetRelToHome: string; mode?: number; required?: boolean }>;
   /** Optional host-side hook invoked with the exact ephemeral sandbox HOME before spawning */
   prepareSandboxHome?: (sandboxHomeDir: string) => Promise<void> | void;
+  /** Keep the ephemeral sandbox HOME on disk after execution so host recovery/sync can extract state */
+  preserveSandboxHome?: boolean;
   /** Optional incremental output callback fired as stdout/stderr chunks arrive */
   onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
 }
@@ -783,10 +785,12 @@ ${networkRule}
             this.activeContainers.delete(options.runId);
           }
         }
-        try {
-          fs.rmSync(sandboxTmp, { recursive: true, force: true });
-        } catch {
-          // ignore cleanup errors
+        if (!options.preserveSandboxHome) {
+          try {
+            fs.rmSync(sandboxTmp, { recursive: true, force: true });
+          } catch {
+            // ignore cleanup errors
+          }
         }
 
         const durationMs = Date.now() - startTime;
@@ -812,10 +816,12 @@ ${networkRule}
             this.activeContainers.delete(options.runId);
           }
         }
-        try {
-          fs.rmSync(sandboxTmp, { recursive: true, force: true });
-        } catch {
-          // ignore
+        if (!options.preserveSandboxHome) {
+          try {
+            fs.rmSync(sandboxTmp, { recursive: true, force: true });
+          } catch {
+            // ignore
+          }
         }
 
         const durationMs = Date.now() - startTime;
