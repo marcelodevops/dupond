@@ -114,6 +114,62 @@ describe('Live execution progress and log streaming', () => {
         finalAttempt.logs?.includes('[Mock] Step 2: Writing code'),
         'Expected streamed logs to be preserved after worker exception',
       );
+
+      // 3. Verify secret redaction before persistence & post-finalization late-onLog guard
+      const secretTask = store.createTask({
+        key: 'LOG-102',
+        title: 'Secret redaction and late-log guard',
+        description: 'Verify secrets are redacted before SQLite persistence and late logs cannot overwrite final state',
+        status: 'todo',
+        priority: 'medium',
+        targetRepo: 'disposable-test/repo',
+        targetRepoPath: repoDir,
+        baseCommit: 'HEAD',
+        allowedPaths: ['src/**'],
+        protectedPaths: [],
+        verificationCommands: ['node -e "process.exit(0)"'],
+        acceptanceCriteria: [{ id: 'c1', title: 'Exit 0', completed: false, checkCommand: 'node -e "process.exit(0)"' }],
+        workerConfig: { provider: 'gemini', model: 'gemini-3.8-flash' },
+        maxAttempts: 1,
+        timeoutSeconds: 30,
+        requireApproval: false,
+      });
+
+      const secretRunId = `run-secret-${Date.now()}`;
+      let capturedOnLog: ((line: string) => void) | undefined;
+      await coordinator.executeTaskRun({
+        task: secretTask,
+        runId: secretRunId,
+        worker: {
+          name: 'secret_and_late_log_worker',
+          provider: 'gemini',
+          model: 'gemini-3.8-flash',
+          async isAvailable() { return { available: true }; },
+          async execute(ctx) {
+            capturedOnLog = ctx.onLog;
+            // Emit synthetic secrets (Bearer, Gemini, OpenAI, GitHub) into onLog
+            ctx.onLog?.('Header: Bearer ya29.synthSecretToken1234567890');
+            ctx.onLog?.('Keys: AIzaSySynthKey12345678901234567890 sk-proj-synthOpenAIKey1234567890 ghp_synthGitHubToken12345');
+            throw new Error('Failed with Bearer ghp_synthErrToken123456');
+          },
+        },
+        store,
+        workspaceManager: wm,
+        verifier,
+      });
+
+      // Fire late onLog after attempt already finalized
+      capturedOnLog?.('LATE_OVERWRITE_SHOULD_BE_IGNORED');
+      await new Promise((r) => setTimeout(r, 450));
+
+      const secretAttempt = store.listAttempts(secretRunId)[0];
+      assert.strictEqual(secretAttempt.status, 'failed');
+      assert.ok(!secretAttempt.logs?.includes('ya29.synthSecretToken'), 'Bearer/ya29 secret must be redacted before persistence');
+      assert.ok(!secretAttempt.logs?.includes('AIzaSySynthKey'), 'Gemini key must be redacted before persistence');
+      assert.ok(!secretAttempt.logs?.includes('sk-proj-synthOpenAIKey'), 'OpenAI key must be redacted before persistence');
+      assert.ok(!secretAttempt.logs?.includes('ghp_synthGitHubToken'), 'GitHub token must be redacted before persistence');
+      assert.ok(!secretAttempt.errorMessage?.includes('ghp_synthErrToken'), 'Error message secret must be redacted');
+      assert.ok(!secretAttempt.logs?.includes('LATE_OVERWRITE_SHOULD_BE_IGNORED'), 'Late onLog must not overwrite finalized attempt');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       fs.rmSync(isolatedDir, { recursive: true, force: true });
